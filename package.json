@@ -1,0 +1,42 @@
+{
+  "name": "ksnote",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local-first smart workspace for notes, code, tables, images, and diagrams.",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "build": "vite build",
+    "preview": "vite preview",
+    "desktop": "electron ."
+  },
+  "dependencies": {
+    "@tiptap/extension-color": "^3.27.4",
+    "@tiptap/extension-highlight": "^3.27.4",
+    "@tiptap/extension-image": "^3.27.4",
+    "@tiptap/extension-table": "^3.27.4",
+    "@tiptap/extension-table-cell": "^3.27.4",
+    "@tiptap/extension-table-header": "^3.27.4",
+    "@tiptap/extension-table-row": "^3.27.4",
+    "@tiptap/extension-text-align": "^3.27.4",
+    "@tiptap/extension-text-style": "^3.27.4",
+    "@tiptap/extension-underline": "^3.27.4",
+    "@tiptap/pm": "^3.27.4",
+    "@tiptap/react": "^3.27.4",
+    "@tiptap/starter-kit": "^3.27.4",
+    "@vitejs/plugin-react": "latest",
+    "highlight.js": "latest",
+    "lucide-react": "latest",
+    "marked": "latest",
+    "mermaid": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "concurrently": "latest",
+    "electron": "latest",
+    "wait-on": "latest"
+  }
+}

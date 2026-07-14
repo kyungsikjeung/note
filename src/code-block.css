@@ -1,0 +1,1 @@
+.mori-rich-content pre:focus-within:after{content:'끝에서 → 를 눌러 코드 블록 나가기';position:absolute;right:9px;bottom:6px;color:#718486;font:8px var(--body);pointer-events:none}
