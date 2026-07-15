@@ -76,12 +76,16 @@ import {
   ArrowDown,
   ArrowLeft,
   ArrowRight,
+  History,
+  Square,
+  Globe2,
 } from "lucide-react";
 import "./rich-editor.css";
 import "./palette-fix.css";
 import "./slash-rich.css";
 import "./image-block.css";
 import "./ai-dock.css";
+import "./ai-sessions.css";
 import "./code-block.css";
 import "./mermaid-block.css";
 import "./view-modes.css";
@@ -650,6 +654,7 @@ function GridPicker({ onPick, onClose }) {
 
 export default function RichDocumentEditor({
   noteId,
+  projectId,
   content,
   mode = "edit",
   preferredProvider = "codex",
@@ -686,9 +691,24 @@ export default function RichDocumentEditor({
     [aiProvider, setAiProvider] = useState(preferredProvider),
     [aiLoading, setAiLoading] = useState(false),
     [aiResult, setAiResult] = useState(null),
-    [aiError, setAiError] = useState("");
+    [aiError, setAiError] = useState(""),
+    [aiStream, setAiStream] = useState(""),
+    [aiSessionScope, setAiSessionScope] = useState("note"),
+    [aiHistoryOpen, setAiHistoryOpen] = useState(false),
+    [aiSessions, setAiSessions] = useState(() => {
+      try { return JSON.parse(localStorage.getItem("ksnote-ai-prompt-sessions")) || []; }
+      catch { return []; }
+    });
   const aiTargetRef = useRef(null);
+  const aiRequestRef = useRef(null);
   useEffect(() => setAiProvider(preferredProvider), [preferredProvider]);
+  useEffect(() => {
+    localStorage.setItem("ksnote-ai-prompt-sessions", JSON.stringify(aiSessions.slice(0, 100)));
+  }, [aiSessions]);
+  useEffect(() => window.ksnoteAI?.onChunk?.(({ requestId, chunk }) => {
+    if (requestId === aiRequestRef.current) setAiStream((value) => value + chunk);
+  }), []);
+  const visibleAiSessions = aiSessions.filter((session) => aiSessionScope === "project" ? session.projectId === projectId : session.noteId === noteId);
   const slashCommands = [
     {
       id: "table",
@@ -1383,11 +1403,17 @@ export default function RichDocumentEditor({
         : target === "selection"
           ? { from, to }
           : null;
-    aiTargetRef.current = { target, range };
+    const originalHtml = editor.getHTML();
+    aiTargetRef.current = { target, range, originalHtml };
+    if (aiMode === "research" && !window.confirm("Atlassian Rovo 조사 모드로 실행합니다. 입력한 프롬프트와 현재 노트 내용이 외부 서비스로 전송될 수 있습니다. 계속할까요?")) return;
     setAiOpen(true);
     setAiLoading(true);
     setAiError("");
     setAiResult(null);
+    setAiStream("");
+    const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    aiRequestRef.current = requestId;
+    const sessionBase = { id: requestId, noteId, projectId, instruction: instruction.trim(), mode: aiMode, provider: aiProvider, target, createdAt: Date.now() };
     try {
       if (!window.ksnoteAI?.run)
         throw new Error(
@@ -1401,24 +1427,42 @@ export default function RichDocumentEditor({
         content: editor.getHTML(),
         selection,
         target,
+        requestId,
       });
-      setAiResult({ output, instruction, mode: aiMode, target });
+      setAiResult({ output, instruction, mode: aiMode, target, originalHtml });
+      setAiSessions((sessions) => [{ ...sessionBase, output, status: "done" }, ...sessions].slice(0, 100));
     } catch (err) {
-      setAiError(err.message || "AI 실행에 실패했습니다.");
+      const message = err.message || "AI 실행에 실패했습니다.";
+      setAiError(message);
+      setAiSessions((sessions) => [{ ...sessionBase, error: message, status: "error" }, ...sessions].slice(0, 100));
     } finally {
       setAiLoading(false);
+      aiRequestRef.current = null;
     }
+  };
+  const cancelAI = async () => {
+    if (!aiRequestRef.current) return;
+    await window.ksnoteAI?.cancel?.(aiRequestRef.current);
+    setAiLoading(false); setAiError("요청을 취소했습니다."); aiRequestRef.current = null;
   };
   const cleanAIHtml = (value) =>
     value
       .replace(/^```(?:html)?\s*/i, "")
       .replace(/```\s*$/, "")
       .trim();
+  const openAISession = (session) => {
+    setAiPrompt(session.instruction); setAiMode(session.mode); setAiProvider(session.provider);
+    setAiError(session.error || "");
+    setAiResult(session.output ? { output: session.output, instruction: session.instruction, mode: session.mode, target: session.target, replay: true } : null);
+    aiTargetRef.current = { target: session.target, range: null };
+    setAiHistoryOpen(false);
+  };
+  const startNewAISession = () => { setAiPrompt(""); setAiResult(null); setAiError(""); setAiHistoryOpen(false); };
   const applyAI = (action = "replace") => {
     if (!aiResult) return;
     const target = aiTargetRef.current;
     const output = cleanAIHtml(aiResult.output);
-    if (aiResult.mode === "ask" || action === "insert") {
+    if (aiResult.mode === "ask" || aiResult.mode === "research" || action === "insert") {
       editor
         .chain()
         .focus()
@@ -1427,8 +1471,11 @@ export default function RichDocumentEditor({
         )
         .run();
     } else if (target?.target === "note") {
+      if (target.originalHtml !== editor.getHTML()) { setAiError("AI 실행 후 노트가 변경되었습니다. 결과를 다시 요청하거나 노트에 삽입해 주세요."); return; }
+      if (!window.confirm("AI 결과로 전체 노트를 교체합니다. 변경 내용은 Undo로 되돌릴 수 있습니다. 계속할까요?")) return;
       editor.commands.setContent(output);
     } else if (target?.range) {
+      if (target.originalHtml !== editor.getHTML()) { setAiError("선택 이후 노트가 변경되어 안전하게 적용할 수 없습니다. 결과를 다시 요청해 주세요."); return; }
       editor.chain().focus().insertContentAt(target.range, output).run();
     }
     setAiResult(null);
@@ -1983,25 +2030,40 @@ export default function RichDocumentEditor({
                 <b>KsNote AI</b>
                 <small>노트 내용을 읽고 편집할 수 있습니다</small>
               </span>
-              <button onClick={() => setAiOpen(false)}>
-                <X />
-              </button>
+              <nav className="ai-header-actions">
+                <button title="새 요청" onClick={startNewAISession}><Plus /></button>
+                <button title="Prompt 세션" className={aiHistoryOpen ? "active" : ""} onClick={() => setAiHistoryOpen((value) => !value)}><History /></button>
+                <button title="닫기" onClick={() => setAiOpen(false)}><X /></button>
+              </nav>
             </header>
+            {aiHistoryOpen && (
+              <section className="ai-session-panel" aria-label="AI Prompt 세션 목록">
+                <div className="ai-session-heading"><b>Prompt 세션</b><small>{visibleAiSessions.length}개</small><button className={aiSessionScope === "note" ? "active" : ""} onClick={() => setAiSessionScope("note")}>현재 노트</button><button className={aiSessionScope === "project" ? "active" : ""} onClick={() => setAiSessionScope("project")}>프로젝트</button></div>
+                {visibleAiSessions.length === 0 ? <p className="ai-session-empty">저장된 AI 요청이 아직 없습니다.</p> : (
+                  <div className="ai-session-list">{visibleAiSessions.map((session) => (
+                    <article key={session.id} className="ai-session-item">
+                      <button className="ai-session-main" onClick={() => openAISession(session)}>
+                        <span className={`ai-session-status ${session.status}`} />
+                        <span><b>{session.instruction}</b><small>{session.provider === "codex" ? "Codex" : "Claude"} · {session.mode === "edit" ? "노트 편집" : session.mode === "research" ? "Rovo 조사" : "질문"} · {new Date(session.createdAt).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</small></span>
+                      </button>
+                      <button className="ai-session-delete" title="세션 삭제" onClick={() => setAiSessions((sessions) => sessions.filter((item) => item.id !== session.id))}><Trash2 /></button>
+                    </article>
+                  ))}</div>
+                )}
+              </section>
+            )}
             {(aiResult || aiError || aiLoading) && (
               <div className="ai-response">
                 {aiLoading && (
-                  <div className="ai-thinking">
-                    <LoaderCircle />{" "}
-                    {aiProvider === "codex" ? "Codex" : "Claude"}가 노트를 읽고
-                    있습니다…
-                  </div>
+                  <><div className="ai-thinking"><LoaderCircle /> {aiProvider === "codex" ? "Codex" : "Claude"}가 {aiMode === "research" ? "Atlassian 자료를 조사하고" : "노트를 읽고"} 있습니다…<button className="ai-cancel-run" onClick={cancelAI}><Square /> 중지</button></div>{aiStream && <div className="ai-stream-text">{aiStream}</div>}</>
                 )}
                 {aiError && <div className="ai-error">{aiError}</div>}
                 {aiResult && (
                   <>
+                    {aiResult.mode === "edit" && !aiResult.replay && <div className="ai-diff"><section><b>변경 전</b><pre>{aiResult.originalHtml}</pre></section><section><b>변경 후</b><pre>{cleanAIHtml(aiResult.output)}</pre></section></div>}
                     <div className="ai-result-text">{aiResult.output}</div>
                     <div className="ai-result-actions">
-                      {aiResult.mode === "edit" && (
+                      {aiResult.mode === "edit" && !aiResult.replay && (
                         <button
                           className="apply"
                           onClick={() => applyAI("replace")}
@@ -2033,7 +2095,7 @@ export default function RichDocumentEditor({
                 placeholder={
                   aiMode === "edit"
                     ? "예: 이 노트를 3줄로 요약하고 표로 정리해줘"
-                    : "예: 이 문서의 핵심 결정 사항이 뭐야?"
+                    : aiMode === "research" ? "Confluence 또는 Jira 링크를 붙여 넣고 조사할 내용을 적어주세요" : "예: 이 문서의 핵심 결정 사항이 뭐야?"
                 }
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
@@ -2058,6 +2120,7 @@ export default function RichDocumentEditor({
                   >
                     <MessageSquare /> 질문
                   </button>
+                  <button type="button" className={aiMode === "research" ? "active research" : ""} onClick={() => { setAiMode("research"); setAiProvider("codex"); }}><Globe2 /> Rovo 조사</button>
                 </span>
                 <select
                   value={aiProvider}

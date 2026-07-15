@@ -10,6 +10,7 @@ const { Document, Packer, Paragraph, HeadingLevel, Table: DocxTable, TableRow: D
 const isDev = !app.isPackaged;
 let noteDb;
 let noteDbPath;
+const aiProcesses = new Map();
 
 const plainText = (value) => String(value || "")
   .replace(/<br\s*\/?>/gi, "\n")
@@ -215,13 +216,14 @@ ipcMain.handle(
   },
 );
 
-function runCli(command, args, input) {
+function runCli(command, args, input, { requestId, onChunk } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: app.getPath("documents"),
       shell: process.platform === "win32",
       windowsHide: true,
     });
+    if (requestId) aiProcesses.set(requestId, child);
     let stdout = "",
       stderr = "";
     const timer = setTimeout(() => {
@@ -229,7 +231,9 @@ function runCli(command, args, input) {
       reject(new Error("AI 응답 시간이 초과되었습니다."));
     }, 180000);
     child.stdout.on("data", (d) => {
-      if (stdout.length < 4_000_000) stdout += d.toString();
+      const chunk = d.toString();
+      if (stdout.length < 4_000_000) stdout += chunk;
+      onChunk?.(chunk);
     });
     child.stderr.on("data", (d) => {
       if (stderr.length < 200_000) stderr += d.toString();
@@ -240,6 +244,7 @@ function runCli(command, args, input) {
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (requestId) aiProcesses.delete(requestId);
       code === 0
         ? resolve(stdout.trim())
         : reject(new Error(formatCliError(stderr, command, code)));
@@ -259,7 +264,9 @@ function formatCliError(stderr, command, code) {
 
 ipcMain.handle("ai-run", async (_, request) => {
   const system =
-    request.mode === "ask"
+    request.mode === "research"
+      ? "Use the configured Atlassian Rovo tools to inspect the Jira or Confluence resources explicitly requested by the user. Read only. Answer in Korean. Include source URLs and a Sources section. Never create, update, or delete external content or local files."
+      : request.mode === "ask"
       ? "You answer questions about the supplied note. Answer in Korean, concisely. Do not use tools. Do not modify files."
       : "You are a document editor. Return ONLY the complete replacement HTML for the requested target. Preserve unrelated content and valid semantic HTML. Do not use markdown fences, explanations, or tools.";
   const prompt = `${system}\n\nUSER INSTRUCTION:\n${request.instruction}\n\nTARGET: ${request.target}\n\nNOTE HTML:\n${request.content}\n\nSELECTED TEXT:\n${request.selection || "(none)"}`;
@@ -271,12 +278,11 @@ ipcMain.handle("ai-run", async (_, request) => {
       command,
       ["--print", "--tools", "", "--permission-mode", "plan"],
       prompt,
+      { requestId: request.requestId, onChunk: (chunk) => _.sender.send("ai-chunk", { requestId: request.requestId, chunk }) },
     );
-  return runCli(
-    command,
-    [
+  const codexArgs = [
       "exec",
-      "--ignore-user-config",
+      ...(request.mode === "research" ? [] : ["--ignore-user-config"]),
       "--skip-git-repo-check",
       "--sandbox",
       "read-only",
@@ -284,9 +290,21 @@ ipcMain.handle("ai-run", async (_, request) => {
       "--color",
       "never",
       "-",
-    ],
+    ];
+  return runCli(
+    command,
+    codexArgs,
     prompt,
+    { requestId: request.requestId, onChunk: (chunk) => _.sender.send("ai-chunk", { requestId: request.requestId, chunk }) },
   );
+});
+
+ipcMain.handle("ai-cancel", (_, requestId) => {
+  const child = aiProcesses.get(requestId);
+  if (!child) return false;
+  child.kill();
+  aiProcesses.delete(requestId);
+  return true;
 });
 
 app.whenReady().then(async () => { await initializeStorage(); createWindow(); });

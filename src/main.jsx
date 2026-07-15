@@ -1806,6 +1806,7 @@ function App() {
         )}
         <RichDocumentEditor
           noteId={note.id}
+          projectId={projectId}
           content={note.content}
           mode={mode}
           preferredProvider={agents.defaultProvider}
