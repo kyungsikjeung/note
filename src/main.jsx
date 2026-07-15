@@ -64,6 +64,7 @@ import "./styles.css";
 import "./slash.css";
 import "./settings.css";
 import "./settings-agent.css";
+import "./developer-logs.css";
 import "./table.css";
 import RichDocumentEditor from "./RichDocumentEditor";
 import "./editor-migration.css";
@@ -706,6 +707,10 @@ function App() {
   const dragItem = useRef(null);
   const [revisions, setRevisions] = useState([]);
   const [diagnostics, setDiagnostics] = useState({});
+  const [aiDebugLogs, setAiDebugLogs] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("ksnote-ai-debug-logs")) || []; }
+    catch { return []; }
+  });
   const activeNotes = data.notes.filter((n) => !n.trashed);
   const note =
     activeNotes.find((n) => n.id === noteId) ||
@@ -757,6 +762,11 @@ function App() {
   useEffect(() => {
     localStorage.setItem("mori-prefs", JSON.stringify(prefs));
   }, [prefs]);
+  useEffect(() => {
+    const updateLogs = (event) => setAiDebugLogs(event.detail || []);
+    window.addEventListener("ksnote-ai-debug-log", updateLogs);
+    return () => window.removeEventListener("ksnote-ai-debug-log", updateLogs);
+  }, []);
   useEffect(() => {
     localStorage.setItem("ksnote-agents", JSON.stringify(agents));
   }, [agents]);
@@ -2157,6 +2167,11 @@ function App() {
                   <Shield />
                   보안
                 </button>
+                <button className={settingsTab === "developer" ? "active" : ""} onClick={() => setSettingsTab("developer")}>
+                  <Terminal />
+                  개발자
+                  {prefs.developerMode && <em>{aiDebugLogs.length}</em>}
+                </button>
               </nav>
               <div className="settings-content">
                 {settingsTab === "general" && (
@@ -2605,6 +2620,36 @@ function App() {
                         <input type="checkbox" defaultChecked />
                         <i />
                       </label>
+                    </div>
+                  </>
+                )}
+                {settingsTab === "developer" && (
+                  <>
+                    <div className="setting-title">
+                      <h3>개발자 모드</h3>
+                      <p>Ralph 검증을 위해 AI 질문부터 페이지 반영까지 한 실행 ID로 추적합니다.</p>
+                    </div>
+                    <div className="setting-row">
+                      <span><b>AI 검증 로그</b><small>질문, 응답, 적용 전·후 페이지 HTML을 이 기기에만 최대 50건 저장</small></span>
+                      <label className="switch"><input type="checkbox" checked={Boolean(prefs.developerMode)} onChange={(event) => setPrefs({ ...prefs, developerMode: event.target.checked })} /><i /></label>
+                    </div>
+                    <div className="developer-log-toolbar">
+                      <span><b>Ralph 검증 로그</b><small>{aiDebugLogs.length}개 실행</small></span>
+                      <button disabled={!aiDebugLogs.length} onClick={() => navigator.clipboard.writeText(JSON.stringify(aiDebugLogs, null, 2))}><Copy /> JSON 복사</button>
+                      <button disabled={!aiDebugLogs.length} onClick={() => { localStorage.removeItem("ksnote-ai-debug-logs"); setAiDebugLogs([]); }}><Trash2 /> 초기화</button>
+                    </div>
+                    <div className="developer-log-list">
+                      {!prefs.developerMode ? <p className="developer-log-empty">AI 검증 로그를 켜면 다음 요청부터 기록합니다.</p> : aiDebugLogs.length === 0 ? <p className="developer-log-empty">기록된 AI 실행이 없습니다.</p> : aiDebugLogs.map((log) => (
+                        <details className="developer-log-entry" key={log.requestId}>
+                          <summary><i className={`debug-status ${log.status}`} /><span><b>{log.prompt || "프롬프트 없음"}</b><small>{log.mode} · {log.provider} · {new Date(log.createdAt).toLocaleString("ko-KR")}</small></span><em>{log.status}</em></summary>
+                          <div className="developer-log-flow"><span className={log.prompt ? "ok" : ""}>질문</span><i>→</i><span className={log.response ? "ok" : ""}>응답</span><i>→</i><span className={log.pageAfter ? "ok" : ""}>페이지 반영</span></div>
+                          <label>Request ID<code>{log.requestId}</code></label>
+                          <label>질문<pre>{log.prompt}</pre></label>
+                          <label>AI 응답<pre>{log.response || log.error || "응답 대기 중"}</pre></label>
+                          <label>적용 전 페이지<pre>{log.pageBefore || "캡처 없음"}</pre></label>
+                          <label>적용 후 페이지<pre>{log.pageAfter || "아직 적용되지 않음"}</pre></label>
+                        </details>
+                      ))}
                     </div>
                   </>
                 )}

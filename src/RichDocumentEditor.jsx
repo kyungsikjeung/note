@@ -701,6 +701,19 @@ export default function RichDocumentEditor({
     });
   const aiTargetRef = useRef(null);
   const aiRequestRef = useRef(null);
+  const writeAiDebugLog = (requestId, patch) => {
+    if (!preferences.developerMode) return;
+    try {
+      const key = "ksnote-ai-debug-logs";
+      const logs = JSON.parse(localStorage.getItem(key)) || [];
+      const index = logs.findIndex((item) => item.requestId === requestId);
+      const next = index >= 0
+        ? logs.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch, updatedAt: Date.now() } : item)
+        : [{ requestId, createdAt: Date.now(), updatedAt: Date.now(), ...patch }, ...logs];
+      localStorage.setItem(key, JSON.stringify(next.slice(0, 50)));
+      window.dispatchEvent(new CustomEvent("ksnote-ai-debug-log", { detail: next.slice(0, 50) }));
+    } catch {}
+  };
   useEffect(() => setAiProvider(preferredProvider), [preferredProvider]);
   useEffect(() => {
     localStorage.setItem("ksnote-ai-prompt-sessions", JSON.stringify(aiSessions.slice(0, 100)));
@@ -1413,6 +1426,7 @@ export default function RichDocumentEditor({
     setAiStream("");
     const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     aiRequestRef.current = requestId;
+    writeAiDebugLog(requestId, { status: "running", noteId, projectId, provider: aiProvider, mode: aiMode, target, prompt: instruction.trim(), selection, pageBefore: originalHtml, response: "" });
     const sessionBase = { id: requestId, noteId, projectId, instruction: instruction.trim(), mode: aiMode, provider: aiProvider, target, createdAt: Date.now() };
     try {
       if (!window.ksnoteAI?.run)
@@ -1429,11 +1443,13 @@ export default function RichDocumentEditor({
         target,
         requestId,
       });
-      setAiResult({ output, instruction, mode: aiMode, target, originalHtml });
+      setAiResult({ output, instruction, mode: aiMode, target, originalHtml, requestId });
+      writeAiDebugLog(requestId, { status: "responded", response: output, responseVisible: true });
       setAiSessions((sessions) => [{ ...sessionBase, output, status: "done" }, ...sessions].slice(0, 100));
     } catch (err) {
       const message = err.message || "AI 실행에 실패했습니다.";
       setAiError(message);
+      writeAiDebugLog(requestId, { status: "error", error: message, responseVisible: false });
       setAiSessions((sessions) => [{ ...sessionBase, error: message, status: "error" }, ...sessions].slice(0, 100));
     } finally {
       setAiLoading(false);
@@ -1443,6 +1459,7 @@ export default function RichDocumentEditor({
   const cancelAI = async () => {
     if (!aiRequestRef.current) return;
     await window.ksnoteAI?.cancel?.(aiRequestRef.current);
+    writeAiDebugLog(aiRequestRef.current, { status: "cancelled", response: aiStream, responseVisible: Boolean(aiStream) });
     setAiLoading(false); setAiError("요청을 취소했습니다."); aiRequestRef.current = null;
   };
   const cleanAIHtml = (value) =>
@@ -1453,7 +1470,7 @@ export default function RichDocumentEditor({
   const openAISession = (session) => {
     setAiPrompt(session.instruction); setAiMode(session.mode); setAiProvider(session.provider);
     setAiError(session.error || "");
-    setAiResult(session.output ? { output: session.output, instruction: session.instruction, mode: session.mode, target: session.target, replay: true } : null);
+    setAiResult(session.output ? { output: session.output, instruction: session.instruction, mode: session.mode, target: session.target, requestId: session.id, replay: true } : null);
     aiTargetRef.current = { target: session.target, range: null };
     setAiHistoryOpen(false);
   };
@@ -1480,6 +1497,7 @@ export default function RichDocumentEditor({
     }
     setAiResult(null);
     setAiPrompt("");
+    writeAiDebugLog(aiResult.requestId, { status: "applied", applyAction: action, pageAfter: editor.getHTML(), responseVisible: true });
   };
   return (
     <section
