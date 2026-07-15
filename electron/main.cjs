@@ -242,10 +242,19 @@ function runCli(command, args, input) {
       clearTimeout(timer);
       code === 0
         ? resolve(stdout.trim())
-        : reject(new Error(stderr.trim() || `${command} 실행 실패 (${code})`));
+        : reject(new Error(formatCliError(stderr, command, code)));
     });
     child.stdin.end(input);
   });
+}
+
+function formatCliError(stderr, command, code) {
+  const raw = String(stderr || "").trim();
+  const jsonMessages = Array.from(raw.matchAll(/"message"\s*:\s*"([^"]+)"/g)).map((match) => match[1]);
+  const message = jsonMessages.at(-1) || raw.split(/\r?\n/).reverse().find((line) => /(?:ERROR|error:|unauthorized|authentication|login)/i.test(line)) || raw.split(/\r?\n/).filter(Boolean).at(-1);
+  if (/requires a newer version of Codex/i.test(raw)) return "현재 모델을 사용하려면 Codex CLI 업데이트가 필요합니다. 터미널에서 `codex update`를 실행한 뒤 다시 시도해 주세요.";
+  if (/refresh_token is invalid|unauthorized_client|authorization required|not logged in/i.test(raw)) return "Codex 로그인이 만료되었습니다. 터미널에서 `codex login`으로 다시 로그인해 주세요.";
+  return message?.replace(/^\s*(?:ERROR|error):?\s*/i, "") || `${command} 실행 실패 (${code})`;
 }
 
 ipcMain.handle("ai-run", async (_, request) => {
@@ -267,6 +276,7 @@ ipcMain.handle("ai-run", async (_, request) => {
     command,
     [
       "exec",
+      "--ignore-user-config",
       "--skip-git-repo-check",
       "--sandbox",
       "read-only",

@@ -28,6 +28,10 @@ npm install
 npm run dev
 ```
 
+개발 모드에서는 Vite가 렌더러를 갱신하고, `electron/main.cjs` 또는
+`electron/preload.cjs`가 변경되면 Electron 프로세스도 자동으로 재시작됩니다.
+따라서 IPC 채널을 추가하거나 변경해도 오래된 메인 프로세스가 남지 않습니다.
+
 프로덕션 빌드:
 
 ```powershell
@@ -44,7 +48,7 @@ npm run desktop
 - Mermaid
 - Highlight.js
 - 로컬 CLI 기반 Codex/Claude 실행
-- 현재 데이터 저장소: 브라우저 `localStorage`
+- 현재 데이터 저장소: SQLite + 로컬 assets (`localStorage`는 호환 백업)
 
 ---
 
@@ -300,6 +304,8 @@ npm run desktop
 ## 2. AI 안전 편집
 
 - [x] Codex를 read-only sandbox로 실행
+- [x] 노트 편집 호출은 `--ignore-user-config`로 전역 모델/MCP 설정과 격리
+- [x] Codex 로그인·버전 오류를 사용자용 메시지로 정리
 - [x] Claude 도구 사용을 제한한 print 모드 실행
 - [x] 앱이 계정 비밀번호나 웹 세션 쿠키를 저장하지 않음
 - [x] 사용자 설정 CLI 명령의 위험한 shell 구분자 차단

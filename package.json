@@ -5,7 +5,9 @@
   "description": "A local-first smart workspace for notes, code, tables, images, and diagrams.",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "dev": "concurrently -k -n renderer,electron \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:renderer": "vite --host 127.0.0.1 --port 5173 --strictPort",
+    "dev:electron": "wait-on http://127.0.0.1:5173 && nodemon --watch electron --ext cjs --signal SIGTERM --exec \"electron .\"",
     "build": "vite build",
     "preview": "vite preview",
     "desktop": "electron ."
@@ -48,6 +50,7 @@
   "devDependencies": {
     "concurrently": "latest",
     "electron": "latest",
+    "nodemon": "^3.1.14",
     "wait-on": "latest"
   }
 }
