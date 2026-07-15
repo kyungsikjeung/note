@@ -1,1 +1,4 @@
-.mori-rich-content pre:focus-within:after{content:'끝에서 → 를 눌러 코드 블록 나가기';position:absolute;right:9px;bottom:6px;color:#718486;font:8px var(--body);pointer-events:none}
+.mori-rich-content pre:focus-within:after{content:"끝에서 → 를 눌러 코드 블록 나가기";position:absolute;right:9px;bottom:6px;color:#718486;font:8px var(--body);pointer-events:none}
+.mori-rich-content pre { position:relative; padding-left:54px !important; }
+.mori-rich-content pre::before { content:attr(data-line-numbers); position:absolute; inset:0 auto 0 0; box-sizing:border-box; width:40px; padding:16px 8px; border-right:1px solid #ffffff14; color:#778789; font:12px/1.6 var(--mono); text-align:right; white-space:pre; user-select:none; }
+.mori-rich-content pre[data-collapsed="true"] { max-height:52px; overflow:hidden; }

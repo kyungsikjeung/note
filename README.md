@@ -70,10 +70,10 @@ npm run desktop
 - [x] 최근 수정 시각 표시
 - [x] 자동 저장 상태 표시
 - [x] 사이드바 열기/닫기
-- [ ] 노트 이름 변경과 별도의 노트 삭제 메뉴
-- [ ] 노트 휴지통과 복원
-- [ ] 프로젝트 및 노트 드래그 정렬
-- [ ] 폴더/하위 노트 트리
+- [x] 노트 이름 변경과 별도의 노트 삭제 메뉴
+- [x] 노트 휴지통과 복원
+- [x] 프로젝트 및 노트 드래그 정렬
+- [x] 하위 노트 트리와 하위 페이지 추가
 
 ## 2. WYSIWYG 문서 편집기
 
@@ -93,12 +93,12 @@ npm run desktop
 - [x] 코드 블록 마지막에서 `→` 키로 일반 문단으로 빠져나오기
 - [x] 편집/분할/보기 모드
 - [x] 분할 모드에서 실시간 HTML 프리뷰
-- [ ] 제목 3~6
-- [ ] 링크 삽입·수정 UI
-- [ ] 글꼴 크기와 글꼴 종류를 실제 Rich Editor에 적용
-- [ ] 찾기/바꾸기
-- [ ] 문서 목차
-- [ ] 블록 드래그 이동
+- [x] 제목 3~6
+- [x] 링크 삽입·수정 UI
+- [x] 글꼴 크기와 글꼴 종류를 실제 Rich Editor에 적용
+- [x] 찾기/바꾸기
+- [x] 문서 목차
+- [x] 블록 드래그 이동
 
 ## 3. Slash Command
 
@@ -115,13 +115,13 @@ npm run desktop
 - [x] `/file` 이미지/GIF 파일 선택창
 - [x] `/diagram` 다이어그램 종류 선택
 - [x] `/mermaid` Mermaid 블록 바로 삽입
-- [x] `/plantuml` 준비 상태와 런타임 안내
+- [x] `/plantuml` 로컬 렌더링 블록 삽입
 - [x] `/check` 체크 가능한 할 일 목록
 - [x] `/h1`, `/h2`
 - [x] `/list`, `/number`
 - [x] `/quote`, `/divider`, `/text`
-- [ ] 최근 사용 명령 우선 표시
-- [ ] 사용자 정의 Slash Command
+- [x] 최근 사용 명령 우선 표시
+- [x] 사용자 정의 Slash Command
 
 ## 4. 표 편집
 
@@ -142,11 +142,11 @@ npm run desktop
 - [x] `Ctrl+Alt+Right` 오른쪽 열 추가
 - [x] `Ctrl+Alt+Down` 아래 행 추가
 - [x] 표 전용 AI 지시 입력 UI
-- [ ] 표 셀 글자색 전용 UI
-- [ ] 셀별 좌/중/우 정렬 UI
-- [ ] Excel/CSV 클립보드를 Rich Table로 자동 변환
-- [ ] 행·열 드래그 재정렬
-- [ ] Jira/Confluence 호환 표 내보내기
+- [x] 표 셀 글자색 전용 UI
+- [x] 셀별 좌/중/우 정렬 UI
+- [x] Excel/CSV 클립보드를 Rich Table로 자동 변환
+- [x] 선택 행·열 재정렬 UI
+- [x] Jira/Confluence 호환 표 클립보드 내보내기
 
 ## 5. 코드 블록
 
@@ -154,14 +154,14 @@ npm run desktop
 - [x] 본문 안에서 직접 코드 편집
 - [x] 어두운 코드 전용 스타일
 - [x] 코드 블록 밖으로 키보드 이동
-- [ ] 언어 선택 메뉴
-- [ ] 언어 자동 감지
-- [ ] 구문 강조
-- [ ] 코드 자동 정렬/Beautify
-- [ ] 줄 번호
-- [ ] 코드 접기
-- [ ] 코드 블록 복사 버튼
-- [ ] 붙여 넣은 코드를 자동으로 코드 블록 변환
+- [x] 언어 선택 메뉴
+- [x] Smart Paste 코드 유형 감지
+- [x] 구문 강조
+- [x] JSON 코드 자동 정렬/Beautify
+- [x] 줄 번호
+- [x] 코드 접기
+- [x] 코드 블록 복사 버튼
+- [x] 붙여 넣은 코드를 자동으로 코드 블록 변환
 
 ## 6. 이미지와 파일
 
@@ -174,11 +174,11 @@ npm run desktop
 - [x] 25%, 50%, 75%, 100% 크기 버튼
 - [x] 좌우 핸들로 이미지 크기 조절
 - [x] 이미지 원본 비율 유지
-- [ ] 일반 첨부파일 블록
-- [ ] 이미지 캡션 편집
-- [ ] 이미지 압축 옵션
-- [ ] OCR
-- [ ] 로컬 asset 파일 저장소
+- [x] 일반 첨부파일 블록
+- [x] 이미지 캡션 편집
+- [x] 큰 이미지 자동 압축(1.5MB 초과, GIF 제외)
+- [x] 로컬 OCR(한국어/영어)
+- [x] 로컬 asset 파일 저장소
 
 ## 7. Mermaid와 다이어그램
 
@@ -192,10 +192,10 @@ npm run desktop
 - [x] 오른쪽 분할 프리뷰에서 Mermaid SVG 렌더링
 - [x] `/diagram` 통합 진입 화면
 - [x] Mermaid 코드 Smart Paste 감지
-- [ ] PlantUML 로컬 Java/JAR 런타임 설정
-- [ ] PlantUML 블록 렌더링
-- [ ] Mermaid/PlantUML 상호 변환
-- [ ] 다이어그램을 PNG/SVG로 내보내기
+- [x] PlantUML 로컬 Java/JAR 런타임 설정
+- [x] PlantUML 블록 렌더링
+- [x] Mermaid/PlantUML 기본 흐름·시퀀스 상호 변환
+- [x] 다이어그램을 PNG/SVG로 내보내기
 
 ## 8. 체크리스트
 
@@ -206,24 +206,24 @@ npm run desktop
 - [x] 빈 항목에서 Enter로 목록 종료
 - [x] Tab/Shift+Tab 중첩 단계 변경
 - [x] 프리뷰에 체크 상태 표시
-- [ ] 마감일
-- [ ] 담당자
-- [ ] 우선순위
-- [ ] 프로젝트 전체 할 일 모아보기
-- [ ] 완료 항목 숨기기
+- [x] 마감일
+- [x] 담당자
+- [x] 우선순위
+- [x] 프로젝트 전체 할 일 모아보기
+- [x] 완료 항목 숨기기
 
 ## 9. Smart Paste
 
 - [x] 클립보드 이미지 감지
 - [x] Mermaid 소스 감지
 - [x] 붙여 넣은 Mermaid를 전용 블록으로 변환
-- [ ] 코드 자동 감지 및 코드 블록 변환
-- [ ] JSON 감지와 Beautify
-- [ ] CSV/TSV/Excel 표 변환
-- [ ] HTML 정리 및 Rich Text 변환
-- [ ] Markdown 전체 구조 변환
-- [ ] PlantUML 감지와 블록 변환
-- [ ] 붙여 넣기 변환 결과를 적용 전 선택할 수 있는 UI
+- [x] 코드 자동 감지 및 코드 블록 변환
+- [x] JSON 감지와 Beautify
+- [x] CSV/TSV/Excel 표 변환
+- [x] HTML 클립보드 Rich Text 변환
+- [x] Markdown 전체 구조 변환
+- [x] PlantUML 감지와 블록 변환
+- [x] 붙여 넣기 변환 결과를 적용 전 선택할 수 있는 확인 UI
 
 ## 10. 설정과 작업 공간 메뉴
 
@@ -240,25 +240,25 @@ npm run desktop
 - [x] Codex/Claude 기본 Agent 선택
 - [x] Agent CLI 실행 명령 설정
 - [x] MCP 서버 이름, 명령, 인자, 활성 상태 설정 UI
-- [ ] 테마 설정 실제 적용
-- [ ] 편집기 글꼴 설정 실제 적용
-- [ ] 맞춤법 설정 실제 적용
-- [ ] MCP 서버 연결 테스트
-- [ ] Agent CLI 설치/로그인 상태 테스트
-- [ ] 키보드 단축키 목록 화면
+- [x] 테마 설정 실제 적용
+- [x] 편집기 글꼴 설정 실제 적용
+- [x] 맞춤법 설정 실제 적용
+- [x] MCP 서버 연결 테스트
+- [x] Agent CLI 설치/로그인 상태 테스트
+- [x] 키보드 단축키 목록 화면
 
 ## 11. 저장과 내보내기
 
 - [x] 로컬 자동 저장
 - [x] 앱 재실행 후 프로젝트와 노트 복원
 - [x] Markdown 파일 저장 대화상자
-- [ ] Rich HTML을 올바른 Markdown으로 변환해서 내보내기
-- [ ] HTML 내보내기
-- [ ] PDF 내보내기
-- [ ] DOCX 내보내기
-- [ ] SQLite 저장소
-- [ ] 노트별 revision history
-- [ ] 첨부파일을 별도 assets 디렉터리에 저장
+- [x] Rich HTML을 Markdown으로 변환해서 내보내기
+- [x] HTML 내보내기
+- [x] PDF 내보내기
+- [x] DOCX 내보내기
+- [x] SQLite 저장소
+- [x] 노트별 revision history와 복원
+- [x] 첨부파일을 별도 assets 디렉터리에 저장
 
 ## MVP 1 완료 기준
 
@@ -267,8 +267,8 @@ npm run desktop
 - [x] `/` 명령으로 주요 블록을 삽입할 수 있다.
 - [x] 편집/분할/보기 모드가 동작한다.
 - [x] Windows 개발 빌드가 성공한다.
-- [ ] Smart Paste가 코드, JSON, 표, Markdown까지 안정적으로 처리한다.
-- [ ] 내보낸 Markdown을 다른 에디터에서 손실 없이 다시 열 수 있다.
+- [x] Smart Paste가 코드, JSON, 표, Markdown을 편집 가능한 블록으로 변환한다.
+- [x] GFM Markdown 내보내기·다시 가져오기와 Mermaid/PlantUML 왕복
 
 ---
 

@@ -57,6 +57,7 @@ import {
   SlidersHorizontal,
   Bot,
   Terminal,
+  History,
 } from "lucide-react";
 import "highlight.js/styles/github.css";
 import "./styles.css";
@@ -69,6 +70,9 @@ import "./editor-migration.css";
 import "./project-manager.css";
 import "./workspace-menu.css";
 import "./page-actions.css";
+import "./page-management.css";
+import "./shortcuts.css";
+import "./themes.css";
 
 mermaid.initialize({
   startOnLoad: false,
@@ -134,6 +138,18 @@ const loadData = () => {
 };
 const uid = (prefix) =>
   `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const escapeAttribute = (value) => String(value || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "&#10;");
+const markdownToRich = (markdown) => {
+  const diagrams = [];
+  const prepared = String(markdown || "").replace(/```(mermaid|plantuml)\s*\n([\s\S]*?)```/gi, (_, type, code) => {
+    const token = `KSNOTE_DIAGRAM_${diagrams.length}_TOKEN`;
+    diagrams.push(`<div data-type="${type.toLowerCase()}" data-code="${escapeAttribute(code.trim())}"></div>`);
+    return token;
+  });
+  let html = marked.parse(prepared);
+  diagrams.forEach((diagram, index) => { html = html.replace(`<p>KSNOTE_DIAGRAM_${index}_TOKEN</p>`, diagram).replace(`KSNOTE_DIAGRAM_${index}_TOKEN`, diagram); });
+  return html;
+};
 
 const slashCommands = [
   {
@@ -611,11 +627,14 @@ function App() {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const accountMenuRef = useRef(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [tasksOverviewOpen, setTasksOverviewOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState("general");
   const [tableOpen, setTableOpen] = useState(false);
   const tableInsertPos = useRef(null);
   const [projectDialog, setProjectDialog] = useState(null);
   const [projectMenu, setProjectMenu] = useState(null);
+  const [noteMenu, setNoteMenu] = useState(null);
   const [prefs, setPrefs] = useState(() => {
     try {
       return (
@@ -624,6 +643,8 @@ function App() {
           fontSize: 14,
           fontFamily: "mono",
           spellcheck: false,
+          plantumlJar: "",
+          customSlashCommands: [],
         }
       );
     } catch {
@@ -632,6 +653,8 @@ function App() {
         fontSize: 14,
         fontFamily: "mono",
         spellcheck: false,
+        plantumlJar: "",
+        customSlashCommands: [],
       };
     }
   });
@@ -679,22 +702,58 @@ function App() {
   const textarea = useRef(null);
   const undoStack = useRef([]);
   const redoStack = useRef([]);
-  const note = data.notes.find((n) => n.id === noteId) || data.notes[0];
+  const storageReady = useRef(false);
+  const dragItem = useRef(null);
+  const [revisions, setRevisions] = useState([]);
+  const [diagnostics, setDiagnostics] = useState({});
+  const activeNotes = data.notes.filter((n) => !n.trashed);
+  const note =
+    activeNotes.find((n) => n.id === noteId) ||
+    activeNotes.find((n) => n.projectId === projectId) ||
+    activeNotes[0];
   const notes = data.notes
     .filter(
       (n) =>
+        !n.trashed &&
         n.projectId === projectId &&
         n.title.toLowerCase().includes(search.toLowerCase()),
     )
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+    .sort((a, b) => (a.order ?? -a.updatedAt) - (b.order ?? -b.updatedAt));
+  const projectTasks = useMemo(() => data.notes.filter((item) => !item.trashed && item.projectId === projectId).flatMap((item) => {
+    const documentNode = new DOMParser().parseFromString(item.content || "", "text/html");
+    return Array.from(documentNode.querySelectorAll('li[data-type="taskItem"], li[data-checked]')).map((task, index) => ({
+      id: `${item.id}-${index}`,
+      noteId: item.id,
+      noteTitle: item.title,
+      text: task.textContent.trim(),
+      checked: task.getAttribute("data-checked") === "true",
+      dueDate: task.getAttribute("data-due-date") || "",
+      assignee: task.getAttribute("data-assignee") || "",
+      priority: task.getAttribute("data-priority") || "normal",
+    }));
+  }), [data.notes, projectId]);
+  useEffect(() => {
+    let live = true;
+    window.ksnoteStorage?.load().then((stored) => {
+      if (!live) return;
+      if (stored?.projects && stored?.notes) setData(stored);
+      storageReady.current = true;
+      if (!stored) window.ksnoteStorage?.save(data);
+    }).catch(() => { storageReady.current = true; });
+    return () => { live = false; };
+  }, []);
   useEffect(() => {
     setSaved(false);
     const t = setTimeout(() => {
       localStorage.setItem("mori-data", JSON.stringify(data));
+      if (storageReady.current) window.ksnoteStorage?.save(data);
       setSaved(true);
     }, 350);
     return () => clearTimeout(t);
   }, [data]);
+  useEffect(() => {
+    if (settingsOpen && settingsTab === "data" && note?.id) window.ksnoteStorage?.revisions(note.id).then(setRevisions).catch(() => setRevisions([]));
+  }, [settingsOpen, settingsTab, note?.id, data]);
   useEffect(() => {
     localStorage.setItem("mori-prefs", JSON.stringify(prefs));
   }, [prefs]);
@@ -743,11 +802,12 @@ function App() {
         return { ...n, ...patch, updatedAt: Date.now() };
       }),
     }));
-  const addNote = (targetProjectId = projectId) => {
+  const addNote = (targetProjectId = projectId, parentId = null) => {
     if (!targetProjectId) return;
     const n = {
       id: uid("n"),
       projectId: targetProjectId,
+      parentId,
       title: "제목 없는 노트",
       content: "<h1>제목 없는 노트</h1><p></p>",
       updatedAt: Date.now(),
@@ -786,6 +846,52 @@ function App() {
       }));
     setProjectDialog(null);
   };
+  const trashNote = (id) => {
+    const target = data.notes.find((n) => n.id === id);
+    if (!target) return;
+    const next = data.notes.find(
+      (n) => n.projectId === target.projectId && n.id !== id && !n.trashed,
+    );
+    if (next) {
+      setData((d) => ({
+        ...d,
+        notes: d.notes.map((n) =>
+          n.id === id ? { ...n, trashed: true, trashedAt: Date.now() } : n,
+        ),
+      }));
+      if (noteId === id) setNoteId(next.id);
+    } else {
+      const replacement = {
+        id: uid("n"),
+        projectId: target.projectId,
+        title: "제목 없는 노트",
+        content: "<h1>제목 없는 노트</h1><p></p>",
+        updatedAt: Date.now(),
+      };
+      setData((d) => ({
+        ...d,
+        notes: [
+          replacement,
+          ...d.notes.map((n) =>
+            n.id === id ? { ...n, trashed: true, trashedAt: Date.now() } : n,
+          ),
+        ],
+      }));
+      setNoteId(replacement.id);
+    }
+    setNoteMenu(null);
+  };
+  const restoreNote = (id) =>
+    setData((d) => ({
+      ...d,
+      notes: d.notes.map((n) =>
+        n.id === id
+          ? { ...n, trashed: false, trashedAt: null, updatedAt: Date.now() }
+          : n,
+      ),
+    }));
+  const deleteNotePermanently = (id) =>
+    setData((d) => ({ ...d, notes: d.notes.filter((n) => n.id !== id) }));
   const deleteProject = () => {
     const id = projectDialog.id;
     const remaining = data.projects.filter((p) => p.id !== id);
@@ -802,6 +908,31 @@ function App() {
     }
     setProjectDialog(null);
     setProjectMenu(null);
+  };
+  const restoreRevision = async (id) => {
+    const revision = await window.ksnoteStorage?.revision(id);
+    if (revision?.content) updateNote({ content: revision.content });
+  };
+  const reorderProjects = (sourceId, targetId) => {
+    if (!sourceId || sourceId === targetId) return;
+    setData((current) => {
+      const projects = [...current.projects];
+      const from = projects.findIndex((item) => item.id === sourceId);
+      const to = projects.findIndex((item) => item.id === targetId);
+      if (from < 0 || to < 0) return current;
+      projects.splice(to, 0, projects.splice(from, 1)[0]);
+      return { ...current, projects };
+    });
+  };
+  const reorderNotes = (sourceId, targetId) => {
+    if (!sourceId || sourceId === targetId) return;
+    const ordered = [...notes];
+    const from = ordered.findIndex((item) => item.id === sourceId);
+    const to = ordered.findIndex((item) => item.id === targetId);
+    if (from < 0 || to < 0) return;
+    ordered.splice(to, 0, ordered.splice(from, 1)[0]);
+    const orderById = new Map(ordered.map((item, index) => [item.id, index]));
+    setData((current) => ({ ...current, notes: current.notes.map((item) => orderById.has(item.id) ? { ...item, order: orderById.get(item.id) } : item) }));
   };
   const doUndo = () => {
     if (!undoStack.current.length) return;
@@ -1008,6 +1139,21 @@ function App() {
         status: "offline",
       },
     ]);
+  const testCommand = async (id, commandLine, mode) => {
+    setDiagnostics((current) => ({ ...current, [id]: { loading: true, message: "확인 중…" } }));
+    try {
+      const result = await window.ksnoteDiagnostics?.test({ commandLine, mode });
+      setDiagnostics((current) => ({ ...current, [id]: result || { ok: false, message: "데스크톱 앱에서 확인해 주세요." } }));
+    } catch (error) {
+      setDiagnostics((current) => ({ ...current, [id]: { ok: false, message: error.message } }));
+    }
+  };
+  const importMarkdownFile = async () => {
+    const imported = await window.mori?.importMarkdown();
+    if (!imported) return;
+    updateNote({ title: imported.name || note.title, content: markdownToRich(imported.markdown) });
+    setMoreOpen(false);
+  };
   if (!note)
     return (
       <div className="empty">
@@ -1069,7 +1215,7 @@ function App() {
       </div>
     );
   return (
-    <div className="app">
+    <div className={`app theme-${prefs.theme}`}>
       {leftOpen && (
         <aside className="rail">
           <div className="brand">
@@ -1106,6 +1252,10 @@ function App() {
               <div
                 className={`project-row ${p.id === projectId ? "active" : ""}`}
                 key={p.id}
+                draggable
+                onDragStart={() => { dragItem.current = { type: "project", id: p.id }; }}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={() => { if (dragItem.current?.type === "project") reorderProjects(dragItem.current.id, p.id); dragItem.current = null; }}
               >
                 <button
                   className="project-main"
@@ -1176,6 +1326,7 @@ function App() {
           <div className="rail-label notes-label">
             <span>페이지</span>
             <span className="page-label-actions">
+              <button onClick={() => setTasksOverviewOpen(true)} title="프로젝트 전체 할 일"><ListChecks size={13} /></button>
               <ChevronsUpDown size={13} />
               <button
                 onClick={() => addNote(projectId)}
@@ -1188,22 +1339,60 @@ function App() {
           </div>
           <nav className="notes">
             {notes.map((n) => (
-              <button
+              <div
+                className={`page-row ${n.id === noteId ? "active" : ""} ${n.parentId ? "child-page" : ""}`}
                 key={n.id}
-                className={n.id === noteId ? "active" : ""}
-                onClick={() => setNoteId(n.id)}
+                draggable
+                onDragStart={() => { dragItem.current = { type: "note", id: n.id }; }}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={() => { if (dragItem.current?.type === "note") reorderNotes(dragItem.current.id, n.id); dragItem.current = null; }}
               >
-                <FileText size={15} />
-                <span>
-                  <b>{n.title}</b>
-                  <small>
-                    {new Date(n.updatedAt).toLocaleDateString("ko-KR", {
-                      month: "short",
-                      day: "numeric",
-                    })}
-                  </small>
-                </span>
-              </button>
+                <button className="page-main" onClick={() => setNoteId(n.id)}>
+                  <FileText size={15} />
+                  <span>
+                    <b>{n.title}</b>
+                    <small>
+                      {new Date(n.updatedAt).toLocaleDateString("ko-KR", {
+                        month: "short",
+                        day: "numeric",
+                      })}
+                    </small>
+                  </span>
+                </button>
+                <button
+                  className="page-more"
+                  aria-label={`${n.title} 페이지 메뉴`}
+                  onClick={() => setNoteMenu(noteMenu === n.id ? null : n.id)}
+                >
+                  <MoreHorizontal size={14} />
+                </button>
+                {noteMenu === n.id && (
+                  <div className="page-popover">
+                    <button
+                      onClick={() => {
+                        addNote(n.projectId, n.id);
+                        setNoteMenu(null);
+                      }}
+                    >
+                      <Plus /> 하위 페이지 추가
+                    </button>
+                    <button
+                      onClick={() => {
+                        setNoteId(n.id);
+                        setNoteMenu(null);
+                        requestAnimationFrame(() =>
+                          document.querySelector(".title-area input")?.focus(),
+                        );
+                      }}
+                    >
+                      <Pencil /> 이름 변경
+                    </button>
+                    <button className="danger" onClick={() => trashNote(n.id)}>
+                      <Trash2 /> 휴지통으로 이동
+                    </button>
+                  </div>
+                )}
+              </div>
             ))}
           </nav>
           <div className="account" ref={accountMenuRef}>
@@ -1410,7 +1599,61 @@ function App() {
                       <small>Markdown 파일</small>
                     </span>
                   </button>
-                  <button>
+                  <button onClick={importMarkdownFile}>
+                    <FileText />
+                    <span><b>Markdown 가져오기</b><small>현재 페이지에서 다시 편집</small></span>
+                  </button>
+                  <button
+                    onClick={() =>
+                      window.mori?.exportNote({
+                        title: note.title,
+                        content: note.content,
+                        format: "html",
+                      })
+                    }
+                  >
+                    <Download />
+                    <span>
+                      <b>HTML로 내보내기</b>
+                      <small>브라우저용 문서</small>
+                    </span>
+                  </button>
+                  <button
+                    onClick={() =>
+                      window.mori?.exportNote({
+                        title: note.title,
+                        content: note.content,
+                        format: "pdf",
+                      })
+                    }
+                  >
+                    <Download />
+                    <span>
+                      <b>PDF로 내보내기</b>
+                      <small>A4 문서</small>
+                    </span>
+                  </button>
+                  <button
+                    onClick={() =>
+                      window.mori?.exportNote({
+                        title: note.title,
+                        content: note.content,
+                        format: "docx",
+                      })
+                    }
+                  >
+                    <Download />
+                    <span>
+                      <b>Word로 내보내기</b>
+                      <small>DOCX 문서</small>
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShortcutsOpen(true);
+                      setMoreOpen(false);
+                    }}
+                  >
                     <Keyboard />
                     <span>
                       <b>키보드 단축키</b>
@@ -1570,6 +1813,7 @@ function App() {
             codex: agents.codex.command,
             claude: agents.claude.command,
           }}
+          preferences={prefs}
           onChange={(html) => updateNote({ content: html })}
         />
         <div className={`editor-shell legacy-editor mode-${mode}`}>
@@ -1826,6 +2070,22 @@ function App() {
           onInsert={insertVisualTable}
         />
       )}
+      {tasksOverviewOpen && (
+        <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setTasksOverviewOpen(false); }}>
+          <section className="tasks-overview-modal">
+            <header><span><ListChecks /><span><h2>프로젝트 할 일</h2><p>{data.projects.find((item) => item.id === projectId)?.name} · {projectTasks.filter((item) => !item.checked).length}개 남음</p></span></span><button onClick={() => setTasksOverviewOpen(false)}><X /></button></header>
+            <div className="tasks-overview-list">
+              {projectTasks.length ? projectTasks.map((task) => (
+                <button key={task.id} className={task.checked ? "done" : ""} onClick={() => { setNoteId(task.noteId); setTasksOverviewOpen(false); }}>
+                  <Check />
+                  <span><b>{task.text || "내용 없는 할 일"}</b><small>{task.noteTitle}{task.assignee ? ` · ${task.assignee}` : ""}{task.dueDate ? ` · ${task.dueDate}` : ""}</small></span>
+                  <em className={`priority-${task.priority}`}>{task.priority === "high" ? "높음" : task.priority === "low" ? "낮음" : "보통"}</em>
+                </button>
+              )) : <p>이 프로젝트에는 아직 할 일이 없습니다.</p>}
+            </div>
+          </section>
+        </div>
+      )}
       {settingsOpen && (
         <div
           className="modal-backdrop"
@@ -1922,6 +2182,18 @@ function App() {
                     </div>
                     <div className="setting-row">
                       <span>
+                        <b>PlantUML JAR</b>
+                        <small>로컬 Java 렌더링에 사용할 plantuml.jar 절대 경로</small>
+                      </span>
+                      <input
+                        className="path-input"
+                        value={prefs.plantumlJar || ""}
+                        placeholder="C:\\Tools\\plantuml.jar"
+                        onChange={(event) => setPrefs({ ...prefs, plantumlJar: event.target.value })}
+                      />
+                    </div>
+                    <div className="setting-row">
+                      <span>
                         <b>시작 화면</b>
                         <small>앱을 열 때 최근 노트로 이동</small>
                       </span>
@@ -1999,6 +2271,23 @@ function App() {
                         <i />
                       </label>
                     </div>
+                    <div className="custom-command-settings">
+                      <div>
+                        <span>
+                          <b>사용자 Slash Command</b>
+                          <small>자주 쓰는 문서 템플릿을 `/명령`으로 삽입합니다.</small>
+                        </span>
+                        <button onClick={() => setPrefs({ ...prefs, customSlashCommands: [...(prefs.customSlashCommands || []), { id: uid("slash"), command: "template", label: "새 템플릿", template: "## 새 섹션\n\n내용" }] })}><Plus /> 추가</button>
+                      </div>
+                      {(prefs.customSlashCommands || []).map((command, index) => (
+                        <div className="custom-command-row" key={command.id}>
+                          <input value={command.command} placeholder="명령" onChange={(e) => setPrefs({ ...prefs, customSlashCommands: prefs.customSlashCommands.map((item, itemIndex) => itemIndex === index ? { ...item, command: e.target.value.replace(/^\//, "").replace(/\s/g, "") } : item) })} />
+                          <input value={command.label} placeholder="표시 이름" onChange={(e) => setPrefs({ ...prefs, customSlashCommands: prefs.customSlashCommands.map((item, itemIndex) => itemIndex === index ? { ...item, label: e.target.value } : item) })} />
+                          <textarea value={command.template} placeholder="Markdown 템플릿" onChange={(e) => setPrefs({ ...prefs, customSlashCommands: prefs.customSlashCommands.map((item, itemIndex) => itemIndex === index ? { ...item, template: e.target.value } : item) })} />
+                          <button onClick={() => setPrefs({ ...prefs, customSlashCommands: prefs.customSlashCommands.filter((_, itemIndex) => itemIndex !== index) })}><Trash2 /></button>
+                        </div>
+                      ))}
+                    </div>
                   </>
                 )}
                 {settingsTab === "agent" && (
@@ -2073,6 +2362,18 @@ function App() {
                           />
                           <i />
                         </label>
+                        <button
+                          className="diagnostic-button"
+                          disabled={diagnostics[id]?.loading}
+                          onClick={() => testCommand(`agent-${id}`, agents[id].command, "cli")}
+                        >
+                          연결 테스트
+                        </button>
+                        {diagnostics[`agent-${id}`] && (
+                          <small className={`diagnostic-result ${diagnostics[`agent-${id}`].ok ? "ok" : "fail"}`}>
+                            {diagnostics[`agent-${id}`].message}
+                          </small>
+                        )}
                       </div>
                     ))}
                     <div className="agent-note">
@@ -2182,6 +2483,18 @@ function App() {
                             <i />
                           </label>
                           <button
+                            className="diagnostic-button"
+                            disabled={diagnostics[`mcp-${server.id}`]?.loading}
+                            onClick={() => testCommand(`mcp-${server.id}`, `${server.command} ${server.args || ""}`, "mcp")}
+                          >
+                            테스트
+                          </button>
+                          {diagnostics[`mcp-${server.id}`] && (
+                            <small className={`diagnostic-result ${diagnostics[`mcp-${server.id}`].ok ? "ok" : "fail"}`} title={diagnostics[`mcp-${server.id}`].message}>
+                              {diagnostics[`mcp-${server.id}`].ok ? "연결됨" : "실패"}
+                            </small>
+                          )}
+                          <button
                             className="delete-server"
                             onClick={() =>
                               setMcpServers((s) =>
@@ -2210,6 +2523,68 @@ function App() {
                       </span>
                       <button>폴더 열기</button>
                     </div>
+                    <div className="trash-section">
+                      <div>
+                        <span>
+                          <h4>휴지통</h4>
+                          <small>
+                            삭제한 페이지를 복원하거나 영구 삭제합니다.
+                          </small>
+                        </span>
+                        <em>{data.notes.filter((n) => n.trashed).length}</em>
+                      </div>
+                      {data.notes.filter((n) => n.trashed).length ? (
+                        data.notes
+                          .filter((n) => n.trashed)
+                          .map((n) => (
+                            <div className="trash-row" key={n.id}>
+                              <FileText />
+                              <span>
+                                <b>{n.title}</b>
+                                <small>
+                                  {data.projects.find(
+                                    (p) => p.id === n.projectId,
+                                  )?.name || "삭제된 프로젝트"}
+                                </small>
+                              </span>
+                              <button onClick={() => restoreNote(n.id)}>
+                                복원
+                              </button>
+                              <button
+                                className="danger"
+                                onClick={() => deleteNotePermanently(n.id)}
+                              >
+                                영구 삭제
+                              </button>
+                            </div>
+                          ))
+                      ) : (
+                        <p>휴지통이 비어 있습니다.</p>
+                      )}
+                    </div>
+                    <div className="revision-section">
+                      <div className="revision-heading">
+                        <span>
+                          <h4>변경 이력</h4>
+                          <small>현재 페이지의 최근 버전을 최대 50개 보관합니다.</small>
+                        </span>
+                        <em>{revisions.length}</em>
+                      </div>
+                      {revisions.length ? (
+                        revisions.map((revision) => (
+                          <div className="revision-row" key={revision.id}>
+                            <History />
+                            <span>
+                              <b>{revision.title || note?.title || "제목 없음"}</b>
+                              <small>{new Date(revision.created_at).toLocaleString("ko-KR")}</small>
+                            </span>
+                            <button onClick={() => restoreRevision(revision.id)}>이 버전 복원</button>
+                          </div>
+                        ))
+                      ) : (
+                        <p>아직 저장된 이전 버전이 없습니다.</p>
+                      )}
+                    </div>
                   </>
                 )}
                 {settingsTab === "security" && (
@@ -2237,6 +2612,51 @@ function App() {
             <footer>
               <span>설정은 이 기기에만 저장됩니다.</span>
               <button onClick={() => setSettingsOpen(false)}>완료</button>
+            </footer>
+          </section>
+        </div>
+      )}
+      {shortcutsOpen && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setShortcutsOpen(false);
+          }}
+        >
+          <section className="shortcut-modal">
+            <header>
+              <span>
+                <Keyboard />
+                <span>
+                  <h2>키보드 단축키</h2>
+                  <p>마우스 없이 빠르게 문서를 편집합니다.</p>
+                </span>
+              </span>
+              <button onClick={() => setShortcutsOpen(false)}>
+                <X />
+              </button>
+            </header>
+            <div>
+              {[
+                ["새 페이지", "Ctrl + N"],
+                ["실행 취소", "Ctrl + Z"],
+                ["다시 실행", "Ctrl + Y"],
+                ["오른쪽 표 열 추가", "Ctrl + Alt + →"],
+                ["아래 표 행 추가", "Ctrl + Alt + ↓"],
+                ["코드 블록 나가기", "→ (코드 끝)"],
+                ["Slash 명령", "/"],
+                ["명령 선택", "↑ ↓ + Enter"],
+                ["메뉴 닫기", "Esc"],
+                ["할 일 중첩", "Tab / Shift + Tab"],
+              ].map(([label, key]) => (
+                <div key={label}>
+                  <span>{label}</span>
+                  <kbd>{key}</kbd>
+                </div>
+              ))}
+            </div>
+            <footer>
+              <button onClick={() => setShortcutsOpen(false)}>확인</button>
             </footer>
           </section>
         </div>

@@ -1,0 +1,86 @@
+.shortcut-modal {
+  width: min(520px, calc(100vw - 32px));
+  background: #fff;
+  border-radius: 13px;
+  box-shadow: 0 25px 80px #10262955;
+  overflow: hidden;
+}
+.shortcut-modal > header {
+  height: 76px;
+  padding: 0 17px;
+  border-bottom: 1px solid #e3e8e8;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.shortcut-modal > header > span {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+.shortcut-modal > header > span > svg {
+  width: 36px;
+  height: 36px;
+  padding: 9px;
+  border-radius: 9px;
+  background: #dcefeb;
+  color: #147d72;
+}
+.shortcut-modal h2,
+.shortcut-modal p {
+  margin: 0;
+}
+.shortcut-modal h2 {
+  font-size: 15px;
+}
+.shortcut-modal p {
+  margin-top: 4px;
+  color: #879294;
+  font-size: 9px;
+}
+.shortcut-modal > header button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+}
+.shortcut-modal > header button svg {
+  width: 15px;
+}
+.shortcut-modal > div {
+  padding: 12px 18px;
+}
+.shortcut-modal > div > div {
+  height: 39px;
+  border-bottom: 1px solid #edf0f0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+}
+.shortcut-modal kbd {
+  min-width: 70px;
+  padding: 5px 8px;
+  border: 1px solid #d7dfdf;
+  border-radius: 5px;
+  background: #f7f9f9;
+  text-align: center;
+  font: 9px var(--mono);
+}
+.shortcut-modal > footer {
+  height: 54px;
+  padding: 0 17px;
+  border-top: 1px solid #e3e8e8;
+  background: #fafbfb;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+.shortcut-modal > footer button {
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 7px;
+  background: #172426;
+  color: #fff;
+  font-size: 10px;
+}

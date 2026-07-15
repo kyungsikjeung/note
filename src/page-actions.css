@@ -1,17 +1,5 @@
-.page-label-actions {
-  display: flex !important;
-  align-items: center;
-  gap: 4px;
-}
-.page-label-actions > button {
-  width: 22px;
-  height: 22px;
-  border-radius: 5px;
-  display: grid;
-  place-items: center;
-  color: #687779;
-}
-.page-label-actions > button:hover {
-  background: #dce5e4;
-  color: #147d72;
+.page-label-actions{display:flex!important;align-items:center;gap:4px}.page-label-actions>button{width:22px;height:22px;border-radius:5px;display:grid;place-items:center;color:#687779}.page-label-actions>button:hover{background:#dce5e4;color:#147d72}
+.page-row.child-page {
+  margin-left: 18px;
+  border-left: 1px solid #dce4e4;
 }

@@ -1,0 +1,82 @@
+.app.theme-dark {
+  --ink: #e7eeee;
+  --muted: #9caaaa;
+  --line: #344345;
+  --panel: #223133;
+  --paper: #172426;
+  --canvas: #111c1e;
+  color: #e7eeee;
+}
+.theme-dark .rail {
+  background: #1c2a2c;
+  border-color: #344345;
+}
+.theme-dark .workspace,
+.theme-dark .rich-document,
+.theme-dark .rich-toolbar,
+.theme-dark .mori-rich-content,
+.theme-dark .topbar,
+.theme-dark .title-area {
+  background: #172426;
+  color: #e7eeee;
+  border-color: #344345;
+}
+.theme-dark .rich-toolbar select,
+.theme-dark .title-area input {
+  color: #e7eeee;
+}
+.theme-dark .notes .page-row.active,
+.theme-dark .view-toggle button.active {
+  background: #28383a;
+  color: #fff;
+}
+.theme-dark .search,
+.theme-dark .view-toggle {
+  background: #223133;
+  border-color: #3b4b4d;
+}
+.theme-dark .split-preview {
+  background: #142022;
+  color: #dbe5e4;
+  border-color: #344345;
+}
+.theme-dark .rich-help,
+.theme-dark .statusbar {
+  background: #142022;
+  border-color: #344345;
+}
+.theme-dark .mori-rich-content td,
+.theme-dark .mori-rich-content th {
+  border-color: #465759;
+}
+@media (prefers-color-scheme: dark) {
+  .app.theme-system {
+    --ink: #e7eeee;
+    --muted: #9caaaa;
+    --line: #344345;
+    --panel: #223133;
+    --paper: #172426;
+    --canvas: #111c1e;
+    color: #e7eeee;
+  }
+  .theme-system .rail {
+    background: #1c2a2c;
+  }
+  .theme-system .workspace,
+  .theme-system .rich-document,
+  .theme-system .rich-toolbar,
+  .theme-system .mori-rich-content,
+  .theme-system .topbar,
+  .theme-system .title-area {
+    background: #172426;
+    color: #e7eeee;
+    border-color: #344345;
+  }
+  .theme-system .title-area input {
+    color: #e7eeee;
+  }
+  .theme-system .split-preview {
+    background: #142022;
+    color: #dbe5e4;
+  }
+}
