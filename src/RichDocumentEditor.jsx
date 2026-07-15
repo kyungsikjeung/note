@@ -16,6 +16,8 @@ import Color from "@tiptap/extension-color";
 import Highlight from "@tiptap/extension-highlight";
 import TextAlign from "@tiptap/extension-text-align";
 import Image from "@tiptap/extension-image";
+import TaskList from "@tiptap/extension-task-list";
+import TaskItem from "@tiptap/extension-task-item";
 import mermaid from "mermaid";
 import { marked } from "marked";
 import {
@@ -38,6 +40,7 @@ import {
   Heading1,
   Heading2,
   List,
+  ListChecks,
   ListOrdered,
   Quote,
   Undo2,
@@ -66,6 +69,8 @@ import "./ai-dock.css";
 import "./code-block.css";
 import "./mermaid-block.css";
 import "./view-modes.css";
+import "./preview-mermaid.css";
+import "./task-list.css";
 import "./diagram-picker.css";
 
 const StyledCell = TableCell.extend({
@@ -301,6 +306,40 @@ const MermaidBlock = Node.create({
 
 const asHtml = (value) =>
   /^\s*</.test(value || "") ? value : marked.parse(value || "");
+
+function RichPreview({ html }) {
+  const root = useRef(null);
+  useEffect(() => {
+    const host = root.current;
+    if (!host) return;
+    let live = true;
+    host.innerHTML = html;
+    const diagrams = Array.from(host.querySelectorAll('[data-type="mermaid"]'));
+    diagrams.forEach((element, index) => {
+      const code = element.getAttribute("data-code") || "";
+      element.classList.add("preview-mermaid");
+      element.setAttribute("aria-label", "Mermaid 다이어그램");
+      mermaid
+        .render(
+          `ks-preview-${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`,
+          code,
+        )
+        .then(({ svg }) => {
+          if (live && element.isConnected) element.innerHTML = svg;
+        })
+        .catch(() => {
+          if (live && element.isConnected)
+            element.innerHTML =
+              '<p class="preview-mermaid-error">Mermaid 문법을 확인해 주세요.</p>';
+        });
+    });
+    return () => {
+      live = false;
+    };
+  }, [html]);
+  return <article ref={root} className="split-preview" />;
+}
+
 const readImage = (file) =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -436,6 +475,14 @@ export default function RichDocumentEditor({
       keywords: "h2 heading 소제목",
     },
     {
+      id: "check",
+      label: "할 일 목록",
+      command: "/check",
+      description: "완료 여부를 바로 체크하는 목록",
+      icon: ListChecks,
+      keywords: "check checklist task todo 체크 할일 작업",
+    },
+    {
       id: "bullet",
       label: "글머리 목록",
       command: "/list",
@@ -552,6 +599,7 @@ export default function RichDocumentEditor({
     else if (item.id === "code") chain.setCodeBlock();
     else if (item.id === "mermaid")
       chain.insertContent({ type: "mermaidBlock" });
+    else if (item.id === "check") chain.toggleTaskList();
     else if (item.id === "h1") chain.setHeading({ level: 1 });
     else if (item.id === "h2") chain.setHeading({ level: 2 });
     else if (item.id === "bullet") chain.toggleBulletList();
@@ -571,6 +619,8 @@ export default function RichDocumentEditor({
       TextAlign.configure({ types: ["heading", "paragraph"] }),
       ResizableImage.configure({ allowBase64: true, inline: false }),
       MermaidBlock,
+      TaskList,
+      TaskItem.configure({ nested: true }),
       Table.configure({ resizable: true, allowTableNodeSelection: true }),
       TableRow,
       StyledHeader,
@@ -995,6 +1045,13 @@ export default function RichDocumentEditor({
             <List />
           </button>
           <button
+            className={editor.isActive("taskList") ? "active" : ""}
+            title="할 일 목록"
+            onClick={() => editor.chain().focus().toggleTaskList().run()}
+          >
+            <ListChecks />
+          </button>
+          <button
             onClick={() => editor.chain().focus().toggleOrderedList().run()}
           >
             <ListOrdered />
@@ -1078,12 +1135,7 @@ export default function RichDocumentEditor({
         <div className="rich-canvas">
           <EditorContent editor={editor} />
         </div>
-        {mode === "split" && (
-          <article
-            className="split-preview"
-            dangerouslySetInnerHTML={{ __html: previewHtml }}
-          />
-        )}
+        {mode === "split" && <RichPreview html={previewHtml} />}
       </div>
       {slash && (
         <div

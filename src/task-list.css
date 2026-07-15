@@ -1,0 +1,66 @@
+.mori-rich-content ul[data-type="taskList"],
+.split-preview ul[data-type="taskList"] {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+}
+
+.mori-rich-content ul[data-type="taskList"] li,
+.split-preview ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 5px 0;
+}
+
+.mori-rich-content ul[data-type="taskList"] li > label,
+.split-preview ul[data-type="taskList"] li > label {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding-top: 4px;
+  user-select: none;
+}
+
+.mori-rich-content ul[data-type="taskList"] input[type="checkbox"],
+.split-preview ul[data-type="taskList"] input[type="checkbox"] {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1.5px solid #a9b7b7;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.mori-rich-content ul[data-type="taskList"] input[type="checkbox"]:checked,
+.split-preview ul[data-type="taskList"] input[type="checkbox"]:checked {
+  border-color: #147d72;
+  background: #147d72
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m4 8 2.5 2.5L12 5' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    center/14px no-repeat;
+}
+
+.mori-rich-content ul[data-type="taskList"] li > div,
+.split-preview ul[data-type="taskList"] li > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.mori-rich-content ul[data-type="taskList"] li > div > p,
+.split-preview ul[data-type="taskList"] li > div > p {
+  margin: 0;
+}
+
+.mori-rich-content ul[data-type="taskList"] li[data-checked="true"] > div,
+.split-preview ul[data-type="taskList"] li[data-checked="true"] > div {
+  color: #899496;
+  text-decoration: line-through;
+  text-decoration-color: #a9b5b5;
+}
+
+.mori-rich-content ul[data-type="taskList"] ul[data-type="taskList"],
+.split-preview ul[data-type="taskList"] ul[data-type="taskList"] {
+  margin: 5px 0 0 22px;
+}

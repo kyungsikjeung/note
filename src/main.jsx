@@ -67,6 +67,8 @@ import "./table.css";
 import RichDocumentEditor from "./RichDocumentEditor";
 import "./editor-migration.css";
 import "./project-manager.css";
+import "./workspace-menu.css";
+import "./page-actions.css";
 
 mermaid.initialize({
   startOnLoad: false,
@@ -606,6 +608,8 @@ function App() {
   const [slash, setSlash] = useState(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState("general");
   const [tableOpen, setTableOpen] = useState(false);
@@ -700,6 +704,28 @@ function App() {
   useEffect(() => {
     localStorage.setItem("mori-mcp", JSON.stringify(mcpServers));
   }, [mcpServers]);
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+    const close = (event) => {
+      if (!accountMenuRef.current?.contains(event.target))
+        setAccountMenuOpen(false);
+    };
+    const escape = (event) => {
+      if (event.key === "Escape") setAccountMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [accountMenuOpen]);
+  const openSettings = (tab) => {
+    setSettingsTab(tab);
+    setSettingsOpen(true);
+    setAccountMenuOpen(false);
+    setMoreOpen(false);
+  };
   const updateNote = (patch, history = true) =>
     setData((d) => ({
       ...d,
@@ -717,15 +743,17 @@ function App() {
         return { ...n, ...patch, updatedAt: Date.now() };
       }),
     }));
-  const addNote = () => {
+  const addNote = (targetProjectId = projectId) => {
+    if (!targetProjectId) return;
     const n = {
       id: uid("n"),
-      projectId,
+      projectId: targetProjectId,
       title: "제목 없는 노트",
-      content: "# 제목 없는 노트\n\n",
+      content: "<h1>제목 없는 노트</h1><p></p>",
       updatedAt: Date.now(),
     };
     setData((d) => ({ ...d, notes: [n, ...d.notes] }));
+    setProjectId(targetProjectId);
     setNoteId(n.id);
   };
   const addProject = () =>
@@ -989,7 +1017,13 @@ function App() {
             ? "첫 노트를 만들어 보세요"
             : "첫 프로젝트를 만들어 보세요"}
         </h2>
-        <button onClick={data.projects.length ? addNote : addProject}>
+        <button
+          onClick={() =>
+            data.projects.length
+              ? addNote(projectId || data.projects[0]?.id)
+              : addProject()
+          }
+        >
           <Plus size={16} />
           {data.projects.length ? "새 노트" : "새 프로젝트"}
         </button>
@@ -1049,8 +1083,8 @@ function App() {
               <PanelLeftClose size={17} />
             </button>
           </div>
-          <button className="new-note" onClick={addNote}>
-            <Plus size={17} /> 새 노트 <kbd>⌘ N</kbd>
+          <button className="new-note" onClick={() => addNote(projectId)}>
+            <Plus size={17} /> 새 페이지 <kbd>⌘ N</kbd>
           </button>
           <label className="search">
             <Search size={15} />
@@ -1103,6 +1137,14 @@ function App() {
                   <div className="project-popover">
                     <button
                       onClick={() => {
+                        addNote(p.id);
+                        setProjectMenu(null);
+                      }}
+                    >
+                      <Plus /> 페이지 추가
+                    </button>
+                    <button
+                      onClick={() => {
                         setProjectDialog({
                           type: "rename",
                           id: p.id,
@@ -1132,8 +1174,17 @@ function App() {
             ))}
           </nav>
           <div className="rail-label notes-label">
-            <span>노트</span>
-            <ChevronsUpDown size={13} />
+            <span>페이지</span>
+            <span className="page-label-actions">
+              <ChevronsUpDown size={13} />
+              <button
+                onClick={() => addNote(projectId)}
+                title="현재 프로젝트에 페이지 추가"
+                aria-label="현재 프로젝트에 페이지 추가"
+              >
+                <Plus size={14} />
+              </button>
+            </span>
           </div>
           <nav className="notes">
             {notes.map((n) => (
@@ -1155,13 +1206,80 @@ function App() {
               </button>
             ))}
           </nav>
-          <div className="account">
+          <div className="account" ref={accountMenuRef}>
             <span className="avatar">TO</span>
             <span>
               <b>로컬 작업 공간</b>
               <small>이 기기에 안전하게 저장</small>
             </span>
-            <MoreHorizontal size={16} />
+            <button
+              className={`account-more ${accountMenuOpen ? "active" : ""}`}
+              onClick={() => setAccountMenuOpen((open) => !open)}
+              aria-label="작업 공간 메뉴"
+              aria-expanded={accountMenuOpen}
+            >
+              <MoreHorizontal size={16} />
+            </button>
+            {accountMenuOpen && (
+              <div className="workspace-menu">
+                <header>
+                  <span className="workspace-menu-avatar">TO</span>
+                  <span>
+                    <b>로컬 작업 공간</b>
+                    <small>KsNote · 이 기기</small>
+                  </span>
+                </header>
+                <div className="workspace-menu-section">
+                  <button onClick={() => openSettings("general")}>
+                    <Settings />
+                    <span>
+                      <b>설정</b>
+                      <small>화면, 언어 및 시작 동작</small>
+                    </span>
+                  </button>
+                  <button onClick={() => openSettings("agent")}>
+                    <Bot />
+                    <span>
+                      <b>AI Agent</b>
+                      <small>
+                        {agents.defaultProvider === "codex"
+                          ? "Codex"
+                          : "Claude"}
+                        를 기본으로 사용
+                      </small>
+                    </span>
+                  </button>
+                  <button onClick={() => openSettings("mcp")}>
+                    <Plug />
+                    <span>
+                      <b>MCP 연결</b>
+                      <small>
+                        {mcpServers.filter((server) => server.enabled).length}개
+                        서버 활성
+                      </small>
+                    </span>
+                  </button>
+                </div>
+                <div className="workspace-menu-section compact">
+                  <button onClick={() => openSettings("data")}>
+                    <Database />
+                    <span>
+                      <b>데이터 및 저장소</b>
+                    </span>
+                  </button>
+                  <button onClick={() => openSettings("security")}>
+                    <Shield />
+                    <span>
+                      <b>보안 및 실행 권한</b>
+                    </span>
+                  </button>
+                </div>
+                <footer>
+                  <span className="status-dot" /> 모든 데이터는 로컬에
+                  저장됩니다.
+                </footer>
+              </div>
+            )}
           </div>
         </aside>
       )}

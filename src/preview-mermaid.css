@@ -1,0 +1,22 @@
+.split-preview .preview-mermaid {
+  min-height: 220px;
+  margin: 20px 0;
+  padding: 22px;
+  border: 1px solid #dfe6e6;
+  border-radius: 10px;
+  background: #fbfcfc;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+}
+
+.split-preview .preview-mermaid svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.split-preview .preview-mermaid-error {
+  color: #b42318;
+  font-size: 11px;
+}
