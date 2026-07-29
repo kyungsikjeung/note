@@ -717,14 +717,39 @@ function App() {
     activeNotes.find((n) => n.id === noteId) ||
     activeNotes.find((n) => n.projectId === projectId) ||
     activeNotes[0];
-  const notes = data.notes
-    .filter(
-      (n) =>
-        !n.trashed &&
-        n.projectId === projectId &&
-        n.title.toLowerCase().includes(search.toLowerCase()),
-    )
+  const projectNotes = data.notes
+    .filter((n) => !n.trashed && n.projectId === projectId)
     .sort((a, b) => (a.order ?? -a.updatedAt) - (b.order ?? -b.updatedAt));
+  const notes = (() => {
+    if (search.trim())
+      return projectNotes
+        .filter((n) => n.title.toLowerCase().includes(search.toLowerCase()))
+        .map((n) => ({ ...n, depth: 0 }));
+    const noteByParent = new Map();
+    projectNotes.forEach((item) => {
+      const parentId = projectNotes.some((parent) => parent.id === item.parentId)
+        ? item.parentId
+        : null;
+      const children = noteByParent.get(parentId) || [];
+      children.push(item);
+      noteByParent.set(parentId, children);
+    });
+    const flattened = [];
+    const visited = new Set();
+    const appendBranch = (parentId, depth) => {
+      (noteByParent.get(parentId) || []).forEach((item) => {
+        if (visited.has(item.id)) return;
+        visited.add(item.id);
+        flattened.push({ ...item, depth });
+        appendBranch(item.id, depth + 1);
+      });
+    };
+    appendBranch(null, 0);
+    projectNotes.forEach((item) => {
+      if (!visited.has(item.id)) flattened.push({ ...item, depth: 0 });
+    });
+    return flattened;
+  })();
   const projectTasks = useMemo(() => data.notes.filter((item) => !item.trashed && item.projectId === projectId).flatMap((item) => {
     const documentNode = new DOMParser().parseFromString(item.content || "", "text/html");
     return Array.from(documentNode.querySelectorAll('li[data-type="taskItem"], li[data-checked]')).map((task, index) => ({
@@ -1410,6 +1435,7 @@ function App() {
             {notes.map((n) => (
               <div
                 className={`page-row ${n.id === noteId ? "active" : ""} ${n.parentId ? "child-page" : ""}`}
+                style={{ "--page-depth": n.depth || 0 }}
                 key={n.id}
                 draggable
                 onDragStart={(event) => {
@@ -1890,6 +1916,7 @@ function App() {
           }}
           preferences={prefs}
           onChange={(html) => updateNote({ content: html })}
+          onCreateChildPage={() => addNote(note.projectId, note.id)}
         />
         <div className={`editor-shell legacy-editor mode-${mode}`}>
           {mode !== "preview" && (

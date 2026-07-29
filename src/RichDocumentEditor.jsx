@@ -79,6 +79,7 @@ import {
   History,
   Square,
   Globe2,
+  FilePlus2,
 } from "lucide-react";
 import "./rich-editor.css";
 import "./palette-fix.css";
@@ -733,6 +734,7 @@ export default function RichDocumentEditor({
   agentCommands = { codex: "codex", claude: "claude" },
   preferences = { fontSize: 14, fontFamily: "sans", spellcheck: false },
   onChange,
+  onCreateChildPage,
 }) {
   const [gridOpen, setGridOpen] = useState(false);
   const [diagramOpen, setDiagramOpen] = useState(false);
@@ -802,6 +804,14 @@ export default function RichDocumentEditor({
   }), []);
   const visibleAiSessions = aiSessions.filter((session) => aiSessionScope === "project" ? session.projectId === projectId : session.noteId === noteId);
   const slashCommands = [
+    {
+      id: "page",
+      label: "하위 페이지",
+      command: "/page",
+      description: "현재 페이지 아래에 새 페이지 생성",
+      icon: FilePlus2,
+      keywords: "page 페이지 하위페이지 child subpage notion",
+    },
     {
       id: "table",
       label: "표",
@@ -1016,6 +1026,16 @@ export default function RichDocumentEditor({
         .run();
       setSlash(null);
       setDiagramOpen(true);
+      return;
+    }
+    if (item.id === "page") {
+      editor
+        .chain()
+        .focus()
+        .deleteRange({ from: current.from, to: current.to })
+        .run();
+      setSlash(null);
+      requestAnimationFrame(() => onCreateChildPage?.());
       return;
     }
     let chain = editor
