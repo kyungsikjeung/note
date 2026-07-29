@@ -49,18 +49,21 @@
   opacity: 0;
 }
 .project-row:hover .project-more,
-.project-row.active .project-more {
+.project-row.active .project-more,
+.project-row.menu-open .project-more {
   opacity: 1;
+}
+.project-row.menu-open .project-more {
+  background: #fff;
+  color: #263638;
 }
 .project-more:hover {
   background: #fff;
   color: #263638;
 }
 .project-popover {
-  position: absolute;
-  z-index: 50;
-  right: 1px;
-  top: 31px;
+  position: fixed;
+  z-index: 120;
   width: 166px;
   padding: 5px;
   background: #fff;

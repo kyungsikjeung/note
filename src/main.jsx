@@ -636,6 +636,7 @@ function App() {
   const [projectDialog, setProjectDialog] = useState(null);
   const [projectMenu, setProjectMenu] = useState(null);
   const [noteMenu, setNoteMenu] = useState(null);
+  const [entityMenuPosition, setEntityMenuPosition] = useState(null);
   const [prefs, setPrefs] = useState(() => {
     try {
       return (
@@ -815,6 +816,48 @@ function App() {
       document.removeEventListener("keydown", escape);
     };
   }, [accountMenuOpen]);
+  useEffect(() => {
+    if (!projectMenu && !noteMenu) return;
+    const close = (event) => {
+      if (event.target.closest?.(".entity-more, .entity-popover")) return;
+      setProjectMenu(null);
+      setNoteMenu(null);
+      setEntityMenuPosition(null);
+    };
+    const escape = (event) => {
+      if (event.key !== "Escape") return;
+      setProjectMenu(null);
+      setNoteMenu(null);
+      setEntityMenuPosition(null);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", escape);
+    document.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", escape);
+      document.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [projectMenu, noteMenu]);
+  const toggleEntityMenu = (type, id, event) => {
+    event.stopPropagation();
+    const isOpen = type === "project" ? projectMenu === id : noteMenu === id;
+    if (isOpen) {
+      setProjectMenu(null);
+      setNoteMenu(null);
+      setEntityMenuPosition(null);
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    setEntityMenuPosition({
+      top: Math.min(rect.bottom + 4, window.innerHeight - 116),
+      left: Math.max(8, Math.min(rect.right - 166, window.innerWidth - 174)),
+    });
+    setProjectMenu(type === "project" ? id : null);
+    setNoteMenu(type === "note" ? id : null);
+  };
   const openSettings = (tab) => {
     setSettingsTab(tab);
     setSettingsOpen(true);
@@ -1322,7 +1365,7 @@ function App() {
           <nav className="projects">
             {data.projects.map((p) => (
               <div
-                className={`project-row ${p.id === projectId ? "active" : ""} ${dragOverProjectId === p.id ? "note-drop-target" : ""}`}
+                className={`project-row ${p.id === projectId ? "active" : ""} ${projectMenu === p.id ? "menu-open" : ""} ${dragOverProjectId === p.id ? "note-drop-target" : ""}`}
                 key={p.id}
                 draggable
                 onDragStart={(event) => {
@@ -1369,17 +1412,18 @@ function App() {
                   </span>
                 </button>
                 <button
-                  className="project-more"
+                  className="project-more entity-more"
                   aria-label={`${p.name} 프로젝트 메뉴`}
-                  onClick={() =>
-                    setProjectMenu(projectMenu === p.id ? null : p.id)
-                  }
+                  aria-haspopup="menu"
+                  aria-expanded={projectMenu === p.id}
+                  onClick={(event) => toggleEntityMenu("project", p.id, event)}
                 >
                   <MoreHorizontal size={14} />
                 </button>
                 {projectMenu === p.id && (
-                  <div className="project-popover">
+                  <div className="project-popover entity-popover" role="menu" style={entityMenuPosition}>
                     <button
+                      role="menuitem"
                       onClick={() => {
                         addNote(p.id);
                         setProjectMenu(null);
@@ -1388,6 +1432,7 @@ function App() {
                       <Plus /> 페이지 추가
                     </button>
                     <button
+                      role="menuitem"
                       onClick={() => {
                         setProjectDialog({
                           type: "rename",
@@ -1400,6 +1445,7 @@ function App() {
                       <Pencil /> 이름 변경
                     </button>
                     <button
+                      role="menuitem"
                       className="danger"
                       onClick={() => {
                         setProjectDialog({
@@ -1434,7 +1480,7 @@ function App() {
           <nav className="notes">
             {notes.map((n) => (
               <div
-                className={`page-row ${n.id === noteId ? "active" : ""} ${n.parentId ? "child-page" : ""}`}
+                className={`page-row ${n.id === noteId ? "active" : ""} ${noteMenu === n.id ? "menu-open" : ""} ${n.parentId ? "child-page" : ""}`}
                 style={{ "--page-depth": n.depth || 0 }}
                 key={n.id}
                 draggable
@@ -1460,15 +1506,18 @@ function App() {
                   </span>
                 </button>
                 <button
-                  className="page-more"
+                  className="page-more entity-more"
                   aria-label={`${n.title} 페이지 메뉴`}
-                  onClick={() => setNoteMenu(noteMenu === n.id ? null : n.id)}
+                  aria-haspopup="menu"
+                  aria-expanded={noteMenu === n.id}
+                  onClick={(event) => toggleEntityMenu("note", n.id, event)}
                 >
                   <MoreHorizontal size={14} />
                 </button>
                 {noteMenu === n.id && (
-                  <div className="page-popover">
+                  <div className="page-popover entity-popover" role="menu" style={entityMenuPosition}>
                     <button
+                      role="menuitem"
                       onClick={() => {
                         addNote(n.projectId, n.id);
                         setNoteMenu(null);
@@ -1477,6 +1526,7 @@ function App() {
                       <Plus /> 하위 페이지 추가
                     </button>
                     <button
+                      role="menuitem"
                       onClick={() => {
                         setNoteId(n.id);
                         setNoteMenu(null);
@@ -1487,7 +1537,7 @@ function App() {
                     >
                       <Pencil /> 이름 변경
                     </button>
-                    <button className="danger" onClick={() => trashNote(n.id)}>
+                    <button role="menuitem" className="danger" onClick={() => trashNote(n.id)}>
                       <Trash2 /> 휴지통으로 이동
                     </button>
                   </div>
