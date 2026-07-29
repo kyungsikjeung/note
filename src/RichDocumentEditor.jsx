@@ -744,6 +744,7 @@ export default function RichDocumentEditor({
   const [slashIndex, setSlashIndex] = useState(0);
   const [findOpen, setFindOpen] = useState(false);
   const [outlineOpen, setOutlineOpen] = useState(false);
+  const [tableContextOpen, setTableContextOpen] = useState(false);
   const [hideCompleted, setHideCompleted] = useState(false);
   const [recentCommands, setRecentCommands] = useState(() => {
     try {
@@ -1273,6 +1274,7 @@ export default function RichDocumentEditor({
     onSelectionUpdate: ({ editor }) => {
       const { from, to } = editor.state.selection;
       if (from !== to) savedSelection.current = { from, to };
+      setTableContextOpen(editor.isActive("table"));
       detectSlash(editor);
     },
   });
@@ -1294,6 +1296,22 @@ export default function RichDocumentEditor({
       preferences.spellcheck ? "true" : "false",
     );
   }, [editor, preferences.spellcheck]);
+  useEffect(() => {
+    if (!editor) return;
+    const handlePointerDown = (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const insideTable = Boolean(target.closest(".mori-rich-content td, .mori-rich-content th"));
+      const insideTableToolbar = Boolean(target.closest(".table-context"));
+      if (insideTable || insideTableToolbar) {
+        setTableContextOpen(true);
+        return;
+      }
+      setTableContextOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => document.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [editor]);
   useEffect(() => {
     if (!editor) return;
     const updateLineNumbers = () => editor.view.dom.querySelectorAll("pre").forEach((pre) => {
@@ -1893,7 +1911,7 @@ export default function RichDocumentEditor({
           )}
         </aside>
       )}
-      {mode !== "preview" && inTable && (
+      {mode !== "preview" && inTable && tableContextOpen && (
         <div className="table-context">
           <b>표</b>
           <span />
