@@ -705,6 +705,7 @@ function App() {
   const redoStack = useRef([]);
   const storageReady = useRef(false);
   const dragItem = useRef(null);
+  const [dragOverProjectId, setDragOverProjectId] = useState(null);
   const [revisions, setRevisions] = useState([]);
   const [diagnostics, setDiagnostics] = useState({});
   const [aiDebugLogs, setAiDebugLogs] = useState(() => {
@@ -943,6 +944,42 @@ function App() {
     ordered.splice(to, 0, ordered.splice(from, 1)[0]);
     const orderById = new Map(ordered.map((item, index) => [item.id, index]));
     setData((current) => ({ ...current, notes: current.notes.map((item) => orderById.has(item.id) ? { ...item, order: orderById.get(item.id) } : item) }));
+  };
+  const moveNoteToProject = (sourceId, targetProjectId) => {
+    if (!sourceId || !targetProjectId) return;
+    const source = data.notes.find((item) => item.id === sourceId);
+    if (!source || source.projectId === targetProjectId) return;
+    const movedIds = new Set([sourceId]);
+    let foundChild = true;
+    while (foundChild) {
+      foundChild = false;
+      data.notes.forEach((item) => {
+        if (item.parentId && movedIds.has(item.parentId) && !movedIds.has(item.id)) {
+          movedIds.add(item.id);
+          foundChild = true;
+        }
+      });
+    }
+    const targetOrder = data.notes
+      .filter((item) => item.projectId === targetProjectId && !item.trashed)
+      .reduce((maximum, item) => Math.max(maximum, item.order ?? -1), -1) + 1;
+    const movedAt = Date.now();
+    setData((current) => ({
+      ...current,
+      notes: current.notes.map((item) => {
+        if (!movedIds.has(item.id)) return item;
+        return {
+          ...item,
+          projectId: targetProjectId,
+          parentId: item.id === sourceId ? null : item.parentId,
+          order: item.id === sourceId ? targetOrder : item.order,
+          updatedAt: movedAt,
+        };
+      }),
+    }));
+    setProjectId(targetProjectId);
+    setNoteId(sourceId);
+    showToast(`페이지를 ${data.projects.find((item) => item.id === targetProjectId)?.name || "프로젝트"}로 이동했습니다`, "note");
   };
   const doUndo = () => {
     if (!undoStack.current.length) return;
@@ -1260,12 +1297,34 @@ function App() {
           <nav className="projects">
             {data.projects.map((p) => (
               <div
-                className={`project-row ${p.id === projectId ? "active" : ""}`}
+                className={`project-row ${p.id === projectId ? "active" : ""} ${dragOverProjectId === p.id ? "note-drop-target" : ""}`}
                 key={p.id}
                 draggable
-                onDragStart={() => { dragItem.current = { type: "project", id: p.id }; }}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={() => { if (dragItem.current?.type === "project") reorderProjects(dragItem.current.id, p.id); dragItem.current = null; }}
+                onDragStart={(event) => {
+                  dragItem.current = { type: "project", id: p.id };
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("application/x-ksnote-project", p.id);
+                }}
+                onDragEnd={() => { dragItem.current = null; setDragOverProjectId(null); }}
+                onDragEnter={() => {
+                  if (dragItem.current?.type === "note") setDragOverProjectId(p.id);
+                }}
+                onDragLeave={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget)) setDragOverProjectId((current) => current === p.id ? null : current);
+                }}
+                onDragOver={(event) => {
+                  if (!["project", "note"].includes(dragItem.current?.type)) return;
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (dragItem.current?.type === "project") reorderProjects(dragItem.current.id, p.id);
+                  if (dragItem.current?.type === "note") moveNoteToProject(dragItem.current.id, p.id);
+                  dragItem.current = null;
+                  setDragOverProjectId(null);
+                }}
               >
                 <button
                   className="project-main"
@@ -1353,7 +1412,12 @@ function App() {
                 className={`page-row ${n.id === noteId ? "active" : ""} ${n.parentId ? "child-page" : ""}`}
                 key={n.id}
                 draggable
-                onDragStart={() => { dragItem.current = { type: "note", id: n.id }; }}
+                onDragStart={(event) => {
+                  dragItem.current = { type: "note", id: n.id };
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("application/x-ksnote-note", n.id);
+                }}
+                onDragEnd={() => { dragItem.current = null; setDragOverProjectId(null); }}
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={() => { if (dragItem.current?.type === "note") reorderNotes(dragItem.current.id, n.id); dragItem.current = null; }}
               >
