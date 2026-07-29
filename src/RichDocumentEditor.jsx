@@ -745,6 +745,12 @@ export default function RichDocumentEditor({
   const [findOpen, setFindOpen] = useState(false);
   const [outlineOpen, setOutlineOpen] = useState(false);
   const [tableContextOpen, setTableContextOpen] = useState(false);
+  const [splitRatio, setSplitRatio] = useState(() => {
+    const saved = Number(window.localStorage.getItem("ksnote:editor-split-ratio"));
+    return Number.isFinite(saved) && saved >= 25 && saved <= 75 ? saved : 50;
+  });
+  const [splitResizing, setSplitResizing] = useState(false);
+  const splitGroupRef = useRef(null);
   const [hideCompleted, setHideCompleted] = useState(false);
   const [recentCommands, setRecentCommands] = useState(() => {
     try {
@@ -1457,6 +1463,29 @@ export default function RichDocumentEditor({
     pendingFilePos.current = null;
     if (fileInput.current) fileInput.current.value = "";
   };
+  const setClampedSplitRatio = (nextRatio) => {
+    const ratio = Math.min(75, Math.max(25, nextRatio));
+    setSplitRatio(ratio);
+    window.localStorage.setItem("ksnote:editor-split-ratio", String(ratio));
+  };
+  const resizeSplitFromPointer = (clientX) => {
+    const bounds = splitGroupRef.current?.getBoundingClientRect();
+    if (!bounds?.width) return;
+    setClampedSplitRatio(((clientX - bounds.left) / bounds.width) * 100);
+  };
+  const handleSplitPointerDown = (event) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSplitResizing(true);
+    resizeSplitFromPointer(event.clientX);
+  };
+  const handleSplitKeyDown = (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === "Home") setClampedSplitRatio(25);
+    else if (event.key === "End") setClampedSplitRatio(75);
+    else setClampedSplitRatio(splitRatio + (event.key === "ArrowLeft" ? -2 : 2));
+  };
   const getTableRange = () => {
     const { $from } = editor.state.selection;
     for (let d = $from.depth; d > 0; d--)
@@ -2027,7 +2056,11 @@ export default function RichDocumentEditor({
           <button onClick={() => setHideCompleted((value) => !value)}>{hideCompleted ? "완료 표시" : "완료 숨기기"}</button>
         </div>
       )}
-      <div className="rich-canvas-group">
+      <div
+        ref={splitGroupRef}
+        className={`rich-canvas-group ${splitResizing ? "is-resizing" : ""}`}
+        style={mode === "split" ? { "--editor-split-ratio": `${splitRatio}%` } : undefined}
+      >
         <div className="rich-canvas">
           {mode !== "preview" && (
             <DragHandle editor={editor} nested className="block-drag-handle">
@@ -2036,6 +2069,33 @@ export default function RichDocumentEditor({
           )}
           <EditorContent editor={editor} />
         </div>
+        {mode === "split" && (
+          <div
+            className="split-resize-handle"
+            role="separator"
+            aria-label="편집기와 미리보기 너비 조절"
+            aria-orientation="vertical"
+            aria-valuemin="25"
+            aria-valuemax="75"
+            aria-valuenow={Math.round(splitRatio)}
+            tabIndex="0"
+            onDoubleClick={() => setClampedSplitRatio(50)}
+            onKeyDown={handleSplitKeyDown}
+            onPointerDown={handleSplitPointerDown}
+            onPointerMove={(event) => {
+              if (event.currentTarget.hasPointerCapture(event.pointerId))
+                resizeSplitFromPointer(event.clientX);
+            }}
+            onPointerUp={(event) => {
+              if (event.currentTarget.hasPointerCapture(event.pointerId))
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              setSplitResizing(false);
+            }}
+            onPointerCancel={() => setSplitResizing(false)}
+          >
+            <span />
+          </div>
+        )}
         {mode === "split" && <RichPreview html={previewHtml} />}
       </div>
       {slash && (
