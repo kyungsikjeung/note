@@ -94,6 +94,7 @@ import "./task-list.css";
 import "./editor-tools.css";
 import "./code-tools.css";
 import "./outline.css";
+import "./toc-block.css";
 import "./diagram-picker.css";
 
 const lowlight = createLowlight(common);
@@ -526,6 +527,77 @@ const MermaidBlock = Node.create({
   },
 });
 
+function TableOfContentsView({ editor, selected }) {
+  const [items, setItems] = useState([]);
+  useEffect(() => {
+    const update = () => {
+      const headings = [];
+      editor.state.doc.descendants((node, pos) => {
+        if (node.type.name === "heading" && node.attrs.level <= 3) {
+          headings.push({
+            level: node.attrs.level,
+            text: node.textContent.trim() || "제목 없음",
+            pos: pos + 1,
+          });
+        }
+      });
+      setItems(headings);
+    };
+    update();
+    editor.on("update", update);
+    return () => editor.off("update", update);
+  }, [editor]);
+  const jumpToHeading = (pos) => {
+    editor.chain().focus().setTextSelection(pos).scrollIntoView().run();
+  };
+  return (
+    <NodeViewWrapper
+      className={`toc-block ${selected ? "selected" : ""}`}
+      contentEditable={false}
+      data-type="table-of-contents"
+    >
+      <header>
+        <ListTree />
+        <b>목차</b>
+        <small>{items.length}개 섹션</small>
+      </header>
+      {items.length ? (
+        <nav aria-label="문서 목차">
+          {items.map((item, index) => (
+            <button
+              type="button"
+              key={`${item.pos}-${index}`}
+              className={`toc-level-${item.level}`}
+              onClick={() => jumpToHeading(item.pos)}
+            >
+              <i />
+              <span>{item.text}</span>
+            </button>
+          ))}
+        </nav>
+      ) : (
+        <p><code>#</code>, <code>##</code>, <code>###</code> 제목을 추가하면 목차가 자동으로 표시됩니다.</p>
+      )}
+    </NodeViewWrapper>
+  );
+}
+
+const TableOfContentsBlock = Node.create({
+  name: "tableOfContents",
+  group: "block",
+  atom: true,
+  selectable: true,
+  parseHTML() {
+    return [{ tag: 'div[data-type="table-of-contents"]' }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", { ...HTMLAttributes, "data-type": "table-of-contents" }];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(TableOfContentsView);
+  },
+});
+
 const asHtml = (value) =>
   /^\s*</.test(value || "") ? value : marked.parse(value || "");
 
@@ -772,6 +844,14 @@ export default function RichDocumentEditor({
       keywords: "plantuml uml diagram 다이어그램",
     },
     {
+      id: "toc",
+      label: "목차",
+      command: "/목차",
+      description: "제목 1–3을 들여쓰기해 자동 표시",
+      icon: ListTree,
+      keywords: "toc table contents 목차 개요 notion confluence",
+    },
+    {
       id: "h1",
       label: "제목 1",
       command: "/h1",
@@ -940,6 +1020,8 @@ export default function RichDocumentEditor({
     else if (item.id === "code") chain.setCodeBlock();
     else if (item.id === "mermaid")
       chain.insertContent({ type: "mermaidBlock" });
+    else if (item.id === "toc")
+      chain.insertContent({ type: "tableOfContents" });
     else if (item.id === "check") chain.toggleTaskList();
     else if (item.id === "h1") chain.setHeading({ level: 1 });
     else if (/^h[1-6]$/.test(item.id))
@@ -965,6 +1047,7 @@ export default function RichDocumentEditor({
       AttachmentBlock,
       MermaidBlock,
       PlantUmlBlock,
+      TableOfContentsBlock,
       TaskList,
       SmartTaskItem.configure({ nested: true }),
       Link.configure({
