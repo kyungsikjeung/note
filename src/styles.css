@@ -9,7 +9,7 @@
   --teal: #147d72;
   --teal-soft: #dcefeb;
   --coral: #e57b58;
-  --mono: "DM Mono", monospace;
+  --mono: "DM Mono", "D2Coding", "Noto Sans Mono CJK KR", "Malgun Gothic", monospace;
   --body: "Manrope", "Noto Sans KR", sans-serif;
 }
 * {

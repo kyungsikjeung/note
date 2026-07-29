@@ -766,6 +766,7 @@ export default function RichDocumentEditor({
   const slashRef = useRef(null);
   const rootRef = useRef(null);
   const savedSelection = useRef(null);
+  const composingRef = useRef(false);
   const [aiOpen, setAiOpen] = useState(false),
     [aiMode, setAiMode] = useState("edit"),
     [aiPrompt, setAiPrompt] = useState(""),
@@ -1062,6 +1063,12 @@ export default function RichDocumentEditor({
     chain.run();
     setSlash(null);
   };
+  const commitEditorUpdate = (activeEditor) => {
+    const html = activeEditor.getHTML();
+    setPreviewHtml(html);
+    onChange(html);
+    detectSlash(activeEditor);
+  };
   const editor = useEditor({
     extensions: [
       StarterKit.configure({ codeBlock: false, link: false }),
@@ -1090,6 +1097,19 @@ export default function RichDocumentEditor({
     content: asHtml(content),
     editorProps: {
       attributes: { class: "mori-rich-content" },
+      handleDOMEvents: {
+        compositionstart() {
+          composingRef.current = true;
+          return false;
+        },
+        compositionend() {
+          composingRef.current = false;
+          requestAnimationFrame(() => {
+            if (editor && !editor.isDestroyed) commitEditorUpdate(editor);
+          });
+          return false;
+        },
+      },
       handlePaste(view, event) {
         const files = Array.from(event.clipboardData?.files || []);
         const text = event.clipboardData?.getData("text/plain")?.trim() || "";
@@ -1292,10 +1312,8 @@ export default function RichDocumentEditor({
       },
     },
     onUpdate: ({ editor }) => {
-      const html = editor.getHTML();
-      setPreviewHtml(html);
-      onChange(html);
-      detectSlash(editor);
+      if (composingRef.current || editor.view.composing) return;
+      commitEditorUpdate(editor);
     },
     onSelectionUpdate: ({ editor }) => {
       const { from, to } = editor.state.selection;
@@ -1341,12 +1359,18 @@ export default function RichDocumentEditor({
   useEffect(() => {
     if (!editor) return;
     const updateLineNumbers = () => editor.view.dom.querySelectorAll("pre").forEach((pre) => {
+      if (composingRef.current || editor.view.composing) return;
       const count = Math.max(1, (pre.querySelector("code")?.textContent || "").split("\n").length);
       pre.setAttribute("data-line-numbers", Array.from({ length: count }, (_, index) => index + 1).join("\n"));
     });
+    const updateAfterComposition = () => requestAnimationFrame(updateLineNumbers);
     updateLineNumbers();
     editor.on("update", updateLineNumbers);
-    return () => editor.off("update", updateLineNumbers);
+    editor.view.dom.addEventListener("compositionend", updateAfterComposition);
+    return () => {
+      editor.off("update", updateLineNumbers);
+      editor.view.dom.removeEventListener("compositionend", updateAfterComposition);
+    };
   }, [editor]);
   if (!editor) return null;
   const inTable = editor.isActive("table");
