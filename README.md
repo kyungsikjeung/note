@@ -451,6 +451,15 @@ npm run desktop
 - [ ] Confluence/Jira 링크 조회 → 출처 확인 → 노트 삽입 → Undo가 안정적으로 동작한다.
 - [ ] 조사 세션에 외부 전송 범위, 조회 출처, 사용자 승인과 실제 노트 변경 이력이 남는다.
 
+## MVP 2.4 — Atlassian 게시
+
+Codex App Server가 Atlassian Rovo MCP의 연결 상태, OAuth, 도구 스키마와 승인
+이벤트를 중계하도록 구현한다. 첫 MVP는 현재 노트를 새 Confluence 페이지로
+게시하는 범위만 지원하며, 로컬 이미지 업로드와 기존 페이지 수정은 제외한다.
+
+상세 조사 및 적용 계획:
+[KsNote × Codex App Server × Atlassian Rovo 게시 MVP](docs/atlassian-publish-mcp-mvp-plan.md)
+
 ---
 
 # MVP 3 — KsNote MCP Server
