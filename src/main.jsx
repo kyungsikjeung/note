@@ -58,6 +58,10 @@ import {
   Bot,
   Terminal,
   History,
+  CalendarDays,
+  Mail,
+  Zap,
+  Hash,
 } from "lucide-react";
 import "highlight.js/styles/github.css";
 import "./styles.css";
@@ -81,6 +85,79 @@ mermaid.initialize({
   securityLevel: "strict",
   fontFamily: "Pretendard, sans-serif",
 });
+
+const AI_MODELS = [
+  { id: "", label: "Codex 기본 모델", provider: "codex" },
+  { id: "sonnet", label: "Claude Sonnet", provider: "claude" },
+  { id: "opus", label: "Claude Opus", provider: "claude" },
+  { id: "haiku", label: "Claude Haiku", provider: "claude" },
+];
+
+const DEFAULT_AI_MODEL = AI_MODELS[0].id;
+const getAiModel = (id) =>
+  AI_MODELS.find((model) => model.id === id) || AI_MODELS[0];
+
+const contentRevision = (value) => {
+  let hash = 2166136261;
+  const input = String(value || "");
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `r${(hash >>> 0).toString(16)}`;
+};
+
+const MANAGED_MCP_SERVERS = [
+  {
+    id: "ksnote",
+    name: "KsNote MCP",
+    description: "Codex가 현재 프로젝트, 페이지와 커서 위치에 다이어그램을 삽입",
+    command: "node",
+    args: "mcp/ksnote-server.mjs",
+    enabled: false,
+    status: "setup",
+    managed: true,
+    icon: "ksnote",
+    category: "local",
+  },
+  {
+    id: "google-calendar",
+    name: "Google Calendar",
+    description: "노트의 일정과 마감일을 캘린더 이벤트로 연결",
+    command: "",
+    enabled: false,
+    status: "setup",
+    managed: true,
+    icon: "calendar",
+  },
+  {
+    id: "gmail",
+    name: "Gmail",
+    description: "노트 내용을 바탕으로 메일 초안과 후속 작업 생성",
+    command: "",
+    enabled: false,
+    status: "setup",
+    managed: true,
+    icon: "mail",
+  },
+  {
+    id: "rovo",
+    name: "Atlassian Rovo",
+    description: "Jira와 Confluence 자료 조사 및 업무 문맥 연결",
+    command: "codex",
+    enabled: false,
+    status: "setup",
+    managed: true,
+    icon: "rovo",
+  },
+];
+
+const mergeManagedMcpServers = (servers = []) => [
+  ...servers,
+  ...MANAGED_MCP_SERVERS.filter(
+    (managed) => !servers.some((server) => server.id === managed.id),
+  ),
+];
 marked.setOptions({
   breaks: true,
   gfm: true,
@@ -622,6 +699,7 @@ function App() {
   const [saved, setSaved] = useState(true);
   const [toast, setToast] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [editorTarget, setEditorTarget] = useState(null);
   const [slash, setSlash] = useState(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -631,6 +709,8 @@ function App() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [tasksOverviewOpen, setTasksOverviewOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState("general");
+  const [mcpInfo, setMcpInfo] = useState(null);
+  const [mcpInstallStatus, setMcpInstallStatus] = useState(null);
   const [tableOpen, setTableOpen] = useState(false);
   const tableInsertPos = useRef(null);
   const [projectDialog, setProjectDialog] = useState(null);
@@ -661,46 +741,55 @@ function App() {
     }
   });
   const [agents, setAgents] = useState(() => {
+    const defaults = {
+      defaultModel: DEFAULT_AI_MODEL,
+      codex: { enabled: true, command: "codex" },
+      claude: { enabled: false, command: "claude" },
+    };
     try {
-      return (
-        JSON.parse(localStorage.getItem("ksnote-agents")) || {
-          defaultProvider: "codex",
-          codex: { enabled: true, command: "codex" },
-          claude: { enabled: false, command: "claude" },
-        }
-      );
-    } catch {
+      const saved = JSON.parse(localStorage.getItem("ksnote-agents"));
+      if (!saved) return defaults;
       return {
-        defaultProvider: "codex",
-        codex: { enabled: true, command: "codex" },
-        claude: { enabled: false, command: "claude" },
+        ...defaults,
+        ...saved,
+        defaultModel:
+          saved.defaultModel ||
+          (saved.defaultProvider === "claude" ? "sonnet" : DEFAULT_AI_MODEL),
+        codex: { ...defaults.codex, ...saved.codex },
+        claude: { ...defaults.claude, ...saved.claude },
       };
+    } catch {
+      return defaults;
     }
   });
   const [mcpServers, setMcpServers] = useState(() => {
+    const defaults = [
+      {
+        id: "filesystem",
+        name: "Filesystem",
+        command: "npx @modelcontextprotocol/server-filesystem",
+        enabled: true,
+        status: "ready",
+      },
+      {
+        id: "github",
+        name: "GitHub",
+        command: "npx @modelcontextprotocol/server-github",
+        enabled: false,
+        status: "offline",
+      },
+    ];
     try {
-      return (
-        JSON.parse(localStorage.getItem("mori-mcp")) || [
-          {
-            id: "filesystem",
-            name: "Filesystem",
-            command: "npx @modelcontextprotocol/server-filesystem",
-            enabled: true,
-            status: "ready",
-          },
-          {
-            id: "github",
-            name: "GitHub",
-            command: "npx @modelcontextprotocol/server-github",
-            enabled: false,
-            status: "offline",
-          },
-        ]
+      return mergeManagedMcpServers(
+        JSON.parse(localStorage.getItem("mori-mcp")) || defaults,
       );
     } catch {
-      return [];
+      return mergeManagedMcpServers(defaults);
     }
   });
+  const activeAutomationCount = mcpServers.filter(
+    (server) => server.managed && server.category !== "local" && server.enabled,
+  ).length;
   const textarea = useRef(null);
   const undoStack = useRef([]);
   const redoStack = useRef([]);
@@ -709,8 +798,17 @@ function App() {
   const [dragOverProjectId, setDragOverProjectId] = useState(null);
   const [revisions, setRevisions] = useState([]);
   const [diagnostics, setDiagnostics] = useState({});
+  const [availableAiModels, setAvailableAiModels] = useState(AI_MODELS);
   const [aiDebugLogs, setAiDebugLogs] = useState(() => {
     try { return JSON.parse(localStorage.getItem("ksnote-ai-debug-logs")) || []; }
+    catch { return []; }
+  });
+  const [editorDebugLogs, setEditorDebugLogs] = useState(() => {
+    try {
+      return (JSON.parse(localStorage.getItem("ksnote-editor-debug-logs")) || [])
+        .slice(0, 30)
+        .map(({ document, ...log }) => log);
+    }
     catch { return []; }
   });
   const activeNotes = data.notes.filter((n) => !n.trashed);
@@ -795,11 +893,143 @@ function App() {
     return () => window.removeEventListener("ksnote-ai-debug-log", updateLogs);
   }, []);
   useEffect(() => {
+    const updateLogs = (event) => setEditorDebugLogs(event.detail || []);
+    window.addEventListener("ksnote-editor-debug-log", updateLogs);
+    return () => window.removeEventListener("ksnote-editor-debug-log", updateLogs);
+  }, []);
+  useEffect(() => {
+    localStorage.setItem("ksnote-editor-debug-logs", JSON.stringify(editorDebugLogs));
+  }, [editorDebugLogs]);
+  useEffect(() => {
     localStorage.setItem("ksnote-agents", JSON.stringify(agents));
   }, [agents]);
   useEffect(() => {
+    let live = true;
+    const refreshCodex = async () => {
+      try {
+        const [result, accountResult] = await Promise.all([
+          window.ksnoteAI?.models?.({ command: agents.codex.command }),
+          window.ksnoteAI?.account?.({ command: agents.codex.command }),
+        ]);
+        if (live) {
+          const account = accountResult?.account;
+          setDiagnostics((current) => ({
+            ...current,
+            "agent-codex": {
+              ...current["agent-codex"],
+              installed: true,
+              authenticated: Boolean(account),
+              ok: Boolean(account),
+              loading: false,
+              account,
+              message: account?.type === "chatgpt"
+                ? `${account.email || "ChatGPT 계정"} · ${account.planType || "구독"}`
+                : account?.type === "apiKey"
+                  ? "API 키로 로그인됨"
+                  : "ChatGPT 구독 로그인이 필요합니다.",
+            },
+          }));
+        }
+        if (!live || !result?.data?.length) return;
+        const codexModels = result.data.map((model) => ({
+          id: model.model || model.id,
+          label: model.displayName || model.model || model.id,
+          provider: "codex",
+          isDefault: Boolean(model.isDefault),
+          defaultReasoningEffort: model.defaultReasoningEffort,
+          supportedReasoningEfforts: model.supportedReasoningEfforts || [],
+        }));
+        const claudeModels = AI_MODELS.filter(
+          (model) => model.provider === "claude",
+        );
+        setAvailableAiModels([...codexModels, ...claudeModels]);
+        setAgents((current) => {
+          const selectedExists = codexModels.some(
+            (model) => model.id === current.defaultModel,
+          );
+          if (
+            selectedExists ||
+            claudeModels.some((model) => model.id === current.defaultModel)
+          ) return current;
+          return {
+            ...current,
+            defaultModel:
+              codexModels.find((model) => model.isDefault)?.id ||
+              codexModels[0].id,
+          };
+        });
+      } catch {
+        // 설정 화면의 연결 진단에서 구체적인 오류와 로그인 방법을 표시한다.
+      }
+    };
+    refreshCodex();
+    const removeAccountListener = window.ksnoteAI?.onAccount?.(refreshCodex);
+    return () => {
+      live = false;
+      removeAccountListener?.();
+    };
+  }, [agents.codex.command]);
+  useEffect(() => {
     localStorage.setItem("mori-mcp", JSON.stringify(mcpServers));
   }, [mcpServers]);
+  useEffect(() => {
+    if (!settingsOpen || settingsTab !== "mcp") return;
+    window.ksnoteMcp?.info?.().then(setMcpInfo).catch(() => setMcpInfo(null));
+  }, [settingsOpen, settingsTab]);
+  useEffect(() => {
+    if (!settingsOpen || settingsTab !== "agent") return;
+    ["codex", "claude"].forEach(async (provider) => {
+      const key = `agent-${provider}`;
+      setDiagnostics((current) => ({
+        ...current,
+        [key]: { loading: true, message: "설치 및 로그인 확인 중…" },
+      }));
+      try {
+        const result = await window.ksnoteAI?.diagnose?.({
+          provider,
+          command: agents[provider].command,
+        });
+        setDiagnostics((current) => ({
+          ...current,
+          [key]: {
+            ...result,
+            ok: Boolean(result?.installed) && result?.authenticated !== false,
+            loading: false,
+          },
+        }));
+      } catch (error) {
+        setDiagnostics((current) => ({
+          ...current,
+          [key]: { ok: false, loading: false, message: error.message },
+        }));
+      }
+    });
+  }, [settingsOpen, settingsTab]);
+  useEffect(() => {
+    if (!settingsOpen || !["automation", "mcp"].includes(settingsTab)) return;
+    const diagnoseRovo = async () => {
+      const key = "mcp-rovo";
+      setDiagnostics((current) => ({
+        ...current,
+        [key]: { loading: true, message: "Rovo 연결 확인 중…" },
+      }));
+      try {
+        const result = await window.ksnoteAI?.diagnoseRovo?.({
+          command: agents.codex.command,
+        });
+        setDiagnostics((current) => ({
+          ...current,
+          [key]: { ...result, loading: false },
+        }));
+      } catch (error) {
+        setDiagnostics((current) => ({
+          ...current,
+          [key]: { ok: false, loading: false, message: error.message },
+        }));
+      }
+    };
+    diagnoseRovo();
+  }, [settingsOpen, settingsTab]);
   useEffect(() => {
     if (!accountMenuOpen) return;
     const close = (event) => {
@@ -1064,6 +1294,71 @@ function App() {
   const showToast = (message, icon) => {
     setToast({ message, icon });
     setTimeout(() => setToast(null), 2600);
+  };
+  const pageRefFor = (targetNote = note) => `ksnote://page/${targetNote.id}`;
+  const selectionRefFor = (target = editorTarget, targetNote = note) => {
+    const from = Number.isFinite(target?.from) ? target.from : 0;
+    const to = Number.isFinite(target?.to) ? target.to : from;
+    return `${pageRefFor(targetNote)}?from=${from}&to=${to}`;
+  };
+  const handleEditorTargetChange = (target) => {
+    setEditorTarget(target);
+    if (!note?.id || target?.noteId !== note.id) return;
+    const from = Number.isFinite(target.from) ? target.from : 0;
+    const to = Number.isFinite(target.to) ? target.to : from;
+    const enriched = {
+      ...target,
+      from,
+      to,
+      pageId: note.id,
+      noteId: note.id,
+      pageTitle: note.title,
+      projectId: note.projectId,
+      projectName: data.projects.find((project) => project.id === note.projectId)?.name || note.projectId,
+      targetRef: `${pageRefFor(note)}?from=${from}&to=${to}`,
+      operation: from === to ? "insert" : "replace-selection",
+      revision: contentRevision(note.content),
+    };
+    window.ksnoteMcp?.saveTarget?.(enriched).catch(() => {});
+  };
+  const copyText = async (value, message = "복사했습니다") => {
+    await navigator.clipboard.writeText(value);
+    showToast(message, "code");
+  };
+  const copyPageReference = (targetNote = note) =>
+    copyText(pageRefFor(targetNote), "페이지 ID를 복사했습니다");
+  const copyCodexTarget = (targetNote = note, target = editorTarget) => {
+    const ref = targetNote.id === note.id ? selectionRefFor(target, targetNote) : pageRefFor(targetNote);
+    const mode = targetNote.id === note.id && target?.from !== target?.to ? "replace-selection" : "append";
+    return copyText(
+      [
+        `KsNote target: ${ref}`,
+        `Project: ${data.projects.find((p) => p.id === targetNote.projectId)?.name || targetNote.projectId}`,
+        `Page: ${targetNote.title}`,
+        `Operation: ${mode}`,
+        "Use KsNote MCP to insert the generated content into this target.",
+      ].join("\n"),
+      "Codex 타깃을 복사했습니다",
+    );
+  };
+  const registerKsNoteMcpForCodex = async () => {
+    setMcpInstallStatus({ loading: true, message: "Codex MCP 등록 중..." });
+    try {
+      const result = await window.ksnoteMcp?.registerCodex?.({
+        command: agents.codex.command || "codex",
+      });
+      setMcpInstallStatus({
+        ok: Boolean(result?.ok),
+        message: result?.message || "성공했습니다. 새 Codex 세션에서 KsNote MCP를 사용할 수 있습니다.",
+        detail: result?.detail || "",
+      });
+      window.ksnoteMcp?.info?.().then(setMcpInfo).catch(() => {});
+    } catch (error) {
+      setMcpInstallStatus({
+        ok: false,
+        message: error.message || "Codex MCP 등록에 실패했습니다.",
+      });
+    }
   };
   const onPaste = (e) => {
     const files = e.clipboardData.files;
@@ -1537,6 +1832,24 @@ function App() {
                     >
                       <Pencil /> 이름 변경
                     </button>
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        copyPageReference(n);
+                        setNoteMenu(null);
+                      }}
+                    >
+                      <Hash /> 페이지 ID 복사
+                    </button>
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        copyCodexTarget(n, n.id === note.id ? editorTarget : null);
+                        setNoteMenu(null);
+                      }}
+                    >
+                      <Copy /> Codex 타깃 복사
+                    </button>
                     <button role="menuitem" className="danger" onClick={() => trashNote(n.id)}>
                       <Trash2 /> 휴지통으로 이동
                     </button>
@@ -1581,10 +1894,7 @@ function App() {
                     <span>
                       <b>AI Agent</b>
                       <small>
-                        {agents.defaultProvider === "codex"
-                          ? "Codex"
-                          : "Claude"}
-                        를 기본으로 사용
+                        {getAiModel(agents.defaultModel).label} 기본 사용
                       </small>
                     </span>
                   </button>
@@ -1595,6 +1905,15 @@ function App() {
                       <small>
                         {mcpServers.filter((server) => server.enabled).length}개
                         서버 활성
+                      </small>
+                    </span>
+                  </button>
+                  <button onClick={() => openSettings("automation")}>
+                    <Zap />
+                    <span>
+                      <b>자동화</b>
+                      <small>
+                        {activeAutomationCount}개 연결 활성
                       </small>
                     </span>
                   </button>
@@ -1634,6 +1953,20 @@ function App() {
             <span>{data.projects.find((p) => p.id === projectId)?.name}</span>
             <ChevronRight size={14} />
             <strong>{note.title}</strong>
+            <button
+              className="page-ref-chip"
+              title={`페이지 ID 복사: ${note.id}`}
+              onClick={() => copyPageReference(note)}
+            >
+              <Hash size={12} /> {note.id.split("-").slice(0, 2).join("-")}
+            </button>
+            <button
+              className="page-ref-chip"
+              title="현재 커서 또는 선택 영역을 Codex 타깃으로 복사"
+              onClick={() => copyCodexTarget(note, editorTarget)}
+            >
+              <Copy size={12} /> 타깃
+            </button>
           </div>
           <div className="top-actions">
             <span className={`save-state ${saved ? "saved" : ""}`}>
@@ -1712,10 +2045,7 @@ function App() {
                     <span>
                       <b>AI Agent</b>
                       <small>
-                        {agents.defaultProvider === "codex"
-                          ? "Codex"
-                          : "Claude"}{" "}
-                        기본 사용
+                        {getAiModel(agents.defaultModel).label} 기본 사용
                       </small>
                     </span>
                   </button>
@@ -1732,6 +2062,19 @@ function App() {
                       <small>
                         {mcpServers.filter((s) => s.enabled).length}개 활성
                       </small>
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setSettingsOpen(true);
+                      setSettingsTab("automation");
+                      setMoreOpen(false);
+                    }}
+                  >
+                    <Zap />
+                    <span>
+                      <b>자동화</b>
+                      <small>캘린더, 메일 및 Rovo 연결</small>
                     </span>
                   </button>
                   <div />
@@ -1959,7 +2302,8 @@ function App() {
           projectId={projectId}
           content={note.content}
           mode={mode}
-          preferredProvider={agents.defaultProvider}
+          preferredModel={agents.defaultModel}
+          availableModels={availableAiModels}
           agentCommands={{
             codex: agents.codex.command,
             claude: agents.claude.command,
@@ -1967,6 +2311,13 @@ function App() {
           preferences={prefs}
           onChange={(html) => updateNote({ content: html })}
           onCreateChildPage={() => addNote(note.projectId, note.id)}
+          onTargetChange={handleEditorTargetChange}
+          onExternalOperation={(event) =>
+            showToast(
+              event.message,
+              event.status === "completed" ? "diagram" : "warning",
+            )
+          }
         />
         <div className={`editor-shell legacy-editor mode-${mode}`}>
           {mode !== "preview" && (
@@ -2295,6 +2646,14 @@ function App() {
                   MCP 연결 <em>{mcpServers.filter((s) => s.enabled).length}</em>
                 </button>
                 <button
+                  className={settingsTab === "automation" ? "active" : ""}
+                  onClick={() => setSettingsTab("automation")}
+                >
+                  <Zap />
+                  자동화
+                  <em>{activeAutomationCount}</em>
+                </button>
+                <button
                   className={settingsTab === "data" ? "active" : ""}
                   onClick={() => setSettingsTab("data")}
                 >
@@ -2458,20 +2817,28 @@ function App() {
                     </div>
                     <div className="setting-row">
                       <span>
-                        <b>기본 Agent</b>
-                        <small>AI 푸터에서 먼저 선택되는 실행 도구</small>
+                        <b>기본 모델</b>
+                        <small>AI 푸터에서 먼저 선택되는 모델</small>
                       </span>
                       <select
-                        value={agents.defaultProvider}
+                        value={agents.defaultModel}
                         onChange={(e) =>
                           setAgents({
                             ...agents,
-                            defaultProvider: e.target.value,
+                            defaultModel: e.target.value,
                           })
                         }
                       >
-                        <option value="codex">Codex</option>
-                        <option value="claude">Claude</option>
+                        <optgroup label="OpenAI">
+                          {availableAiModels.filter((model) => model.provider === "codex").map((model) => (
+                            <option key={model.id} value={model.id}>{model.label}</option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="Anthropic">
+                          {availableAiModels.filter((model) => model.provider === "claude").map((model) => (
+                            <option key={model.id} value={model.id}>{model.label}</option>
+                          ))}
+                        </optgroup>
                       </select>
                     </div>
                     {[
@@ -2521,11 +2888,60 @@ function App() {
                         </label>
                         <button
                           className="diagnostic-button"
-                          disabled={diagnostics[id]?.loading}
-                          onClick={() => testCommand(`agent-${id}`, agents[id].command, "cli")}
+                          disabled={diagnostics[`agent-${id}`]?.loading}
+                          onClick={async () => {
+                            const key = `agent-${id}`;
+                            setDiagnostics((current) => ({ ...current, [key]: { loading: true, message: "확인 중…" } }));
+                            try {
+                              const result = await window.ksnoteAI?.diagnose?.({ provider: id, command: agents[id].command });
+                              setDiagnostics((current) => ({ ...current, [key]: { ...result, ok: Boolean(result?.installed) && result?.authenticated !== false, loading: false } }));
+                            } catch (error) {
+                              setDiagnostics((current) => ({ ...current, [key]: { ok: false, loading: false, message: error.message } }));
+                            }
+                          }}
                         >
-                          연결 테스트
+                          다시 확인
                         </button>
+                        {id === "codex" && diagnostics[`agent-${id}`]?.authenticated === false && (
+                          <button
+                            className="diagnostic-button"
+                            onClick={async () => {
+                              const key = "agent-codex";
+                              setDiagnostics((current) => ({
+                                ...current,
+                                [key]: {
+                                  loading: true,
+                                  message: "브라우저에서 ChatGPT 로그인을 완료해 주세요.",
+                                },
+                              }));
+                              try {
+                                await window.ksnoteAI?.loginChatgpt?.({
+                                  command: agents.codex.command,
+                                });
+                                setDiagnostics((current) => ({
+                                  ...current,
+                                  [key]: {
+                                    loading: true,
+                                    ok: false,
+                                    authenticated: false,
+                                    message: "로그인 창을 열었습니다. 완료하면 상태가 자동 갱신됩니다.",
+                                  },
+                                }));
+                              } catch (error) {
+                                setDiagnostics((current) => ({
+                                  ...current,
+                                  [key]: {
+                                    loading: false,
+                                    ok: false,
+                                    message: error.message,
+                                  },
+                                }));
+                              }
+                            }}
+                          >
+                            ChatGPT로 로그인
+                          </button>
+                        )}
                         {diagnostics[`agent-${id}`] && (
                           <small className={`diagnostic-result ${diagnostics[`agent-${id}`].ok ? "ok" : "fail"}`}>
                             {diagnostics[`agent-${id}`].message}
@@ -2566,15 +2982,83 @@ function App() {
                       </span>
                       <ExternalLink />
                     </div>
+                    <section className="ksnote-mcp-guide">
+                      <header>
+                        <Workflow />
+                        <span>
+                          <b>Codex에서 현재 페이지에 다이어그램 저장</b>
+                          <small>
+                            페이지 상단의 <code>#</code>는 페이지 ID를, <code>타깃</code>은 현재 커서/선택 위치를 복사합니다.
+                          </small>
+                        </span>
+                      </header>
+                      <ol>
+                        <li>아래 설정은 현재 실행 중인 KsNote 위치와 데이터 경로를 기준으로 생성됩니다.</li>
+                        <li>노트에서 삽입할 위치를 클릭하고 <code>타깃</code>을 복사합니다.</li>
+                        <li>Codex에 <code>@KsNote 현재 폴더 코드 구조 확인 후 이 타깃에 Mermaid 다이어그램 저장해줘</code>처럼 요청합니다.</li>
+                      </ol>
+                      <div className="ksnote-mcp-actions">
+                        <button
+                          onClick={registerKsNoteMcpForCodex}
+                          disabled={mcpInstallStatus?.loading || !window.ksnoteMcp?.registerCodex}
+                        >
+                          <Terminal /> Codex 등록/업데이트
+                        </button>
+                        <button
+                          onClick={() =>
+                            copyText(
+                              mcpInfo?.codexConfigToml || "",
+                              "Codex MCP 설정을 복사했습니다",
+                            )
+                          }
+                          disabled={!mcpInfo?.codexConfigToml}
+                        >
+                          <Copy /> Codex TOML 복사
+                        </button>
+                        <button
+                          onClick={() =>
+                            copyText(
+                              mcpInfo?.claudeConfigJson || "",
+                              "Claude MCP 설정을 복사했습니다",
+                            )
+                          }
+                          disabled={!mcpInfo?.claudeConfigJson}
+                        >
+                          <Copy /> Claude JSON 복사
+                        </button>
+                      </div>
+                      <div className="ksnote-mcp-actions secondary">
+                        <small>
+                          {mcpInfo?.isPackaged
+                            ? "설치본은 앱 실행 파일을 Node 모드로 실행해 MCP 서버를 띄웁니다. 포터블 폴더를 옮기면 이 설정을 다시 복사하세요."
+                            : "개발 모드는 현재 checkout의 MCP 스크립트를 직접 실행합니다."}
+                        </small>
+                      </div>
+                      {mcpInstallStatus && (
+                        <small
+                          className={`diagnostic-result ${mcpInstallStatus.ok ? "ok" : mcpInstallStatus.loading ? "" : "fail"}`}
+                          title={mcpInstallStatus.detail || mcpInstallStatus.message}
+                        >
+                          {mcpInstallStatus.message}
+                        </small>
+                      )}
+                      <pre>{mcpInfo?.codexConfigToml || "KsNote 실행 위치를 확인하는 중..."}</pre>
+                      {mcpInfo?.executablePath && (
+                        <small className="ksnote-mcp-path">
+                          앱: <code>{mcpInfo.executablePath}</code>
+                        </small>
+                      )}
+                    </section>
                     <div className="mcp-list">
                       {mcpServers.map((server) => (
                         <div className="mcp-card" key={server.id}>
                           <span className="server-icon">
-                            <Server />
+                            {server.icon === "calendar" ? <CalendarDays /> : server.icon === "mail" ? <Mail /> : server.icon === "rovo" ? <Zap /> : server.icon === "ksnote" ? <Workflow /> : <Server />}
                           </span>
                           <span className="server-info">
                             <input
                               value={server.name}
+                              readOnly={server.managed}
                               onChange={(e) =>
                                 setMcpServers((s) =>
                                   s.map((x) =>
@@ -2585,7 +3069,9 @@ function App() {
                                 )
                               }
                             />
-                            <label>
+                            {server.managed ? (
+                              <small className="managed-mcp-description">{server.description}</small>
+                            ) : <label>
                               명령
                               <input
                                 value={server.command}
@@ -2599,8 +3085,8 @@ function App() {
                                   )
                                 }
                               />
-                            </label>
-                            <label>
+                            </label>}
+                            {!server.managed && <label>
                               인자
                               <input
                                 value={server.args || ""}
@@ -2615,7 +3101,7 @@ function App() {
                                   )
                                 }
                               />
-                            </label>
+                            </label>}
                           </span>
                           <span
                             className={`server-status ${server.enabled ? "ready" : ""}`}
@@ -2639,19 +3125,19 @@ function App() {
                             />
                             <i />
                           </label>
-                          <button
+                          {!server.managed && <button
                             className="diagnostic-button"
                             disabled={diagnostics[`mcp-${server.id}`]?.loading}
                             onClick={() => testCommand(`mcp-${server.id}`, `${server.command} ${server.args || ""}`, "mcp")}
                           >
                             테스트
-                          </button>
+                          </button>}
                           {diagnostics[`mcp-${server.id}`] && (
                             <small className={`diagnostic-result ${diagnostics[`mcp-${server.id}`].ok ? "ok" : "fail"}`} title={diagnostics[`mcp-${server.id}`].message}>
                               {diagnostics[`mcp-${server.id}`].ok ? "연결됨" : "실패"}
                             </small>
                           )}
-                          <button
+                          {!server.managed && <button
                             className="delete-server"
                             onClick={() =>
                               setMcpServers((s) =>
@@ -2660,9 +3146,74 @@ function App() {
                             }
                           >
                             <Trash2 />
-                          </button>
+                          </button>}
                         </div>
                       ))}
+                    </div>
+                  </>
+                )}
+                {settingsTab === "automation" && (
+                  <>
+                    <div className="setting-title">
+                      <h3>자동화</h3>
+                      <p>노트에서 발견한 일정, 메일과 업무 문맥을 연결합니다.</p>
+                    </div>
+                    <div className="automation-summary">
+                      <span><Zap /></span>
+                      <div>
+                        <b>{activeAutomationCount}개 서비스 활성</b>
+                        <small>연결을 켜도 외부 변경은 실행 전 확인을 거칩니다.</small>
+                      </div>
+                    </div>
+                    <div className="automation-grid">
+                      {MANAGED_MCP_SERVERS.filter((definition) => definition.category !== "local").map((definition) => {
+                        const server = mcpServers.find((item) => item.id === definition.id) || definition;
+                        const Icon = definition.icon === "calendar" ? CalendarDays : definition.icon === "mail" ? Mail : Zap;
+                        return (
+                          <article className={`automation-card ${server.enabled ? "enabled" : ""}`} key={definition.id}>
+                            <header>
+                              <span className={`automation-icon ${definition.icon}`}><Icon /></span>
+                              <span className={`automation-state ${server.enabled ? "on" : ""}`}>
+                                <i /> {server.enabled ? "활성" : "꺼짐"}
+                              </span>
+                            </header>
+                            <div>
+                              <b>{definition.name}</b>
+                              <p>{definition.description}</p>
+                            </div>
+                            <footer>
+                              <small>
+                                {definition.id === "rovo" && diagnostics["mcp-rovo"]
+                                  ? diagnostics["mcp-rovo"].message
+                                  : server.enabled ? "MCP 사용 허용됨" : "연결하지 않음"}
+                              </small>
+                              <label className="switch">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(server.enabled)}
+                                  onChange={(event) =>
+                                    setMcpServers((servers) =>
+                                      mergeManagedMcpServers(servers).map((item) =>
+                                        item.id === definition.id
+                                          ? { ...item, enabled: event.target.checked }
+                                          : item,
+                                      ),
+                                    )
+                                  }
+                                />
+                                <i />
+                              </label>
+                            </footer>
+                          </article>
+                        );
+                      })}
+                    </div>
+                    <div className="automation-note">
+                      <Shield />
+                      <span>
+                        <b>활성화는 접근 허용 상태만 저장합니다.</b>
+                        <small>Google 계정 및 Atlassian 인증 연결은 후속 MCP 인증 단계에서 진행합니다.</small>
+                      </span>
                     </div>
                   </>
                 )}
@@ -2789,6 +3340,19 @@ function App() {
                           <label>AI 응답<pre>{log.response || log.error || "응답 대기 중"}</pre></label>
                           <label>적용 전 페이지<pre>{log.pageBefore || "캡처 없음"}</pre></label>
                           <label>적용 후 페이지<pre>{log.pageAfter || "아직 적용되지 않음"}</pre></label>
+                        </details>
+                      ))}
+                    </div>
+                    <div className="developer-log-toolbar">
+                      <span><b>에디터 Enter 진단 로그</b><small>{editorDebugLogs.length}개 이벤트</small></span>
+                      <button disabled={!editorDebugLogs.length} onClick={() => navigator.clipboard.writeText(JSON.stringify(editorDebugLogs, null, 2))}><Copy /> JSON 복사</button>
+                      <button disabled={!editorDebugLogs.length} onClick={() => { localStorage.removeItem("ksnote-editor-debug-logs"); setEditorDebugLogs([]); }}><Trash2 /> 초기화</button>
+                    </div>
+                    <div className="developer-log-list">
+                      {!prefs.developerMode ? <p className="developer-log-empty">개발자 모드를 켜면 Enter 입력을 기록합니다.</p> : editorDebugLogs.length === 0 ? <p className="developer-log-empty">기록된 Enter 이벤트가 없습니다.</p> : editorDebugLogs.map((log) => (
+                        <details className="developer-log-entry" key={log.id}>
+                          <summary><i className={`debug-status ${log.nodeTypeAfter === "heading" ? "error" : "complete"}`} /><span><b>{log.nodeTypeBefore} → {log.nodeTypeAfter}</b><small>{new Date(log.createdAt).toLocaleString("ko-KR")} · Shift {String(log.shiftKey)} · IME {String(log.isComposing || log.editorComposing)}</small></span><em>{log.atEndBefore ? "at end" : "not at end"}</em></summary>
+                          <label>Enter 이벤트<pre>{JSON.stringify(log, null, 2)}</pre></label>
                         </details>
                       ))}
                     </div>

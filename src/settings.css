@@ -1,15 +1,19 @@
 .more-wrap {
   position: relative;
+  z-index: 210;
 }
 .more-wrap > .active {
   background: #e6eeee;
 }
 .more-menu {
   position: absolute;
-  z-index: 40;
+  z-index: 220;
   right: 0;
-  top: 38px;
+  top: calc(100% + 7px);
   width: 248px;
+  max-height: calc(100dvh - 72px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 6px;
   background: #fff;
   border: 1px solid #dce3e3;
@@ -118,18 +122,19 @@
 }
 .modal-backdrop {
   position: fixed;
-  z-index: 100;
+  z-index: 1000;
   inset: 0;
   background: #12232670;
   backdrop-filter: blur(4px);
   display: grid;
   place-items: center;
-  padding: 28px;
+  padding: 24px;
   animation: fadeIn 0.16s ease;
 }
 .settings-modal {
-  width: min(920px, 95vw);
-  height: min(680px, 90vh);
+  width: min(920px, calc(100vw - 48px));
+  height: min(680px, calc(100dvh - 48px));
+  min-height: 0;
   background: #fff;
   border-radius: 14px;
   box-shadow: 0 28px 90px #081b1e55;
@@ -226,8 +231,11 @@
   font-style: normal;
 }
 .settings-content {
+  min-width: 0;
+  min-height: 0;
   padding: 28px 34px;
   overflow: auto;
+  overscroll-behavior: contain;
 }
 .setting-title {
   padding-bottom: 22px;
@@ -361,6 +369,90 @@
   font-size: 9px;
   color: #69817d;
   margin-top: 3px;
+}
+.ksnote-mcp-guide {
+  margin: 0 0 12px;
+  border: 1px solid #d7e5e2;
+  border-radius: 9px;
+  background: #fbfdfd;
+  padding: 12px;
+}
+.ksnote-mcp-guide header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.ksnote-mcp-guide header > svg {
+  width: 18px;
+  height: 18px;
+  color: var(--teal);
+  flex: 0 0 auto;
+}
+.ksnote-mcp-guide header span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.ksnote-mcp-guide b {
+  font-size: 11px;
+}
+.ksnote-mcp-guide small,
+.ksnote-mcp-guide li {
+  color: #687879;
+  font-size: 9px;
+  line-height: 1.55;
+}
+.ksnote-mcp-guide ol {
+  margin: 10px 0 0;
+  padding-left: 20px;
+}
+.ksnote-mcp-guide code {
+  font: 9px var(--mono);
+  color: var(--teal);
+}
+.ksnote-mcp-guide pre {
+  margin: 10px 0 0;
+  padding: 10px;
+  border-radius: 7px;
+  background: #152326;
+  color: #dfeceb;
+  overflow: auto;
+  font: 9px/1.5 var(--mono);
+}
+.ksnote-mcp-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+.ksnote-mcp-actions.secondary {
+  margin-top: 8px;
+}
+.ksnote-mcp-actions button {
+  height: 30px;
+  border-radius: 7px;
+  padding: 0 10px;
+  background: #173335;
+  color: #fff;
+  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ksnote-mcp-actions button:disabled {
+  opacity: 0.5;
+}
+.ksnote-mcp-actions button svg {
+  width: 13px;
+}
+.ksnote-mcp-actions small {
+  flex: 1 1 220px;
+}
+.ksnote-mcp-path {
+  display: block;
+  margin-top: 8px;
+  word-break: break-all;
 }
 .mcp-list {
   display: flex;
@@ -497,6 +589,9 @@
   }
 }
 @media (max-width: 760px) {
+  .modal-backdrop {
+    padding: 10px;
+  }
   .settings-body {
     grid-template-columns: 64px 1fr;
   }
@@ -514,8 +609,8 @@
     overflow-x: auto;
   }
   .settings-modal {
-    width: 98vw;
-    height: 94vh;
+    width: calc(100vw - 20px);
+    height: calc(100dvh - 20px);
   }
 }
 .custom-command-settings { margin-top:14px; border:1px solid #e0e7e7; border-radius:9px; overflow:hidden; }

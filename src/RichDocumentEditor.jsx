@@ -24,6 +24,7 @@ import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import { common, createLowlight } from "lowlight";
 import mermaid from "mermaid";
 import { marked } from "marked";
+import DOMPurify from "dompurify";
 import {
   Bold,
   Italic,
@@ -78,8 +79,11 @@ import {
   ArrowRight,
   History,
   Square,
+  RotateCcw,
+  Eraser,
   Globe2,
   FilePlus2,
+  Command,
 } from "lucide-react";
 import "./rich-editor.css";
 import "./palette-fix.css";
@@ -97,8 +101,248 @@ import "./code-tools.css";
 import "./outline.css";
 import "./toc-block.css";
 import "./diagram-picker.css";
+import "./image-gen-block.css";
 
 const lowlight = createLowlight(common);
+
+const stripHtmlFence = (value) =>
+  String(value || "")
+    .replace(/^\s*```(?:html)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+
+const extractExternalLinks = (value) =>
+  Array.from(
+    new Set(
+      String(value || "").match(
+        /https?:\/\/[^\s<>"')\]]+|(?:[A-Z][A-Z0-9]+-\d+)/g,
+      ) || [],
+    ),
+  ).slice(0, 20);
+
+const parseAtlassianTargets = (values) =>
+  values.map((value) => {
+    if (!/^https?:/i.test(value)) {
+      return {
+        type: "jira",
+        issueKey: value.toUpperCase(),
+        source: value,
+      };
+    }
+    try {
+      const url = new URL(value);
+      const issueKey =
+        url.pathname.match(/\/browse\/([A-Z][A-Z0-9]+-\d+)/i)?.[1] ||
+        url.searchParams.get("selectedIssue");
+      if (issueKey)
+        return {
+          type: "jira",
+          site: url.origin,
+          projectKey: issueKey.split("-")[0].toUpperCase(),
+          issueKey: issueKey.toUpperCase(),
+          source: value,
+        };
+      const spaceKey =
+        url.pathname.match(/\/spaces\/([^/]+)/i)?.[1] ||
+        url.searchParams.get("spaceKey");
+      const pageId =
+        url.pathname.match(/\/pages\/(\d+)/i)?.[1] ||
+        url.searchParams.get("pageId");
+      return {
+        type: "confluence",
+        site: url.origin,
+        spaceKey: spaceKey ? decodeURIComponent(spaceKey) : null,
+        pageId,
+        source: value,
+      };
+    } catch {
+      return { type: "unknown", source: value };
+    }
+  });
+
+const contentRevision = (value) => {
+  let hash = 2166136261;
+  const input = String(value || "");
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `r${(hash >>> 0).toString(16)}`;
+};
+
+const detectEncodingDamage = (value) => {
+  const text = String(value || "");
+  if (!text) return null;
+  if (text.includes("\ufffd"))
+    return "텍스트에 유니코드 대체 문자(�)가 포함되어 있습니다.";
+  const questionRuns = text.match(/\?{2,}/g) || [];
+  const questionCount = questionRuns.reduce((sum, item) => sum + item.length, 0);
+  const visibleLength = text.replace(/\s/g, "").length || 1;
+  const hasMarkdownStructure = /(^|\n)\s{0,3}(#{1,6}\s|\d+\.\s|-\s)/.test(text);
+  if (
+    text.length >= 30 &&
+    questionRuns.length >= 3 &&
+    questionCount / visibleLength > 0.12 &&
+    hasMarkdownStructure
+  )
+    return "텍스트가 인코딩 손상으로 깨진 것처럼 보입니다.";
+  return null;
+};
+
+const parseAIPatch = (value, fallbackTarget) => {
+  const raw = String(value || "").trim();
+  const candidate = raw
+    .replace(/^\s*```(?:json)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+  try {
+    const patch = JSON.parse(candidate);
+    if (
+      patch?.version === 1 &&
+      ["replace", "insert_before", "insert_after"].includes(patch.operation) &&
+      typeof patch.html === "string"
+    ) {
+      return {
+        ...patch,
+        target: ["note", "selection", "block", "table"].includes(patch.target)
+          ? patch.target
+          : fallbackTarget,
+      };
+    }
+  } catch {}
+  return {
+    version: 1,
+    operation: "replace",
+    target: fallbackTarget,
+    html: raw,
+    summary: "AI 편집 결과",
+    legacy: true,
+  };
+};
+
+const wantsWholeNoteEdit = (instruction) =>
+  /(?:문서|노트|페이지)\s*전체|전체\s*(?:문서|노트|페이지)/i.test(
+    String(instruction || ""),
+  );
+
+const requestedEditOperation = (instruction) => {
+  const value = String(instruction || "");
+  if (!/(?:추가|삽입|붙여\s*넣)/i.test(value)) return "replace";
+  if (/(?:위|앞|이전)\s*(?:에|으로)?\s*(?:추가|삽입|붙여\s*넣)/i.test(value))
+    return "insert_before";
+  return "insert_after";
+};
+
+const serializeEditorRange = (editor, range, fallback = "") => {
+  if (!range) return fallback;
+  try {
+    return editor.view.serializeForClipboard(
+      editor.state.doc.slice(range.from, range.to),
+    ).dom.innerHTML;
+  } catch {
+    return fallback;
+  }
+};
+
+const getActiveBlockContext = (editor) => {
+  const { selection } = editor.state;
+  const { from, to, $from } = selection;
+  if (from !== to)
+    return {
+      target: "selection",
+      range: { from, to },
+      nodeType: "selection",
+      label: "선택 영역",
+    };
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    const node = $from.node(depth);
+    if (!node.isTextblock) continue;
+    return {
+      target: "block",
+      range: { from: $from.before(depth), to: $from.after(depth) },
+      nodeType: node.type.name,
+      label:
+        node.type.name === "codeBlock"
+          ? "현재 코드 블록"
+          : node.type.name === "heading"
+            ? "현재 제목"
+            : "현재 문단",
+      cursorOffset: $from.parentOffset,
+      ancestors: Array.from({ length: depth }, (_, index) =>
+        $from.node(index + 1).type.name,
+      ),
+    };
+  }
+  return {
+    target: "note",
+    range: null,
+    nodeType: "doc",
+    label: "전체 노트",
+  };
+};
+
+const preserveTableFormatting = (sourceHtml, replacementHtml) => {
+  if (!sourceHtml || !replacementHtml) return replacementHtml;
+  const source = new DOMParser().parseFromString(sourceHtml, "text/html");
+  const replacement = new DOMParser().parseFromString(
+    replacementHtml,
+    "text/html",
+  );
+  const sourceCells = [...source.querySelectorAll("th,td")];
+  const replacementCells = [...replacement.querySelectorAll("th,td")];
+  replacementCells.forEach((cell, index) => {
+    const original = sourceCells[index];
+    if (!original) return;
+    ["style", "class", "colspan", "rowspan"].forEach((attribute) => {
+      if (original.hasAttribute(attribute) && !cell.hasAttribute(attribute))
+        cell.setAttribute(attribute, original.getAttribute(attribute));
+    });
+    [...original.attributes]
+      .filter((attribute) => attribute.name.startsWith("data-"))
+      .forEach((attribute) => {
+        if (!cell.hasAttribute(attribute.name))
+          cell.setAttribute(attribute.name, attribute.value);
+      });
+  });
+  return replacement.body.innerHTML;
+};
+
+const normalizeRichHtml = (
+  value,
+  { allowImages = true, preserveEmptyParagraphs = false } = {},
+) => {
+  const stripped = stripHtmlFence(value);
+  const source = /<\/?[a-z][\s\S]*>/i.test(stripped)
+    ? stripped
+    : marked.parse(stripped);
+  const sanitized = DOMPurify.sanitize(source, {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form"],
+    FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover"],
+  });
+  const documentNode = new DOMParser().parseFromString(sanitized, "text/html");
+  if (!allowImages)
+    documentNode.querySelectorAll("img").forEach((image) => image.remove());
+  documentNode.querySelectorAll("li").forEach((item) => {
+    const meaningfulText = item.textContent.replace(/\u00a0/g, " ").trim();
+    const meaningfulBlock = item.querySelector(
+      "img,table,pre,ul,ol,[data-type]",
+    );
+    if (!meaningfulText && !meaningfulBlock) item.remove();
+  });
+  documentNode.querySelectorAll("ul,ol").forEach((list) => {
+    if (!list.querySelector(":scope > li")) list.remove();
+  });
+  if (!preserveEmptyParagraphs)
+    documentNode.querySelectorAll("p").forEach((paragraph) => {
+      if (
+        !paragraph.textContent.replace(/\u00a0/g, " ").trim() &&
+        !paragraph.querySelector("img,br,[data-type]")
+      )
+        paragraph.remove();
+    });
+  return documentNode.body.innerHTML.trim();
+};
 
 const SmartCodeBlock = CodeBlockLowlight.extend({
   addAttributes() {
@@ -122,6 +366,16 @@ const downloadSvg = (svg, name, format = "svg") => {
     canvas.toBlob((blob) => { const pngUrl = URL.createObjectURL(blob); const link = Object.assign(document.createElement("a"), { href: pngUrl, download: `${name}.png` }); link.click(); URL.revokeObjectURL(pngUrl); URL.revokeObjectURL(url); }, "image/png");
   };
   image.src = url;
+};
+
+const downloadTextFile = (content, name, extension = "txt", type = "text/plain") => {
+  const url = URL.createObjectURL(new Blob([content || ""], { type }));
+  const link = Object.assign(document.createElement("a"), {
+    href: url,
+    download: `${name}.${extension}`,
+  });
+  link.click();
+  URL.revokeObjectURL(url);
 };
 
 const mermaidToPlantUml = (source) => {
@@ -337,6 +591,129 @@ const ResizableImage = Image.extend({
   },
 });
 
+function ImageGenerationView({ node, selected, updateAttributes, deleteNode, editor, getPos }) {
+  const [draft, setDraft] = useState(node.attrs.prompt || "");
+  const activeRequestRef = useRef(null);
+  const isWorking = ["queued", "running"].includes(node.attrs.status);
+  const replaceWithGeneratedImage = (prompt, src) => {
+    if (!src || editor.isDestroyed) return;
+    const pos = getPos();
+    if (typeof pos !== "number") return;
+    const imageNode = editor.schema.nodes.image.create({
+      src,
+      alt: prompt,
+      title: prompt,
+      caption: prompt,
+      width: "75%",
+      align: "center",
+    });
+    editor.view.dispatch(
+      editor.state.tr.replaceWith(pos, pos + node.nodeSize, imageNode),
+    );
+  };
+  const startGeneration = async (prompt = draft, { force = false } = {}) => {
+    const cleanPrompt = String(prompt || "").trim();
+    if (!cleanPrompt || (node.attrs.status === "running" && !force)) return;
+    const requestId = `imggen-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    activeRequestRef.current = requestId;
+    updateAttributes({
+      prompt: cleanPrompt,
+      status: "running",
+      error: "",
+      resultSrc: "",
+      updatedAt: Date.now(),
+    });
+    try {
+      if (!window.ksnoteImage?.generate)
+        throw new Error("Codex 이미지 생성 브릿지가 연결되지 않았습니다.");
+      const result = await window.ksnoteImage.generate({
+        prompt: cleanPrompt,
+        requestId,
+        command: "codex",
+      });
+      if (activeRequestRef.current !== requestId) return;
+      replaceWithGeneratedImage(cleanPrompt, result?.src);
+    } catch (error) {
+      if (activeRequestRef.current !== requestId) return;
+      updateAttributes({
+        status: "error",
+        error: error.message || "이미지를 생성할 수 없습니다.",
+        updatedAt: Date.now(),
+      });
+    }
+  };
+  useEffect(() => {
+    let frame = 0;
+    if (node.attrs.status === "queued" && node.attrs.prompt) {
+      frame = window.requestAnimationFrame(() =>
+        startGeneration(node.attrs.prompt, { force: true }),
+      );
+    }
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      activeRequestRef.current = null;
+    };
+  }, []);
+  return (
+    <NodeViewWrapper className={`image-gen-block ${selected ? "selected" : ""} status-${node.attrs.status}`} contentEditable={false}>
+      <header>
+        <span><Sparkles /> 이미지 생성</span>
+        <small>{node.attrs.status === "error" ? "확인 필요" : isWorking ? "생성 중" : "대기"}</small>
+        <button title="삭제" onClick={deleteNode}><Trash2 /></button>
+      </header>
+      <div className="image-gen-body">
+        <label className="image-gen-prompt">
+          <span>프롬프트</span>
+          <textarea
+            value={draft}
+            placeholder="예: 궤도 위에 떠 있는 지식 노트 앱 콘셉트 이미지"
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") startGeneration();
+            }}
+          />
+        </label>
+        <div className="image-gen-preview">
+          <div className="image-gen-canvas" aria-label="생성 중인 이미지 미리보기">
+            <i className="image-gen-orbit one" />
+            <i className="image-gen-orbit two" />
+            <i className="image-gen-core" />
+            <span><LoaderCircle /> {isWorking ? "이미지로 변환 중" : "프롬프트 대기"}</span>
+          </div>
+        </div>
+      </div>
+      {node.attrs.error && <p className="image-gen-error">{node.attrs.error}</p>}
+      {!isWorking && (
+      <footer>
+        <button disabled={!draft.trim() || isWorking} onClick={() => startGeneration()}>
+          <Sparkles /> 생성 시작
+        </button>
+      </footer>
+      )}
+    </NodeViewWrapper>
+  );
+}
+
+const ImageGenerationBlock = Node.create({
+  name: "imageGenerationBlock",
+  group: "block",
+  atom: true,
+  draggable: true,
+  selectable: true,
+  addAttributes() {
+    return {
+      prompt: { default: "", parseHTML: (e) => e.getAttribute("data-prompt") || "", renderHTML: (a) => a.prompt ? { "data-prompt": a.prompt } : {} },
+      status: { default: "idle", parseHTML: (e) => e.getAttribute("data-status") || "idle", renderHTML: (a) => ({ "data-status": a.status || "idle" }) },
+      resultSrc: { default: "", parseHTML: (e) => e.getAttribute("data-result-src") || "", renderHTML: (a) => a.resultSrc ? { "data-result-src": a.resultSrc } : {} },
+      error: { default: "", parseHTML: (e) => e.getAttribute("data-error") || "", renderHTML: (a) => a.error ? { "data-error": a.error } : {} },
+      updatedAt: { default: 0, parseHTML: (e) => Number(e.getAttribute("data-updated-at") || 0), renderHTML: (a) => a.updatedAt ? { "data-updated-at": a.updatedAt } : {} },
+    };
+  },
+  parseHTML() { return [{ tag: 'div[data-type="image-generation"]' }]; },
+  renderHTML({ HTMLAttributes }) { return ["div", { ...HTMLAttributes, "data-type": "image-generation" }]; },
+  addNodeView() { return ReactNodeViewRenderer(ImageGenerationView); },
+});
+
 function AttachmentView({ node, deleteNode }) {
   return (
     <NodeViewWrapper className="attachment-block">
@@ -425,22 +802,27 @@ function MermaidView({ node, selected, updateAttributes, deleteNode, editor, get
   const [mode, setMode] = useState("split"),
     [error, setError] = useState(""),
     [svgOutput, setSvgOutput] = useState("");
-  const preview = useRef(null);
+  const renderSeq = useRef(0);
   const id = useId().replace(/:/g, "");
   useEffect(() => {
+    const currentSeq = renderSeq.current + 1;
+    renderSeq.current = currentSeq;
     let live = true;
+    setError("");
+    setSvgOutput("");
     mermaid
-      .render(`ks-mermaid-${id}`, node.attrs.code)
+      .render(`ks-mermaid-${id}-${currentSeq}`, node.attrs.code)
       .then(({ svg }) => {
-        if (live && preview.current) {
-          preview.current.innerHTML = svg;
+        if (live && renderSeq.current === currentSeq) {
           setSvgOutput(svg);
           setError("");
         }
       })
       .catch((err) => {
-        if (live)
+        if (live && renderSeq.current === currentSeq) {
+          setSvgOutput("");
           setError(err.message?.split("\n")[0] || "Mermaid 문법을 확인하세요");
+        }
       });
     return () => {
       live = false;
@@ -495,7 +877,7 @@ function MermaidView({ node, selected, updateAttributes, deleteNode, editor, get
         )}
         {mode !== "source" && (
           <div className="mermaid-preview">
-            {error ? <p>{error}</p> : <div ref={preview} />}
+            {error ? <p>{error}</p> : <div dangerouslySetInnerHTML={{ __html: svgOutput }} />}
           </div>
         )}
       </div>
@@ -525,6 +907,143 @@ const MermaidBlock = Node.create({
   },
   addNodeView() {
     return ReactNodeViewRenderer(MermaidView);
+  },
+});
+
+const defaultDrawIoXml = `<mxfile>
+  <diagram name="Page-1">
+    <mxGraphModel dx="900" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>`;
+
+const DRAWIO_ORIGIN = "https://embed.diagrams.net";
+const DRAWIO_ALLOWED_ORIGINS = new Set([
+  "https://embed.diagrams.net",
+  "https://app.diagrams.net",
+]);
+const DRAWIO_EDITOR_URL =
+  `${DRAWIO_ORIGIN}/?embed=1&proto=json&spin=1&libraries=1&saveAndExit=1&noExitBtn=1&suppressNewWindows=1&ui=atlas`;
+
+function DrawIoView({ node, selected, updateAttributes, deleteNode }) {
+  const iframeRef = useRef(null);
+  const [mode, setMode] = useState(node.attrs.view || "edit");
+  const [status, setStatus] = useState("loading");
+  const code = node.attrs.code || defaultDrawIoXml;
+  const postDrawIo = (message) => {
+    iframeRef.current?.contentWindow?.postMessage(JSON.stringify(message), "*");
+  };
+  useEffect(() => {
+    if (mode !== "edit") return undefined;
+    const handleMessage = (event) => {
+      if (!DRAWIO_ALLOWED_ORIGINS.has(event.origin) || !event.data) return;
+      let payload = event.data;
+      if (typeof payload === "string") {
+        try {
+          payload = JSON.parse(payload);
+        } catch {
+          return;
+        }
+      }
+      if (!payload || typeof payload !== "object") return;
+      if (payload.event === "init") {
+        setStatus("ready");
+        postDrawIo({
+          action: "load",
+          xml: code,
+          autosave: 1,
+          saveAndExit: 1,
+          noExitBtn: 1,
+          title: "KsNote draw.io",
+          modified: 0,
+        });
+      } else if ((payload.event === "autosave" || payload.event === "save") && payload.xml) {
+        updateAttributes({ code: payload.xml });
+        setStatus(payload.event === "save" ? "saved" : "autosaved");
+        if (payload.exit) setMode("source");
+      } else if (payload.event === "load") {
+        setStatus("ready");
+      } else if (payload.event === "exit") {
+        setMode("source");
+      }
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [mode, code, updateAttributes]);
+  return (
+    <NodeViewWrapper className={`mermaid-block drawio-block ${selected ? "selected" : ""}`}>
+      <header>
+        <span><Workflow /> draw.io</span>
+        <nav>
+          {[
+            ["edit", "Editor"],
+            ["source", "XML"],
+          ].map(([item, label]) => (
+            <button key={item} className={mode === item ? "active" : ""} onClick={() => setMode(item)}>
+              {label}
+            </button>
+          ))}
+        </nav>
+        <button title="저장 요청" onClick={() => postDrawIo({ action: "save" })}><Check /></button>
+        <button title="XML 복사" onClick={() => navigator.clipboard.writeText(code)}><Copy /></button>
+        <button title="draw.io 파일 저장" onClick={() => downloadTextFile(code, "drawio-diagram", "drawio", "application/xml")}><Download /></button>
+        <button title="삭제" onClick={deleteNode}><Trash2 /></button>
+      </header>
+      <div className={`drawio-body mode-${mode}`}>
+        {mode === "source" ? (
+          <textarea
+            value={code}
+            onChange={(event) => updateAttributes({ code: event.target.value })}
+            spellCheck="false"
+          />
+        ) : (
+          <div className="drawio-frame-shell">
+            <iframe
+              ref={iframeRef}
+              title="draw.io editor"
+              src={DRAWIO_EDITOR_URL}
+              allow="clipboard-read; clipboard-write"
+            />
+            <span className={`drawio-status ${status}`}>{status === "loading" ? "Loading" : status === "saved" ? "Saved" : status === "autosaved" ? "Autosaved" : "Ready"}</span>
+          </div>
+        )}
+      </div>
+    </NodeViewWrapper>
+  );
+}
+
+const DrawIoBlock = Node.create({
+  name: "drawIoBlock",
+  group: "block",
+  atom: true,
+  draggable: true,
+  selectable: true,
+  addAttributes() {
+    return {
+      code: {
+        default: defaultDrawIoXml,
+        parseHTML: (e) => e.getAttribute("data-code") || "",
+        renderHTML: (a) => ({ "data-code": a.code }),
+      },
+      view: {
+        default: "edit",
+        parseHTML: (e) => e.getAttribute("data-view") || "edit",
+        renderHTML: (a) => ({ "data-view": a.view || "edit" }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'div[data-type="drawio"]' }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", { ...HTMLAttributes, "data-type": "drawio" }];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(DrawIoView);
   },
 });
 
@@ -600,7 +1119,7 @@ const TableOfContentsBlock = Node.create({
 });
 
 const asHtml = (value) =>
-  /^\s*</.test(value || "") ? value : marked.parse(value || "");
+  normalizeRichHtml(value, { preserveEmptyParagraphs: true });
 
 function RichPreview({ html }) {
   const root = useRef(null);
@@ -730,11 +1249,16 @@ export default function RichDocumentEditor({
   projectId,
   content,
   mode = "edit",
-  preferredProvider = "codex",
+  preferredModel = "gpt-5.6-sol",
+  availableModels = [
+    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "codex" },
+  ],
   agentCommands = { codex: "codex", claude: "claude" },
   preferences = { fontSize: 14, fontFamily: "sans", spellcheck: false },
   onChange,
   onCreateChildPage,
+  onTargetChange,
+  onExternalOperation,
 }) {
   const [gridOpen, setGridOpen] = useState(false);
   const [diagramOpen, setDiagramOpen] = useState(false);
@@ -767,16 +1291,24 @@ export default function RichDocumentEditor({
   const rootRef = useRef(null);
   const savedSelection = useRef(null);
   const composingRef = useRef(false);
+  const externalOperationIds = useRef(new Set());
   const [aiOpen, setAiOpen] = useState(false),
     [aiMode, setAiMode] = useState("edit"),
     [aiPrompt, setAiPrompt] = useState(""),
-    [aiProvider, setAiProvider] = useState(preferredProvider),
+    [aiModel, setAiModel] = useState(preferredModel),
     [aiLoading, setAiLoading] = useState(false),
     [aiResult, setAiResult] = useState(null),
     [aiError, setAiError] = useState(""),
     [aiStream, setAiStream] = useState(""),
+    [aiProgress, setAiProgress] = useState({ stage: "idle", startedAt: 0 }),
+    [aiElapsed, setAiElapsed] = useState(0),
     [aiSessionScope, setAiSessionScope] = useState("note"),
     [aiHistoryOpen, setAiHistoryOpen] = useState(false),
+    [aiSessionMeta, setAiSessionMeta] = useState([]),
+    [aiUsageBySession, setAiUsageBySession] = useState({}),
+    [activeAiSessionId, setActiveAiSessionId] = useState(
+      () => `ai-session-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    ),
     [aiSessions, setAiSessions] = useState(() => {
       try { return JSON.parse(localStorage.getItem("ksnote-ai-prompt-sessions")) || []; }
       catch { return []; }
@@ -796,14 +1328,153 @@ export default function RichDocumentEditor({
       window.dispatchEvent(new CustomEvent("ksnote-ai-debug-log", { detail: next.slice(0, 50) }));
     } catch {}
   };
-  useEffect(() => setAiProvider(preferredProvider), [preferredProvider]);
+  const writeAiAuditLog = (entry) => {
+    try {
+      const key = "ksnote-ai-audit-log";
+      const logs = JSON.parse(localStorage.getItem(key)) || [];
+      localStorage.setItem(
+        key,
+        JSON.stringify([{ at: Date.now(), noteId, projectId, ...entry }, ...logs].slice(0, 200)),
+      );
+    } catch {}
+  };
+  const writeEditorDebugLog = (entry) => {
+    if (!preferences.developerMode) return;
+    try {
+      const key = "ksnote-editor-debug-logs";
+      const logs = JSON.parse(localStorage.getItem(key)) || [];
+      const next = [{ id: `editor-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, createdAt: Date.now(), ...entry }, ...logs].slice(0, 30);
+      localStorage.setItem(key, JSON.stringify(next));
+      window.dispatchEvent(new CustomEvent("ksnote-editor-debug-log", { detail: next }));
+    } catch {}
+  };
+  useEffect(() => setAiModel(preferredModel), [preferredModel]);
   useEffect(() => {
     localStorage.setItem("ksnote-ai-prompt-sessions", JSON.stringify(aiSessions.slice(0, 100)));
   }, [aiSessions]);
-  useEffect(() => window.ksnoteAI?.onChunk?.(({ requestId, chunk }) => {
-    if (requestId === aiRequestRef.current) setAiStream((value) => value + chunk);
+  useEffect(() => {
+    let live = true;
+    window.ksnoteAI?.turns?.({ projectId }).then((rows) => {
+      if (!live || !Array.isArray(rows)) return;
+      const restored = rows.map((row) => ({
+        id: row.id,
+        sessionId: row.session_id,
+        noteId: row.note_id,
+        projectId: row.project_id,
+        instruction: row.instruction,
+        mode: row.mode,
+        provider: row.provider,
+        model: row.model,
+        target: "note",
+        sourceRevision: row.source_revision,
+        appliedRevision: row.applied_revision,
+        output: row.status === "error" ? "" : row.response,
+        error: row.status === "error" ? row.response : "",
+        status: row.applied_revision ? "applied" : row.status,
+        createdAt: row.created_at,
+        respondedAt: row.updated_at,
+        restored: true,
+      }));
+      setAiSessions((current) => {
+        const localById = new Map(current.map((session) => [session.id, session]));
+        restored.forEach((session) => {
+          localById.set(session.id, {
+            ...session,
+            ...(localById.get(session.id) || {}),
+          });
+        });
+        return Array.from(localById.values())
+          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+          .slice(0, 100);
+      });
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [projectId]);
+  useEffect(() => {
+    let live = true;
+    window.ksnoteAI?.sessions?.({ projectId }).then((rows) => {
+      if (!live || !Array.isArray(rows)) return;
+      setAiSessionMeta(rows);
+      setAiUsageBySession((current) => {
+        const next = { ...current };
+        rows.forEach((row) => {
+          next[row.id] = {
+            last: {
+              inputTokens: row.context_tokens || 0,
+              outputTokens: 0,
+              totalTokens: row.context_tokens || 0,
+            },
+            total: {
+              inputTokens: row.input_tokens || 0,
+              outputTokens: row.output_tokens || 0,
+              totalTokens: row.total_tokens || 0,
+            },
+            modelContextWindow: row.context_window || 0,
+          };
+        });
+        return next;
+      });
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [projectId, aiHistoryOpen]);
+  useEffect(() => window.ksnoteAI?.onUsage?.(({ sessionId, usage }) => {
+    setAiUsageBySession((current) => ({ ...current, [sessionId]: usage }));
   }), []);
+  useEffect(() => window.ksnoteAI?.onCompacted?.(({ sessionId }) => {
+    setAiUsageBySession((current) => ({
+      ...current,
+      [sessionId]: {
+        total: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        modelContextWindow: 0,
+      },
+    }));
+  }), []);
+  useEffect(() => {
+    setActiveAiSessionId(
+      `ai-session-${noteId}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    );
+    setAiResult(null);
+    setAiError("");
+    setAiStream("");
+  }, [noteId]);
+  useEffect(() => window.ksnoteAI?.onChunk?.(({ requestId, chunk }) => {
+    if (requestId === aiRequestRef.current) {
+      setAiProgress((value) => ({ ...value, stage: "receiving" }));
+      setAiStream((value) => value + chunk);
+    }
+  }), []);
+  useEffect(() => {
+    if (!aiLoading || !aiProgress.startedAt) {
+      setAiElapsed(0);
+      return undefined;
+    }
+    const update = () =>
+      setAiElapsed(Math.max(0, Date.now() - aiProgress.startedAt));
+    update();
+    const timer = window.setInterval(update, 250);
+    return () => window.clearInterval(timer);
+  }, [aiLoading, aiProgress.startedAt]);
   const visibleAiSessions = aiSessions.filter((session) => aiSessionScope === "project" ? session.projectId === projectId : session.noteId === noteId);
+  const visibleAiConversations = Array.from(
+    visibleAiSessions.reduce((groups, session) => {
+      const sessionId = session.sessionId || session.id;
+      if (!groups.has(sessionId)) {
+        const meta = aiSessionMeta.find((item) => item.id === sessionId);
+        groups.set(sessionId, {
+          ...session,
+          sessionId,
+          title: meta?.title || session.instruction,
+          usage: aiUsageBySession[sessionId],
+          turnCount: visibleAiSessions.filter(
+            (item) => (item.sessionId || item.id) === sessionId,
+          ).length,
+          compactedAt: meta?.compacted_at || null,
+        });
+      }
+      return groups;
+    }, new Map()).values(),
+  );
+  const detectedPromptLinks = extractExternalLinks(aiPrompt);
   const slashCommands = [
     {
       id: "page",
@@ -830,6 +1501,14 @@ export default function RichDocumentEditor({
       keywords: "file upload 파일 업로드 image gif",
     },
     {
+      id: "imggen",
+      label: "이미지 생성",
+      command: "/imggen",
+      description: "프롬프트를 블록으로 처리하고 계속 편집",
+      icon: Sparkles,
+      keywords: "imggen image generate 생성 이미지 그림 ai",
+    },
+    {
       id: "code",
       label: "코드 블록",
       command: "/code",
@@ -841,9 +1520,9 @@ export default function RichDocumentEditor({
       id: "diagram",
       label: "다이어그램",
       command: "/diagram",
-      description: "Mermaid 또는 PlantUML 형식 선택",
+      description: "Mermaid, PlantUML, draw.io 형식 선택",
       icon: Workflow,
-      keywords: "diagram 다이어그램 mermaid plantuml uml",
+      keywords: "diagram 다이어그램 mermaid plantuml drawio uml",
     },
     {
       id: "mermaid",
@@ -860,6 +1539,30 @@ export default function RichDocumentEditor({
       description: "PlantUML 로컬 런타임 설정 안내",
       icon: Code2,
       keywords: "plantuml uml diagram 다이어그램",
+    },
+    {
+      id: "draw_edit",
+      label: "draw.io 편집",
+      command: "/draw_edit",
+      description: "diagrams.net 편집창을 블록 안에서 열기",
+      icon: Workflow,
+      keywords: "draw drawio diagrams.net edit 다이어그램 편집",
+    },
+    {
+      id: "draw_xml",
+      label: "draw.io XML",
+      command: "/draw_xml",
+      description: "draw.io XML 소스 블록",
+      icon: Code2,
+      keywords: "draw drawio diagrams.net xml 다이어그램",
+    },
+    {
+      id: "draw_mermaid",
+      label: "draw Mermaid",
+      command: "/draw_mermaid",
+      description: "Mermaid 다이어그램 블록",
+      icon: Workflow,
+      keywords: "draw mermaid diagram flowchart 다이어그램",
     },
     {
       id: "toc",
@@ -1018,7 +1721,7 @@ export default function RichDocumentEditor({
       requestAnimationFrame(() => fileInput.current?.click());
       return;
     }
-    if (item.id === "diagram" || item.id === "plantuml") {
+    if (item.id === "diagram") {
       pendingDiagramPos.current = current.from;
       editor
         .chain()
@@ -1048,6 +1751,19 @@ export default function RichDocumentEditor({
     else if (item.id === "code") chain.setCodeBlock();
     else if (item.id === "mermaid")
       chain.insertContent({ type: "mermaidBlock" });
+    else if (item.id === "plantuml")
+      chain.insertContent({ type: "plantUmlBlock" });
+    else if (item.id === "draw_edit")
+      chain.insertContent({ type: "drawIoBlock", attrs: { view: "edit" } });
+    else if (item.id === "draw_xml")
+      chain.insertContent({ type: "drawIoBlock", attrs: { view: "source" } });
+    else if (item.id === "draw_mermaid")
+      chain.insertContent({ type: "mermaidBlock" });
+    else if (item.id === "imggen")
+      chain.insertContent([
+        { type: "imageGenerationBlock" },
+        { type: "paragraph" },
+      ]);
     else if (item.id === "toc")
       chain.insertContent({ type: "tableOfContents" });
     else if (item.id === "check") chain.toggleTaskList();
@@ -1078,9 +1794,11 @@ export default function RichDocumentEditor({
       Highlight.configure({ multicolor: true }),
       TextAlign.configure({ types: ["heading", "paragraph"] }),
       ResizableImage.configure({ allowBase64: true, inline: false }),
+      ImageGenerationBlock,
       AttachmentBlock,
       MermaidBlock,
       PlantUmlBlock,
+      DrawIoBlock,
       TableOfContentsBlock,
       TaskList,
       SmartTaskItem.configure({ nested: true }),
@@ -1237,6 +1955,41 @@ export default function RichDocumentEditor({
         return true;
       },
       handleKeyDown(view, event) {
+        if (
+          event.key === "Enter" &&
+          preferences.developerMode &&
+          view.state.selection.$from.parent.type.name === "heading"
+        ) {
+          const { $from } = view.state.selection;
+          const diagnostic = {
+            event: "heading-enter",
+            shiftKey: event.shiftKey,
+            altKey: event.altKey,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            isComposing: event.isComposing,
+            editorComposing: view.composing,
+            keyCode: event.keyCode,
+            nodeTypeBefore: $from.parent.type.name,
+            headingLevelBefore: $from.parent.attrs.level ?? null,
+            parentOffsetBefore: $from.parentOffset,
+            contentSizeBefore: $from.parent.content.size,
+            atEndBefore: $from.parentOffset === $from.parent.content.size,
+            textBefore: $from.parent.textContent.slice(0, 300),
+          };
+          requestAnimationFrame(() => {
+            if (view.isDestroyed) return;
+            const { $from: $after } = view.state.selection;
+            writeEditorDebugLog({
+              ...diagnostic,
+              nodeTypeAfter: $after.parent.type.name,
+              headingLevelAfter: $after.parent.attrs.level ?? null,
+              parentOffsetAfter: $after.parentOffset,
+              contentSizeAfter: $after.parent.content.size,
+              textAfter: $after.parent.textContent.slice(0, 300),
+            });
+          });
+        }
         const menu = slashRef.current;
         if (menu?.slash && menu.filtered.length) {
           if (event.key === "ArrowDown") {
@@ -1294,7 +2047,25 @@ export default function RichDocumentEditor({
         }
         if (event.key === "Enter") {
           const { $from } = view.state.selection;
-          const text = $from.parent.textContent.trim().toLowerCase();
+          const rawText = $from.parent.textContent.trim();
+          const imggenMatch = rawText.match(/^\/imggen\s+(.+)/i);
+          if (imggenMatch) {
+            event.preventDefault();
+            editor
+              ?.chain()
+              .focus()
+              .deleteRange({ from: $from.start(), to: $from.end() })
+              .insertContent([
+                {
+                  type: "imageGenerationBlock",
+                  attrs: { prompt: imggenMatch[1].trim(), status: "queued" },
+                },
+                { type: "paragraph" },
+              ])
+              .run();
+            return true;
+          }
+          const text = rawText.toLowerCase();
           if (text === "/table" || text === "/표") {
             event.preventDefault();
             const from = $from.start(),
@@ -1319,20 +2090,192 @@ export default function RichDocumentEditor({
       const { from, to } = editor.state.selection;
       if (from !== to) savedSelection.current = { from, to };
       setTableContextOpen(editor.isActive("table"));
+      onTargetChange?.({
+        noteId,
+        projectId,
+        from,
+        to,
+        empty: from === to,
+        text: editor.state.doc.textBetween(from, to, "\n").slice(0, 240),
+      });
       detectSlash(editor);
     },
   });
   useEffect(() => {
     if (editor) {
+      const { from, to } = editor.state.selection;
+      onTargetChange?.({
+        noteId,
+        projectId,
+        from,
+        to,
+        empty: from === to,
+        text: editor.state.doc.textBetween(from, to, "\n").slice(0, 240),
+      });
       const incoming = asHtml(content);
       setPreviewHtml(incoming);
       if (editor.getHTML() !== incoming)
         editor.commands.setContent(incoming, false);
+      if (
+        /<li\b[^>]*>\s*(?:<p\b[^>]*>)?\s*(?:&nbsp;|\u00a0)?\s*(?:<\/p>)?\s*<\/li>/i.test(
+          content || "",
+        ) &&
+        incoming !== content
+      )
+        onChange(incoming);
     }
   }, [noteId]);
   useEffect(() => {
     if (editor) editor.setEditable(mode !== "preview");
   }, [editor, mode]);
+  useEffect(() => {
+    if (!editor || !noteId || mode === "preview") return undefined;
+    let stopped = false;
+    const applyOperation = async (operation) => {
+      if (!operation?.id || externalOperationIds.current.has(operation.id))
+        return;
+      const claimed = await window.ksnoteMcp?.claim?.({
+        id: operation.id,
+        noteId,
+      });
+      if (!claimed || claimed.status !== "applying") return;
+      externalOperationIds.current.add(operation.id);
+      try {
+        const currentRevision = contentRevision(editor.getHTML());
+        if (
+          claimed.expectedRevision &&
+          claimed.expectedRevision !== currentRevision
+        ) {
+        await window.ksnoteMcp?.complete?.({
+            id: claimed.id,
+            status: "error",
+            code: "revision_conflict",
+            message: "노트가 MCP 요청 이후 변경되었습니다.",
+            currentRevision,
+            expectedRevision: claimed.expectedRevision,
+          });
+          onExternalOperation?.({
+            status: "error",
+            message: "MCP 작업 실패: 노트가 변경되어 다이어그램을 삽입하지 않았습니다.",
+          });
+          return;
+        }
+        const isTextInsert = claimed.type === "text_insert";
+        if (isTextInsert) {
+          const encodingIssue = detectEncodingDamage(claimed.text);
+          if (encodingIssue) {
+            await window.ksnoteMcp?.complete?.({
+              id: claimed.id,
+              status: "error",
+              code: "encoding_suspect",
+              message: `${encodingIssue} 삽입을 중단했습니다.`,
+            });
+            onExternalOperation?.({
+              status: "error",
+              message: "MCP 작업 실패: 텍스트 인코딩이 깨진 것 같아 삽입하지 않았습니다.",
+            });
+            return;
+          }
+        }
+        const format = String(claimed.format || "mermaid").toLowerCase();
+        const nodeType = isTextInsert
+          ? null
+          : format === "plantuml"
+            ? "plantUmlBlock"
+            : format === "drawio"
+              ? "drawIoBlock"
+              : "mermaidBlock";
+        const maxPos = editor.state.doc.content.size;
+        const target = claimed.target || {};
+        const from = claimed.operation === "append"
+          ? maxPos
+          : Number.isFinite(target.from)
+          ? Math.max(0, Math.min(target.from, maxPos))
+          : maxPos;
+        const to = Number.isFinite(target.to)
+          ? Math.max(from, Math.min(target.to, maxPos))
+          : from;
+        const range =
+          claimed.operation === "replace-selection" || from !== to
+            ? { from, to }
+            : from;
+        editor
+          .chain()
+          .focus()
+          .insertContentAt(
+            range,
+            isTextInsert
+              ? claimed.text || ""
+              : {
+                  type: nodeType,
+                  attrs: {
+                    code: claimed.code || "",
+                    ...(format === "drawio" ? { view: "edit" } : {}),
+                  },
+                },
+          )
+          .run();
+        const appliedRevision = contentRevision(editor.getHTML());
+        await window.ksnoteMcp?.complete?.({
+          id: claimed.id,
+          status: "completed",
+          appliedRevision,
+        });
+        onExternalOperation?.({
+          status: "completed",
+          message:
+            isTextInsert
+              ? "MCP 작업 완료: 텍스트를 삽입했습니다."
+              : format === "plantuml"
+              ? "MCP 작업 완료: PlantUML 다이어그램을 삽입했습니다."
+              : format === "drawio"
+                ? "MCP 작업 완료: draw.io 다이어그램을 삽입했습니다."
+              : "MCP 작업 완료: Mermaid 다이어그램을 삽입했습니다.",
+        });
+      } catch (error) {
+        await window.ksnoteMcp?.complete?.({
+          id: operation.id,
+          status: "error",
+          code: "apply_failed",
+          message: error.message || "MCP 작업 적용에 실패했습니다.",
+        });
+        onExternalOperation?.({
+          status: "error",
+          message: `MCP 작업 실패: ${error.message || "다이어그램을 삽입하지 못했습니다."}`,
+        });
+      }
+    };
+    const poll = async () => {
+      if (stopped || !window.ksnoteMcp?.pending) return;
+      const operations = await window.ksnoteMcp.pending({ noteId }).catch(
+        () => [],
+      );
+      for (const operation of operations) await applyOperation(operation);
+    };
+    poll();
+    const timer = window.setInterval(poll, 1000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [editor, noteId, mode]);
+  useEffect(() => {
+    if (!editor || !noteId) return undefined;
+    const writeHeartbeat = () => {
+      const { from, to } = editor.state.selection;
+      window.ksnoteMcp?.heartbeat?.({
+        noteId,
+        projectId,
+        mode,
+        editable: mode !== "preview",
+        revision: contentRevision(editor.getHTML()),
+        selection: { from, to, empty: from === to },
+      }).catch(() => {});
+    };
+    writeHeartbeat();
+    const timer = window.setInterval(writeHeartbeat, 5000);
+    return () => window.clearInterval(timer);
+  }, [editor, noteId, projectId, mode]);
   useEffect(() => {
     if (!editor) return;
     editor.view.dom.setAttribute(
@@ -1347,10 +2290,12 @@ export default function RichDocumentEditor({
       if (!(target instanceof Element)) return;
       const insideTable = Boolean(target.closest(".mori-rich-content td, .mori-rich-content th"));
       const insideTableToolbar = Boolean(target.closest(".table-context"));
-      if (insideTable || insideTableToolbar) {
-        setTableContextOpen(true);
-        return;
-      }
+      // A table pointerdown happens before ProseMirror updates its selection.
+      // Let onSelectionUpdate activate the toolbar after the clicked cell is
+      // the real editor selection; setting true here can render against the
+      // previous paragraph selection and leave the toolbar stuck closed.
+      if (insideTable) return;
+      if (insideTableToolbar) return;
       setTableContextOpen(false);
     };
     document.addEventListener("pointerdown", handlePointerDown, true);
@@ -1373,7 +2318,6 @@ export default function RichDocumentEditor({
     };
   }, [editor]);
   if (!editor) return null;
-  const inTable = editor.isActive("table");
   const inCode = editor.isActive("codeBlock");
   const inTask = editor.isActive("taskItem");
   const taskAttrs = editor.getAttributes("taskItem");
@@ -1407,6 +2351,13 @@ export default function RichDocumentEditor({
     const pos = pendingDiagramPos.current;
     if (pos != null) editor.commands.insertContentAt(pos, { type: "plantUmlBlock" });
     else editor.chain().focus().insertContent({ type: "plantUmlBlock" }).run();
+    pendingDiagramPos.current = null;
+    setDiagramOpen(false);
+  };
+  const insertDrawIo = () => {
+    const pos = pendingDiagramPos.current;
+    if (pos != null) editor.commands.insertContentAt(pos, { type: "drawIoBlock", attrs: { view: "edit" } });
+    else editor.chain().focus().insertContent({ type: "drawIoBlock", attrs: { view: "edit" } }).run();
     pendingDiagramPos.current = null;
     setDiagramOpen(false);
   };
@@ -1583,47 +2534,155 @@ export default function RichDocumentEditor({
     if (!instruction.trim() || aiLoading) return;
     const { from, to } = editor.state.selection;
     const selection = editor.state.doc.textBetween(from, to, "\n");
-    const target = targetOverride || (from !== to ? "selection" : "note");
+    const activeContext = getActiveBlockContext(editor);
+    const target =
+      targetOverride ||
+      (aiMode === "edit"
+        ? wantsWholeNoteEdit(instruction)
+          ? "note"
+          : activeContext.target
+        : "note");
     const range =
       target === "table"
         ? getTableRange()
-        : target === "selection"
-          ? { from, to }
-          : null;
+        : target === activeContext.target
+          ? activeContext.range
+          : target === "selection"
+            ? { from, to }
+            : null;
     const originalHtml = editor.getHTML();
-    aiTargetRef.current = { target, range, originalHtml };
-    if (aiMode === "research" && !window.confirm("Atlassian Rovo 조사 모드로 실행합니다. 입력한 프롬프트와 현재 노트 내용이 외부 서비스로 전송될 수 있습니다. 계속할까요?")) return;
+    const selectionHtml = serializeEditorRange(editor, range, selection);
+    const operation =
+      aiMode === "edit" && target !== "table"
+        ? requestedEditOperation(instruction)
+        : "replace";
+    const editContext = {
+      kind: target,
+      nodeType:
+        target === "table"
+          ? "table"
+          : target === "note"
+            ? "doc"
+            : activeContext.nodeType,
+      label:
+        target === "table"
+          ? "현재 표"
+          : target === "note"
+            ? "전체 노트"
+            : activeContext.label,
+      cursorOffset: activeContext.cursorOffset ?? null,
+      ancestors: activeContext.ancestors || [],
+      html: target === "note" ? originalHtml : selectionHtml,
+      text:
+        target === "note"
+          ? editor.state.doc.textContent
+          : editor.state.doc.textBetween(range?.from || from, range?.to || to, "\n"),
+      requestedOperation: operation,
+    };
+    const sourceRevision = contentRevision(originalHtml);
+    const externalLinks = extractExternalLinks(`${instruction}\n${selection}`);
+    const externalTargets = parseAtlassianTargets(externalLinks);
+    const selectedModel =
+      availableModels.find((model) => model.id === aiModel) ||
+      availableModels[0];
+    const provider = selectedModel?.provider || "codex";
+    aiTargetRef.current = {
+      target,
+      range,
+      originalHtml,
+      operation,
+      label: editContext.label,
+    };
+    let researchApprovedAt = null;
+    if (aiMode === "research") {
+      if (!window.confirm(`Atlassian Rovo 조사 모드로 실행합니다.\n\n전송 범위: 프롬프트, 현재 노트, 선택 영역\n감지된 대상: ${externalLinks.join(", ") || "링크 또는 이슈 키 없음"}\n\n읽기 전용 조회를 계속할까요?`)) return;
+      researchApprovedAt = Date.now();
+    }
     setAiOpen(true);
     setAiLoading(true);
     setAiError("");
     setAiResult(null);
     setAiStream("");
+    setAiProgress({ stage: "preparing", startedAt: Date.now() });
     const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     aiRequestRef.current = requestId;
-    writeAiDebugLog(requestId, { status: "running", noteId, projectId, provider: aiProvider, mode: aiMode, target, prompt: instruction.trim(), selection, pageBefore: originalHtml, response: "" });
-    const sessionBase = { id: requestId, noteId, projectId, instruction: instruction.trim(), mode: aiMode, provider: aiProvider, target, createdAt: Date.now() };
+    writeAiDebugLog(requestId, { status: "running", noteId, projectId, provider, model: selectedModel?.id, mode: aiMode, target, prompt: instruction.trim(), selection, pageBefore: originalHtml, response: "" });
+    writeAiAuditLog({ requestId, status: "running", provider, model: selectedModel?.id, mode: aiMode, target, sourceRevision, externalLinks, externalTargets, researchApprovedAt });
+    const sessionBase = { id: requestId, sessionId: activeAiSessionId, noteId, projectId, instruction: instruction.trim(), mode: aiMode, provider, model: selectedModel?.id, target, sourceRevision, externalLinks, externalTargets, researchApprovedAt, createdAt: Date.now() };
     try {
       if (!window.ksnoteAI?.run)
         throw new Error(
           "데스크톱 앱에서 실행해야 AI CLI를 사용할 수 있습니다.",
         );
-      const output = await window.ksnoteAI.run({
-        provider: aiProvider,
-        command: agentCommands[aiProvider],
+      setAiProgress((value) => ({ ...value, stage: "connecting" }));
+      const runPromise = window.ksnoteAI.run({
+        noteId,
+        projectId,
+        sessionId: activeAiSessionId,
+        provider,
+        model: selectedModel?.id,
+        command: agentCommands[provider],
         mode: aiMode,
         instruction,
-        content: editor.getHTML(),
+        content: aiMode === "edit" ? editContext.html : editor.getHTML(),
+        noteContent: editor.getHTML(),
         selection,
+        selectionHtml,
+        editContext,
+        requestedOperation: operation,
+        sourceRevision,
+        externalLinks,
         target,
         requestId,
       });
-      setAiResult({ output, instruction, mode: aiMode, target, originalHtml, requestId });
-      writeAiDebugLog(requestId, { status: "responded", response: output, responseVisible: true });
-      setAiSessions((sessions) => [{ ...sessionBase, output, status: "done" }, ...sessions].slice(0, 100));
+      window.setTimeout(() => {
+        if (aiRequestRef.current === requestId)
+          setAiProgress((value) =>
+            value.stage === "connecting"
+              ? { ...value, stage: "generating" }
+              : value,
+          );
+      }, 700);
+      const rawOutput = await runPromise;
+      setAiProgress((value) => ({ ...value, stage: "preview" }));
+      const patch = aiMode === "edit" ? parseAIPatch(rawOutput, target) : null;
+      if (patch) patch.operation = operation;
+      if (patch && target === "table")
+        patch.html = preserveTableFormatting(selectionHtml, patch.html);
+      const output = normalizeRichHtml(
+        patch ? patch.html : rawOutput,
+        { allowImages: false },
+      );
+      if (!output)
+        throw new Error("AI 응답에 삽입할 수 있는 내용이 없습니다.");
+      const sources = aiMode === "research"
+        ? extractExternalLinks(`${rawOutput}\n${externalLinks.join("\n")}`)
+        : [];
+      setAiResult({
+        output,
+        patch,
+        sources,
+        instruction,
+        mode: aiMode,
+        target,
+        originalHtml,
+        beforeHtml: target === "note" ? originalHtml : selectionHtml,
+        sourceRevision,
+        requestId,
+      });
+      writeAiDebugLog(requestId, {
+        status: "responded",
+        rawResponse: rawOutput,
+        response: output,
+        responseVisible: true,
+      });
+      writeAiAuditLog({ requestId, status: "responded", sourceRevision, sources });
+      setAiSessions((sessions) => [{ ...sessionBase, output, patch, sources, status: "done", respondedAt: Date.now() }, ...sessions].slice(0, 100));
     } catch (err) {
       const message = err.message || "AI 실행에 실패했습니다.";
       setAiError(message);
       writeAiDebugLog(requestId, { status: "error", error: message, responseVisible: false });
+      writeAiAuditLog({ requestId, status: "error", sourceRevision, error: message });
       setAiSessions((sessions) => [{ ...sessionBase, error: message, status: "error" }, ...sessions].slice(0, 100));
     } finally {
       setAiLoading(false);
@@ -1634,44 +2693,88 @@ export default function RichDocumentEditor({
     if (!aiRequestRef.current) return;
     await window.ksnoteAI?.cancel?.(aiRequestRef.current);
     writeAiDebugLog(aiRequestRef.current, { status: "cancelled", response: aiStream, responseVisible: Boolean(aiStream) });
+    writeAiAuditLog({ requestId: aiRequestRef.current, status: "cancelled" });
     setAiLoading(false); setAiError("요청을 취소했습니다."); aiRequestRef.current = null;
   };
   const cleanAIHtml = (value) =>
-    value
-      .replace(/^```(?:html)?\s*/i, "")
-      .replace(/```\s*$/, "")
-      .trim();
+    normalizeRichHtml(value, { allowImages: false });
   const openAISession = (session) => {
-    setAiPrompt(session.instruction); setAiMode(session.mode); setAiProvider(session.provider);
+    setActiveAiSessionId(session.sessionId || session.id);
+    setAiPrompt(session.instruction); setAiMode(session.mode); setAiModel(session.model || (session.provider === "claude" ? "sonnet" : preferredModel));
     setAiError(session.error || "");
-    setAiResult(session.output ? { output: session.output, instruction: session.instruction, mode: session.mode, target: session.target, requestId: session.id, replay: true } : null);
+    setAiResult(session.output ? { output: session.output, patch: session.patch, sources: session.sources || session.externalLinks || [], instruction: session.instruction, mode: session.mode, target: session.target, sourceRevision: session.sourceRevision, requestId: session.id, replay: true } : null);
     aiTargetRef.current = { target: session.target, range: null };
     setAiHistoryOpen(false);
   };
-  const startNewAISession = () => { setAiPrompt(""); setAiResult(null); setAiError(""); setAiHistoryOpen(false); };
+  const startNewAISession = () => {
+    setActiveAiSessionId(
+      `ai-session-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    );
+    setAiPrompt("");
+    setAiResult(null);
+    setAiError("");
+    setAiStream("");
+    setAiHistoryOpen(false);
+  };
+  const switchAiMode = (nextMode) => {
+    if (nextMode !== aiMode) {
+      setActiveAiSessionId(
+        `ai-session-${noteId}-${nextMode}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      );
+      setAiResult(null);
+      setAiError("");
+      setAiStream("");
+    }
+    setAiMode(nextMode);
+  };
   const applyAI = (action = "replace") => {
     if (!aiResult) return;
     const target = aiTargetRef.current;
     const output = cleanAIHtml(aiResult.output);
-    if (aiResult.mode === "ask" || aiResult.mode === "research" || action === "insert") {
+    if (
+      aiResult.mode === "ask" ||
+      (aiResult.mode === "research" && action !== "replace") ||
+      action === "insert"
+    ) {
       editor
         .chain()
         .focus()
-        .insertContent(
-          `<blockquote><p>${output.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>")}</p></blockquote>`,
-        )
+        .insertContent(`<blockquote>${output}</blockquote>`)
         .run();
     } else if (target?.target === "note") {
       if (target.originalHtml !== editor.getHTML()) { setAiError("AI 실행 후 노트가 변경되었습니다. 결과를 다시 요청하거나 노트에 삽입해 주세요."); return; }
-      if (!window.confirm("AI 결과로 전체 노트를 교체합니다. 변경 내용은 Undo로 되돌릴 수 있습니다. 계속할까요?")) return;
-      editor.commands.setContent(output);
+      const operation = aiResult.patch?.operation || target.operation || "replace";
+      if (operation === "insert_before")
+        editor.chain().focus("start").insertContent(output).run();
+      else if (operation === "insert_after")
+        editor.chain().focus("end").insertContent(output).run();
+      else {
+        if (!window.confirm("AI 결과로 전체 노트를 교체합니다. 변경 내용은 Undo로 되돌릴 수 있습니다. 계속할까요?")) return;
+        editor.commands.setContent(output);
+      }
     } else if (target?.range) {
       if (target.originalHtml !== editor.getHTML()) { setAiError("선택 이후 노트가 변경되어 안전하게 적용할 수 없습니다. 결과를 다시 요청해 주세요."); return; }
-      editor.chain().focus().insertContentAt(target.range, output).run();
+      const operation = aiResult.patch?.operation || target.operation || "replace";
+      if (operation === "insert_before")
+        editor.chain().focus().insertContentAt(target.range.from, output).run();
+      else if (operation === "insert_after")
+        editor.chain().focus().insertContentAt(target.range.to, output).run();
+      else editor.chain().focus().insertContentAt(target.range, output).run();
     }
     setAiResult(null);
     setAiPrompt("");
-    writeAiDebugLog(aiResult.requestId, { status: "applied", applyAction: action, pageAfter: editor.getHTML(), responseVisible: true });
+    const appliedRevision = contentRevision(editor.getHTML());
+    writeAiDebugLog(aiResult.requestId, { status: "applied", applyAction: action, appliedRevision, pageAfter: editor.getHTML(), responseVisible: true });
+    writeAiAuditLog({ requestId: aiResult.requestId, status: "applied", applyAction: action, sourceRevision: aiResult.sourceRevision, appliedRevision });
+    window.ksnoteAI?.markApplied?.({
+      requestId: aiResult.requestId,
+      appliedRevision,
+    });
+    setAiSessions((sessions) => sessions.map((session) =>
+      session.id === aiResult.requestId
+        ? { ...session, status: "applied", applyAction: action, appliedRevision, appliedAt: Date.now() }
+        : session,
+    ));
   };
   return (
     <section
@@ -1984,7 +3087,7 @@ export default function RichDocumentEditor({
           )}
         </aside>
       )}
-      {mode !== "preview" && inTable && tableContextOpen && (
+      {mode !== "preview" && tableContextOpen && (
         <div className="table-context">
           <b>표</b>
           <span />
@@ -2236,10 +3339,18 @@ export default function RichDocumentEditor({
                 </span>
                 <em>로컬 JAR</em>
               </button>
+              <button className="diagram-choice" onClick={insertDrawIo}>
+                <span className="diagram-choice-icon drawio">D</span>
+                <span>
+                  <b>draw.io</b>
+                  <small>diagrams.net 편집창을 노트 블록 안에서 엽니다.</small>
+                </span>
+                <em>Editor</em>
+              </button>
             </div>
             <footer>
-              <code>/diagram</code>은 형식을 선택하고, <code>/mermaid</code>는
-              바로 삽입합니다.
+              <code>/diagram</code>은 형식을 선택하고, <code>/mermaid</code>,
+              <code>/plantuml</code>, <code>/draw_edit</code>는 바로 삽입합니다.
             </footer>
           </section>
         </div>
@@ -2261,30 +3372,157 @@ export default function RichDocumentEditor({
             </header>
             {aiHistoryOpen && (
               <section className="ai-session-panel" aria-label="AI Prompt 세션 목록">
-                <div className="ai-session-heading"><b>Prompt 세션</b><small>{visibleAiSessions.length}개</small><button className={aiSessionScope === "note" ? "active" : ""} onClick={() => setAiSessionScope("note")}>현재 노트</button><button className={aiSessionScope === "project" ? "active" : ""} onClick={() => setAiSessionScope("project")}>프로젝트</button></div>
-                {visibleAiSessions.length === 0 ? <p className="ai-session-empty">저장된 AI 요청이 아직 없습니다.</p> : (
-                  <div className="ai-session-list">{visibleAiSessions.map((session) => (
-                    <article key={session.id} className="ai-session-item">
+                <div className="ai-session-heading"><b>AI 대화</b><small>{visibleAiConversations.length}개</small><button className={aiSessionScope === "note" ? "active" : ""} onClick={() => setAiSessionScope("note")}>현재 노트</button><button className={aiSessionScope === "project" ? "active" : ""} onClick={() => setAiSessionScope("project")}>프로젝트</button></div>
+                {visibleAiConversations.length === 0 ? <p className="ai-session-empty">저장된 AI 대화가 아직 없습니다.</p> : (
+                  <div className="ai-session-list">{visibleAiConversations.map((session) => {
+                    const usage = session.usage;
+                    const contextTokens = usage?.last?.inputTokens || 0;
+                    const cumulativeTokens = usage?.total?.totalTokens || 0;
+                    const contextWindow = usage?.modelContextWindow || 0;
+                    const contextPercent = contextWindow
+                      ? Math.min(100, Math.round((contextTokens / contextWindow) * 100))
+                      : 0;
+                    return (
+                    <article key={session.sessionId} className="ai-session-item">
                       <button className="ai-session-main" onClick={() => openAISession(session)}>
                         <span className={`ai-session-status ${session.status}`} />
-                        <span><b>{session.instruction}</b><small>{session.provider === "codex" ? "Codex" : "Claude"} · {session.mode === "edit" ? "노트 편집" : session.mode === "research" ? "Rovo 조사" : "질문"} · {new Date(session.createdAt).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</small></span>
+                        <span>
+                          <b>{session.title}</b>
+                          <small>{availableModels.find((model) => model.id === session.model)?.label || session.model || (session.provider === "codex" ? "Codex 기본 모델" : "Claude 기본 모델")} · {session.turnCount}턴 · 컨텍스트 {contextTokens.toLocaleString()} / {contextWindow.toLocaleString()} ({contextPercent}%) · 누적 {cumulativeTokens.toLocaleString()}</small>
+                          <i className="ai-context-meter"><i style={{ width: `${contextPercent}%` }} /></i>
+                        </span>
                       </button>
-                      <button className="ai-session-delete" title="세션 삭제" onClick={() => setAiSessions((sessions) => sessions.filter((item) => item.id !== session.id))}><Trash2 /></button>
+                      <button className="ai-session-action" title="대화 이름 변경" onClick={async () => {
+                        const title = window.prompt("대화 이름", session.title);
+                        if (!title?.trim()) return;
+                        await window.ksnoteAI?.renameSession?.({ sessionId: session.sessionId, title });
+                        setAiSessionMeta((items) => items.map((item) =>
+                          item.id === session.sessionId ? { ...item, title: title.trim() } : item,
+                        ));
+                      }}><FilePenLine /></button>
+                      <button className="ai-session-action" title="지금 요약하고 새 컨텍스트로 분기" onClick={async () => {
+                        if (!window.confirm("현재 대화를 요약한 뒤 더 가벼운 새 컨텍스트로 이어갈까요? 원래 대화 기록은 보존됩니다.")) return;
+                        try {
+                          await window.ksnoteAI?.compactSession?.(session.sessionId);
+                          setAiUsageBySession((current) => ({
+                            ...current,
+                            [session.sessionId]: { total: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, modelContextWindow: 0 },
+                          }));
+                        } catch (error) { setAiError(error.message); }
+                      }}><RotateCcw /></button>
+                      <button className="ai-session-action warning" title="컨텍스트 초기화" onClick={async () => {
+                        if (!window.confirm("이 대화의 AI 컨텍스트와 Turn 기록을 지울까요? 대화 이름은 유지됩니다.")) return;
+                        await window.ksnoteAI?.resetContext?.(session.sessionId);
+                        setAiSessions((sessions) => sessions.filter(
+                          (item) => (item.sessionId || item.id) !== session.sessionId,
+                        ));
+                        setAiUsageBySession((current) => ({ ...current, [session.sessionId]: { total: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, modelContextWindow: 0 } }));
+                        if (activeAiSessionId === session.sessionId) startNewAISession();
+                      }}><Eraser /></button>
+                      <button className="ai-session-delete" title="대화 삭제" onClick={() => {
+                        const sessionId = session.sessionId || session.id;
+                        if (!window.confirm("대화와 저장된 모든 기록을 영구 삭제할까요?")) return;
+                        window.ksnoteAI?.deleteSession?.(sessionId);
+                        setAiSessions((sessions) => sessions.filter(
+                          (item) => (item.sessionId || item.id) !== sessionId,
+                        ));
+                        setAiSessionMeta((items) => items.filter((item) => item.id !== sessionId));
+                        if (activeAiSessionId === sessionId) startNewAISession();
+                      }}><Trash2 /></button>
                     </article>
-                  ))}</div>
+                  );})}</div>
                 )}
               </section>
             )}
             {(aiResult || aiError || aiLoading) && (
               <div className="ai-response">
                 {aiLoading && (
-                  <><div className="ai-thinking"><LoaderCircle /> {aiProvider === "codex" ? "Codex" : "Claude"}가 {aiMode === "research" ? "Atlassian 자료를 조사하고" : "노트를 읽고"} 있습니다…<button className="ai-cancel-run" onClick={cancelAI}><Square /> 중지</button></div>{aiStream && <div className="ai-stream-text">{aiStream}</div>}</>
+                  <>
+                    <div className="ai-thinking">
+                      <LoaderCircle />
+                      <span>
+                        <b>
+                          {{
+                            preparing: "편집 대상을 분석하고 있습니다",
+                            connecting: `${availableModels.find((model) => model.id === aiModel)?.label || aiModel}에 연결하고 있습니다`,
+                            generating:
+                              aiMode === "research"
+                                ? "Atlassian 자료를 조사하고 있습니다"
+                                : "응답을 생성하고 있습니다",
+                            receiving: "응답을 받아 미리보기를 만들고 있습니다",
+                            preview: "변경 내용을 렌더링하고 있습니다",
+                          }[aiProgress.stage] || "AI 작업을 준비하고 있습니다"}
+                        </b>
+                        <small>{(aiElapsed / 1000).toFixed(1)}초 · {aiTargetRef.current?.label || "현재 문서"}</small>
+                      </span>
+                      <button className="ai-cancel-run" onClick={cancelAI}><Square /> 중지</button>
+                    </div>
+                    <div className="ai-progress-track" aria-label="AI 작업 진행 상태">
+                      <i className={`stage-${aiProgress.stage}`} />
+                    </div>
+                    <div className="ai-progress-steps">
+                      <span className={["preparing", "connecting", "generating", "receiving", "preview"].includes(aiProgress.stage) ? "active" : ""}>대상 분석</span>
+                      <span className={["connecting", "generating", "receiving", "preview"].includes(aiProgress.stage) ? "active" : ""}>모델 연결</span>
+                      <span className={["generating", "receiving", "preview"].includes(aiProgress.stage) ? "active" : ""}>생성</span>
+                      <span className={["receiving", "preview"].includes(aiProgress.stage) ? "active" : ""}>응답 수신</span>
+                    </div>
+                    {aiStream && <div className="ai-stream-text">{aiStream}</div>}
+                  </>
                 )}
                 {aiError && <div className="ai-error">{aiError}</div>}
                 {aiResult && (
                   <>
-                    {aiResult.mode === "edit" && !aiResult.replay && <div className="ai-diff"><section><b>변경 전</b><pre>{aiResult.originalHtml}</pre></section><section><b>변경 후</b><pre>{cleanAIHtml(aiResult.output)}</pre></section></div>}
-                    <div className="ai-result-text">{aiResult.output}</div>
+                    {!aiResult.replay && (
+                      <div className="ai-quick-actions">
+                        {aiResult.mode === "edit" && <button className="apply" onClick={() => applyAI("replace")}><Check /> 변경 적용</button>}
+                        <button onClick={() => applyAI("insert")}><FilePenLine /> 커서에 삽입</button>
+                        <button onClick={() => setAiResult(null)}><X /> 닫기</button>
+                      </div>
+                    )}
+                    {aiResult.mode === "edit" && !aiResult.replay && (
+                      <div className="ai-diff">
+                        <section>
+                          <b>변경 전</b>
+                          <div
+                            className="ai-diff-preview"
+                            dangerouslySetInnerHTML={{
+                              __html: cleanAIHtml(aiResult.beforeHtml || aiResult.originalHtml),
+                            }}
+                          />
+                        </section>
+                        <section>
+                          <b>변경 후</b>
+                          <div
+                            className="ai-diff-preview"
+                            dangerouslySetInnerHTML={{
+                              __html: cleanAIHtml(aiResult.output),
+                            }}
+                          />
+                        </section>
+                      </div>
+                    )}
+                    <div
+                      className="ai-result-text ai-result-rendered"
+                      dangerouslySetInnerHTML={{
+                        __html: cleanAIHtml(aiResult.output),
+                      }}
+                    />
+                    {aiResult.patch?.summary && (
+                      <p className="ai-patch-summary">{aiResult.patch.summary}</p>
+                    )}
+                    {aiResult.sources?.length > 0 && (
+                      <div className="ai-source-list">
+                        <b>조회 출처</b>
+                        {aiResult.sources.map((source) =>
+                          /^https?:/i.test(source) ? (
+                            <a key={source} href={source} target="_blank" rel="noreferrer">{source}</a>
+                          ) : (
+                            <span key={source}>{source}</span>
+                          ),
+                        )}
+                        <small>{new Date().toLocaleString("ko-KR")} 조회</small>
+                      </div>
+                    )}
                     <div className="ai-result-actions">
                       {aiResult.mode === "edit" && !aiResult.replay && (
                         <button
@@ -2292,6 +3530,14 @@ export default function RichDocumentEditor({
                           onClick={() => applyAI("replace")}
                         >
                           <Check /> 변경 적용
+                        </button>
+                      )}
+                      {aiResult.mode === "research" && aiResult.target === "selection" && !aiResult.replay && (
+                        <button
+                          className="apply"
+                          onClick={() => applyAI("replace")}
+                        >
+                          <Check /> 선택 영역 교체
                         </button>
                       )}
                       <button onClick={() => applyAI("insert")}>
@@ -2327,30 +3573,53 @@ export default function RichDocumentEditor({
                   }
                 }}
               />
+              {detectedPromptLinks.length > 0 && aiMode !== "research" && (
+                <button
+                  type="button"
+                  className="ai-research-suggestion"
+                  onClick={() => {
+                    switchAiMode("research");
+                    const codexModel = availableModels.find((model) => model.provider === "codex");
+                    if (codexModel) setAiModel(codexModel.id);
+                  }}
+                >
+                  <Globe2 />
+                  Atlassian 링크 또는 이슈 키를 감지했습니다. Rovo 조사로 전환
+                </button>
+              )}
               <div>
                 <span className="ai-modes">
                   <button
                     type="button"
                     className={aiMode === "edit" ? "active" : ""}
-                    onClick={() => setAiMode("edit")}
+                    onClick={() => switchAiMode("edit")}
                   >
                     <FilePenLine /> 노트 편집
                   </button>
                   <button
                     type="button"
                     className={aiMode === "ask" ? "active" : ""}
-                    onClick={() => setAiMode("ask")}
+                    onClick={() => switchAiMode("ask")}
                   >
                     <MessageSquare /> 질문
                   </button>
-                  <button type="button" className={aiMode === "research" ? "active research" : ""} onClick={() => { setAiMode("research"); setAiProvider("codex"); }}><Globe2 /> Rovo 조사</button>
+                  <button type="button" className={aiMode === "research" ? "active research" : ""} onClick={() => { switchAiMode("research"); const codexModel = availableModels.find((model) => model.provider === "codex"); if (codexModel) setAiModel(codexModel.id); }}><Globe2 /> Rovo 조사</button>
                 </span>
                 <select
-                  value={aiProvider}
-                  onChange={(e) => setAiProvider(e.target.value)}
+                  value={aiModel}
+                  onChange={(e) => setAiModel(e.target.value)}
+                  aria-label="AI 모델 선택"
                 >
-                  <option value="codex">Codex</option>
-                  <option value="claude">Claude</option>
+                  <optgroup label="OpenAI">
+                    {availableModels.filter((model) => model.provider === "codex").map((model) => (
+                      <option key={model.id} value={model.id}>{model.label}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Anthropic">
+                    {availableModels.filter((model) => model.provider === "claude").map((model) => (
+                      <option key={model.id} value={model.id}>{model.label}</option>
+                    ))}
+                  </optgroup>
                 </select>
                 <button
                   className="ai-send"

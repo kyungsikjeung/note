@@ -1,4 +1,5 @@
 .page-label-actions{display:flex!important;align-items:center;gap:4px}.page-label-actions>button{width:22px;height:22px;border-radius:5px;display:grid;place-items:center;color:#687779}.page-label-actions>button:hover{background:#dce5e4;color:#147d72}
+.page-ref-chip{height:24px;display:inline-flex;align-items:center;gap:4px;margin-left:4px;padding:0 7px;border:1px solid #d7e0df;border-radius:6px;background:#f8fbfa;color:#647376;font-size:9px;font-weight:600}.page-ref-chip:hover{border-color:#bdd6d2;background:#eef6f4;color:#147d72}.page-ref-chip svg{width:12px;height:12px;color:currentColor}
 .page-row.child-page {
   margin-left: calc(min(var(--page-depth, 1), 4) * 18px);
   border-left: 1px solid #dce4e4;
