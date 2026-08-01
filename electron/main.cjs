@@ -4,12 +4,17 @@ const fs = require("fs/promises");
 const { spawn } = require("child_process");
 const TurndownService = require("turndown");
 const { gfm } = require("turndown-plugin-gfm");
-const initSqlJs = require("sql.js");
+const nodeFs = require("fs");
+const os = require("os");
+const { openStore, applyPendingWrite } = require("../lib/ksnote-store.cjs");
+const { connectServer, callServerTool, getServer, disconnectServer, disconnectAll, assertSafeCommand, parseArgs, resultText } = require("./mcp-client.cjs");
 const { Document, Packer, Paragraph, HeadingLevel, Table: DocxTable, TableRow: DocxRow, TableCell: DocxCell } = require("docx");
 
 const isDev = !app.isPackaged;
-let noteDb;
-let noteDbPath;
+const MCP_SERVER_PATH = path.join(__dirname, "..", "mcp", "ksnote-server.mjs");
+let store;
+let dbFilePath = "";
+let lastPendingCount = -1;
 
 const plainText = (value) => String(value || "")
   .replace(/<br\s*\/?>/gi, "\n")
@@ -39,55 +44,63 @@ function htmlToDocxChildren(html, title) {
 }
 
 async function initializeStorage() {
-  const SQL = await initSqlJs({ locateFile: () => require.resolve("sql.js/dist/sql-wasm.wasm") });
-  noteDbPath = path.join(app.getPath("userData"), "ksnote.db");
-  let bytes;
-  try { bytes = await fs.readFile(noteDbPath); } catch {}
-  noteDb = bytes ? new SQL.Database(bytes) : new SQL.Database();
-  noteDb.run("CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL, updated_at INTEGER NOT NULL)");
-  noteDb.run("CREATE TABLE IF NOT EXISTS revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, note_id TEXT NOT NULL, title TEXT, content TEXT NOT NULL, created_at INTEGER NOT NULL)");
-  await flushDatabase();
+  dbFilePath = path.join(app.getPath("userData"), "ksnote.db");
+  store = await openStore(dbFilePath);
+  watchExternalChanges(dbFilePath);
 }
 
-async function flushDatabase() {
-  if (!noteDb || !noteDbPath) return;
-  await fs.writeFile(noteDbPath, Buffer.from(noteDb.export()));
+const mcpLogPath = () => path.join(app.getPath("userData"), "logs", "mcp-server.log");
+
+const broadcast = (channel, payload) => {
+  for (const win of BrowserWindow.getAllWindows()) win.webContents.send(channel, payload);
+};
+
+/** Push the approval queue to the UI whenever the MCP server enqueues or we resolve one. */
+function notifyPendingChanged(force) {
+  if (!store) return [];
+  const pending = store.listPendingWrites("pending");
+  if (force || pending.length !== lastPendingCount) {
+    lastPendingCount = pending.length;
+    broadcast("mcp-pending-changed", pending);
+  }
+  return pending;
 }
 
-ipcMain.handle("storage-load", async () => {
-  const result = noteDb.exec("SELECT json FROM app_state WHERE id=1");
-  return result[0]?.values?.[0]?.[0] ? JSON.parse(result[0].values[0][0]) : null;
-});
+/** Writes made by another process (MCP server, second window) land in every open editor. */
+function watchExternalChanges(dbPath) {
+  nodeFs.watchFile(dbPath, { interval: 1500 }, async () => {
+    if (!store || !store.hasExternalChange()) return;
+    try {
+      if (!(await store.reload())) return;
+      notifyPendingChanged(false);
+      const state = store.loadState();
+      if (!state) return;
+      broadcast("storage-external-change", state);
+    } catch (error) {
+      console.error("외부 변경을 반영하지 못했습니다.", error);
+    }
+  });
+}
+
+ipcMain.handle("storage-load", async () => store.loadState());
 
 ipcMain.handle("storage-save", async (_, data) => {
-  const previous = noteDb.exec("SELECT json FROM app_state WHERE id=1");
-  const previousData = previous[0]?.values?.[0]?.[0] ? JSON.parse(previous[0].values[0][0]) : null;
-  const now = Date.now();
-  if (previousData?.notes) {
-    const previousById = new Map(previousData.notes.map((note) => [note.id, note]));
-    const insert = noteDb.prepare("INSERT INTO revisions(note_id,title,content,created_at) VALUES(?,?,?,?)");
-    for (const note of data.notes || []) {
-      const old = previousById.get(note.id);
-      if (old && old.content !== note.content) insert.run([old.id, old.title || "", old.content || "", now]);
-    }
-    insert.free();
-  }
-  noteDb.run("INSERT INTO app_state(id,json,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json, updated_at=excluded.updated_at", [JSON.stringify(data), now]);
-  noteDb.run("DELETE FROM revisions WHERE id IN (SELECT id FROM revisions r WHERE (SELECT COUNT(*) FROM revisions newer WHERE newer.note_id=r.note_id AND newer.id>=r.id)>50)");
-  await flushDatabase();
+  await store.saveState(data);
   return true;
 });
 
-ipcMain.handle("revision-list", (_, noteId) => {
-  const statement = noteDb.prepare("SELECT id,title,created_at FROM revisions WHERE note_id=? ORDER BY id DESC LIMIT 50");
-  statement.bind([noteId]); const rows = [];
-  while (statement.step()) rows.push(statement.getAsObject());
-  statement.free(); return rows;
-});
+ipcMain.handle("revision-list", (_, noteId) => store.listRevisions(noteId, { limit: 50 }));
 
-ipcMain.handle("revision-get", (_, id) => {
-  const statement = noteDb.prepare("SELECT content FROM revisions WHERE id=?"); statement.bind([id]);
-  const row = statement.step() ? statement.getAsObject() : null; statement.free(); return row;
+ipcMain.handle("revision-get", (_, id) => store.getRevision(id));
+
+/** AI 변경 revision 자동 저장: the renderer snapshots the note BEFORE applying a patch. */
+ipcMain.handle("revision-snapshot", async (_, request) => store.snapshotRevision(request));
+
+ipcMain.handle("ai-audit-append", async (_, entry) => store.appendAiAudit(entry));
+
+ipcMain.handle("ai-audit-list", async (_, options) => {
+  if (store.hasExternalChange()) await store.reload();
+  return store.listAiAudit(options);
 });
 
 ipcMain.handle("asset-save", async (_, { name, dataUrl }) => {
@@ -97,6 +110,7 @@ ipcMain.handle("asset-save", async (_, { name, dataUrl }) => {
   const assetName = `${Date.now()}-${Math.random().toString(16).slice(2)}.${extension}`;
   const assetDir = path.join(app.getPath("userData"), "assets"); await fs.mkdir(assetDir, { recursive: true });
   const assetPath = path.join(assetDir, assetName); await fs.writeFile(assetPath, Buffer.from(match[2], "base64"));
+  await store.saveAsset({ id: assetName, name: name || assetName, path: assetPath, createdAt: Date.now() });
   return { path: assetPath, name: assetName };
 });
 
@@ -104,6 +118,19 @@ ipcMain.handle("import-markdown", async () => {
   const result = await dialog.showOpenDialog({ properties: ["openFile"], filters: [{ name: "Markdown", extensions: ["md", "markdown"] }] });
   if (result.canceled || !result.filePaths[0]) return null;
   return { name: path.basename(result.filePaths[0]).replace(/\.(md|markdown)$/i, ""), markdown: await fs.readFile(result.filePaths[0], "utf8") };
+});
+
+/** Save an already-converted text document (Context Capsule, 플랫폼 Markdown) as-is. */
+ipcMain.handle("export-text", async (_, request) => {
+  const req = request || {};
+  const extension = String(req.extension || "md").replace(/[^a-z0-9]/gi, "") || "md";
+  const result = await dialog.showSaveDialog({
+    defaultPath: `${req.defaultName || "ksnote"}.${extension}`,
+    filters: [{ name: req.filterName || "Markdown", extensions: [extension] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+  await fs.writeFile(result.filePath, String(req.text || ""), "utf8");
+  return { ok: true, path: result.filePath };
 });
 
 ipcMain.handle("command-test", async (_, { commandLine, mode = "cli" }) => {
@@ -120,6 +147,207 @@ ipcMain.handle("command-test", async (_, { commandLine, mode = "cli" }) => {
     child.on("close", (code) => { clearTimeout(timer); finish(code === 0, output || `종료 코드 ${code}`); });
   });
 });
+
+/* ---------------------------------------------------------------- MCP 서버 연동 */
+
+ipcMain.handle("mcp-set-context", async (_, context) => {
+  if (!store) return false;
+  await store.saveContext(context || {});
+  return true;
+});
+
+ipcMain.handle("mcp-pending-list", async () => {
+  if (!store) return [];
+  if (store.hasExternalChange()) await store.reload();
+  const pending = store.listPendingWrites("pending");
+  lastPendingCount = pending.length;
+  return pending;
+});
+
+/** Approving applies the queued change (snapshotting a revision first); rejecting drops it. */
+ipcMain.handle("mcp-pending-resolve", async (_, request) => {
+  const { id, approve } = request || {};
+  if (!store || !id) throw new Error("처리할 변경을 찾지 못했습니다.");
+  try {
+    if (approve) await applyPendingWrite(store, id);
+    else await store.resolvePendingWrite(id, "rejected", null);
+  } catch (error) {
+    await store.resolvePendingWrite(id, "rejected", error.message).catch(() => {});
+    notifyPendingChanged(true);
+    return { ok: false, error: error.message, pending: store.listPendingWrites("pending") };
+  }
+  const pending = notifyPendingChanged(true);
+  return { ok: true, pending, state: store.loadState() };
+});
+
+ipcMain.handle("mcp-read-log", async (_, count) => {
+  const logPath = mcpLogPath();
+  const wanted = Math.min(Math.max(Number(count) || 100, 1), 500);
+  try {
+    const text = await fs.readFile(logPath, "utf8");
+    return { path: logPath, lines: text.split(/\r?\n/).filter(Boolean).slice(-wanted) };
+  } catch {
+    return { path: logPath, lines: [], error: "아직 MCP 서버 로그가 없습니다. Codex 에서 한 번 호출하면 생성됩니다." };
+  }
+});
+
+function runNodeScript(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, {
+      windowsHide: true,
+      env: Object.assign({}, process.env, { ELECTRON_RUN_AS_NODE: "1" }),
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("MCP 서버 응답 시간이 초과되었습니다."));
+    }, 15000);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout);
+      else reject(new Error(stderr.trim().split(/\r?\n/).pop() || ("종료 코드 " + code)));
+    });
+  });
+}
+
+ipcMain.handle("mcp-server-info", async () => {
+  const info = { serverPath: MCP_SERVER_PATH, dbPath: dbFilePath, logPath: mcpLogPath(), exists: nodeFs.existsSync(MCP_SERVER_PATH), ok: false, tools: [] };
+  if (!info.exists) return Object.assign(info, { error: "mcp/ksnote-server.mjs 를 찾을 수 없습니다." });
+  try {
+    const described = JSON.parse(await runNodeScript([MCP_SERVER_PATH, "--describe", "--db", dbFilePath]));
+    return Object.assign(info, {
+      ok: true,
+      name: described.name,
+      version: described.version,
+      protocolVersion: described.protocolVersion,
+      tools: described.tools || [],
+      logPath: described.logFile || info.logPath,
+    });
+  } catch (error) {
+    return Object.assign(info, { error: error.message });
+  }
+});
+
+/** [mcp_servers.ksnote] block for ~/.codex/config.toml (paths JSON-escaped, valid TOML). */
+function codexConfigBlock(serverPath, dbPath) {
+  const args = [serverPath, "--db", dbPath].map((value) => JSON.stringify(value)).join(", ");
+  return [
+    "[mcp_servers.ksnote]",
+    "# KsNote MCP server — generated by KsNote (설정 > MCP 연결)",
+    'command = "node"',
+    "args = [" + args + "]",
+    "",
+  ].join("\n");
+}
+
+/** Replace only our own section so the user's other MCP servers survive. */
+function mergeCodexConfig(existing, block) {
+  const lines = existing.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^\s*\[mcp_servers\.ksnote\]\s*$/.test(line));
+  if (start < 0) {
+    const head = existing.trim() ? existing.replace(/\s*$/, "") + "\n\n" : "";
+    return { text: head + block, merged: false };
+  }
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^\s*\[/.test(lines[index])) {
+      end = index;
+      break;
+    }
+  }
+  const next = lines.slice(0, start).concat(block.split("\n")).concat(lines.slice(end));
+  return { text: next.join("\n").replace(/\n{3,}/g, "\n\n"), merged: true };
+}
+
+ipcMain.handle("mcp-write-codex-config", async () => {
+  const configDir = path.join(os.homedir(), ".codex");
+  const configPath = path.join(configDir, "config.toml");
+  await fs.mkdir(configDir, { recursive: true });
+  let existing = "";
+  let hadFile = false;
+  try {
+    existing = await fs.readFile(configPath, "utf8");
+    hadFile = true;
+  } catch {}
+  const result = mergeCodexConfig(existing, codexConfigBlock(MCP_SERVER_PATH, dbFilePath));
+  let backupPath = "";
+  if (hadFile) {
+    backupPath = configPath + ".bak";
+    await fs.writeFile(backupPath, existing, "utf8");
+  }
+  await fs.writeFile(configPath, result.text.replace(/\s*$/, "") + "\n", "utf8");
+  return { path: configPath, merged: result.merged, backupPath, command: 'codex mcp add ksnote -- node "' + MCP_SERVER_PATH + '" --db "' + dbFilePath + '"' };
+});
+
+/* ------------------------------------------------- 외부 MCP 서버 (generic client) */
+
+/** Normalize one renderer-supplied server row into a client spec (and reject unsafe commands). */
+function mcpClientSpec(server) {
+  const config = server || {};
+  const spec = {
+    id: String(config.id || "").trim(),
+    name: String(config.name || config.id || "MCP 서버"),
+    command: String(config.command || "").trim(),
+    args: config.args,
+    env: config.env,
+  };
+  if (!spec.id) throw new Error("MCP 서버를 찾지 못했습니다.");
+  assertSafeCommand(spec.command, parseArgs(spec.args));
+  return spec;
+}
+
+/** Uniform failure envelope — the UI shows `error` and offers `stderrTail` in a collapsible. */
+const mcpClientFailure = (error, client) => ({
+  ok: false,
+  error: error && error.message ? error.message : String(error),
+  stderrTail: client && typeof client.stderrTailText === "function" ? client.stderrTailText(200) : "",
+});
+
+ipcMain.handle("mcp-client-connect", async (_, request) => {
+  let spec;
+  try {
+    spec = mcpClientSpec((request || {}).server);
+  } catch (error) {
+    return mcpClientFailure(error, null);
+  }
+  try {
+    const connected = await connectServer(spec);
+    return {
+      ok: true,
+      serverInfo: connected.serverInfo,
+      protocolVersion: connected.protocolVersion,
+      instructions: connected.instructions,
+      tools: connected.tools.map((tool) => ({ name: tool.name, title: tool.title, description: tool.description, readOnly: tool.readOnly })),
+    };
+  } catch (error) {
+    return mcpClientFailure(error, getServer(spec.id));
+  }
+});
+
+/** Approval already happened in the renderer; this only ensures a connection and forwards the call. */
+ipcMain.handle("mcp-client-call", async (_, request) => {
+  const req = request || {};
+  let spec;
+  try {
+    spec = mcpClientSpec(req.server || { id: req.serverId });
+  } catch (error) {
+    return mcpClientFailure(error, null);
+  }
+  try {
+    const called = await callServerTool(spec, req.tool, req.args || {}, { timeoutMs: 60000 });
+    const text = resultText(called.result);
+    if (called.result && called.result.isError) return { ok: false, error: text || "도구 실행이 실패했습니다.", stderrTail: called.client.stderrTailText(200) };
+    return { ok: true, result: called.result, text: text };
+  } catch (error) {
+    return mcpClientFailure(error, getServer(spec.id));
+  }
+});
+
+ipcMain.handle("mcp-client-disconnect", async (_, request) => ({ ok: disconnectServer((request || {}).serverId) }));
 
 ipcMain.handle("plantuml-render", async (_, { code, jarPath }) => {
   if (!jarPath) throw new Error("설정 > 편집기에서 PlantUML JAR 경로를 지정하세요.");
@@ -257,40 +485,161 @@ function formatCliError(stderr, command, code) {
   return message?.replace(/^\s*(?:ERROR|error):?\s*/i, "") || `${command} 실행 실패 (${code})`;
 }
 
-ipcMain.handle("ai-run", async (_, request) => {
+/** Prompt for callers that predate the renderer-side ksnote-patch@1 prompt. */
+function legacyPrompt(request) {
   const system =
     request.mode === "ask"
       ? "You answer questions about the supplied note. Answer in Korean, concisely. Do not use tools. Do not modify files."
       : "You are a document editor. Return ONLY the complete replacement HTML for the requested target. Preserve unrelated content and valid semantic HTML. Do not use markdown fences, explanations, or tools.";
-  const prompt = `${system}\n\nUSER INSTRUCTION:\n${request.instruction}\n\nTARGET: ${request.target}\n\nNOTE HTML:\n${request.content}\n\nSELECTED TEXT:\n${request.selection || "(none)"}`;
-  const command = String(request.command || request.provider || "").trim();
+  return `${system}\n\nUSER INSTRUCTION:\n${request.instruction}\n\nTARGET: ${request.target}\n\nNOTE HTML:\n${request.content}\n\nSELECTED TEXT:\n${request.selection || "(none)"}`;
+}
+
+/**
+ * Sanitized command, argv and prompt shared by ai-run (blocking) and ai-start
+ * (streaming). The prompt is provider independent: the renderer builds one
+ * ksnote-patch@1 prompt and both CLIs receive it verbatim.
+ */
+function prepareAiRun(request) {
+  const req = request || {};
+  const command = String(req.command || req.provider || "").trim();
   if (!command || /[;&|<>\r\n]/.test(command))
     throw new Error("AI Agent 실행 명령을 확인해 주세요.");
-  if (request.provider === "claude")
-    return runCli(
-      command,
-      ["--print", "--tools", "", "--permission-mode", "plan"],
-      prompt,
-    );
-  return runCli(
-    command,
-    [
-      "exec",
-      "--ignore-user-config",
-      "--skip-git-repo-check",
-      "--sandbox",
-      "read-only",
-      "--ephemeral",
-      "--color",
-      "never",
-      "-",
-    ],
-    prompt,
-  );
+  const args =
+    req.provider === "claude"
+      ? ["--print", "--tools", "", "--permission-mode", "plan"]
+      : ["exec", "--ignore-user-config", "--skip-git-repo-check", "--sandbox", "read-only", "--ephemeral", "--color", "never", "-"];
+  return { command, args, prompt: req.prompt ? String(req.prompt) : legacyPrompt(req) };
+}
+
+const aiJobs = new Map();
+
+/** On Windows the CLI runs under cmd.exe, so kill the tree or the child outlives us. */
+function killTree(child) {
+  if (!child) return;
+  if (process.platform === "win32" && child.pid) {
+    try {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+      return;
+    } catch {}
+  }
+  try { child.kill(); } catch {}
+}
+
+/** Legacy blocking call — kept working so nothing breaks if a caller misses ai-start. */
+ipcMain.handle("ai-run", async (_, request) => {
+  const job = prepareAiRun(request);
+  return runCli(job.command, job.args, job.prompt);
+});
+
+/** 응답 스트리밍: chunks go out on ai-stream, the result on ai-done / ai-error. */
+ipcMain.handle("ai-start", async (event, request) => {
+  const job = prepareAiRun(request);
+  const jobId = "ai-" + Date.now().toString(36) + "-" + Math.random().toString(16).slice(2, 8);
+  const sender = event.sender;
+  const send = (channel, payload) => { if (!sender.isDestroyed()) sender.send(channel, payload); };
+  const child = spawn(job.command, job.args, {
+    cwd: app.getPath("documents"),
+    shell: process.platform === "win32",
+    windowsHide: true,
+  });
+  const entry = { child, cancelled: false, timedOut: false };
+  aiJobs.set(jobId, entry);
+  let output = "";
+  let stderr = "";
+  const timer = setTimeout(() => { entry.timedOut = true; killTree(child); }, 180000);
+  child.stdout.on("data", (chunk) => {
+    const text = chunk.toString();
+    if (output.length < 4_000_000) output += text;
+    send("ai-stream", { jobId, chunk: text });
+  });
+  child.stderr.on("data", (chunk) => { if (stderr.length < 200_000) stderr += chunk.toString(); });
+  child.on("error", (error) => {
+    clearTimeout(timer);
+    aiJobs.delete(jobId);
+    send("ai-error", { jobId, message: error.message });
+  });
+  child.on("close", (code) => {
+    clearTimeout(timer);
+    aiJobs.delete(jobId);
+    if (entry.cancelled) send("ai-error", { jobId, message: "취소되었습니다.", cancelled: true });
+    else if (entry.timedOut) send("ai-error", { jobId, message: "AI 응답 시간이 초과되었습니다." });
+    else if (code === 0) send("ai-done", { jobId, output: output.trim(), code });
+    else send("ai-error", { jobId, message: formatCliError(stderr, job.command, code) });
+  });
+  child.stdin.end(job.prompt);
+  return { jobId };
+});
+
+/** 실행 중 취소 — the run still lands in the audit log, with status "cancelled". */
+ipcMain.handle("ai-cancel", async (_, request) => {
+  const entry = aiJobs.get(String((request || {}).jobId || ""));
+  if (!entry) return false;
+  entry.cancelled = true;
+  killTree(entry.child);
+  return true;
+});
+
+/** Run one short command and report whether it exited cleanly. */
+function probeCommand(command, args, timeoutMs) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(command, args, { windowsHide: true, shell: process.platform === "win32" });
+    } catch (error) {
+      resolve({ ok: false, output: String(error.message || error) });
+      return;
+    }
+    let output = "";
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      killTree(child);
+      resolve({ ok, output: output.trim().slice(0, 400) });
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.stdout.on("data", (chunk) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { output += chunk.toString(); });
+    child.on("error", (error) => { output += String(error.message || error); finish(false); });
+    child.on("close", (code) => finish(code === 0));
+  });
+}
+
+/** CLI 설치 및 로그인 자동 진단 — shown as a status line in the AI dock. */
+ipcMain.handle("ai-diagnose", async (_, request) => {
+  const req = request || {};
+  const provider = String(req.provider || "codex");
+  const command = String(req.command || provider).trim();
+  const base = { provider, command, installed: false, loggedIn: false, version: "" };
+  if (!command || /[;&|<>\r\n]/.test(command)) return { ...base, hint: "AI Agent 실행 명령을 확인해 주세요." };
+  const version = await probeCommand(command, ["--version"], 8000);
+  if (!version.ok) return { ...base, hint: command + " CLI 를 찾지 못했습니다. 설치한 뒤 PATH 를 확인해 주세요." };
+  const versionText = (version.output.split(/\r?\n/).find(Boolean) || "").slice(0, 80);
+  if (provider === "codex") {
+    const status = await probeCommand(command, ["login", "status"], 10000);
+    const loggedIn = status.ok && !/not logged in|logged out|login required|unauthorized/i.test(status.output);
+    return { ...base, installed: true, version: versionText, loggedIn, hint: loggedIn ? "" : "터미널에서 " + command + " login 을 실행해 주세요." };
+  }
+  // Claude Code has no cheap non-interactive auth probe: a `--print` ping would
+  // burn a real model turn every time the dock opens. Heuristic instead — the CLI
+  // keeps OAuth credentials under the home directory and API-key users export
+  // ANTHROPIC_API_KEY; either signal counts as "likely logged in".
+  const credentialFiles = [path.join(os.homedir(), ".claude", ".credentials.json"), path.join(os.homedir(), ".claude.json")];
+  const loggedIn = Boolean(process.env.ANTHROPIC_API_KEY) || credentialFiles.some((file) => nodeFs.existsSync(file));
+  return {
+    ...base,
+    installed: true,
+    version: versionText,
+    loggedIn,
+    heuristic: true,
+    hint: loggedIn ? "" : "터미널에서 " + command + " login 으로 로그인해 주세요.",
+  };
 });
 
 app.whenReady().then(async () => { await initializeStorage(); createWindow(); });
 app.on("window-all-closed", () => {
+  disconnectAll();
   if (process.platform !== "darwin") app.quit();
 });
 app.on("activate", () => {

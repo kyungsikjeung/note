@@ -6,7 +6,7 @@ import {
   ReactNodeViewRenderer,
 } from "@tiptap/react";
 import { DragHandle } from "@tiptap/extension-drag-handle-react";
-import { Node } from "@tiptap/core";
+import { Node, Extension } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { Table } from "@tiptap/extension-table";
 import TableRow from "@tiptap/extension-table-row";
@@ -91,8 +91,113 @@ import "./editor-tools.css";
 import "./code-tools.css";
 import "./outline.css";
 import "./diagram-picker.css";
+import {
+  buildPatchPrompt,
+  parsePatchResponse,
+  diffBlocks,
+  diffLines,
+  applyPatchToHtml,
+  splitBlocks,
+  blockText,
+  outlineOf,
+  hashHtml,
+  newBlockId,
+  withBlockId,
+} from "./lib/ai-patch.mjs";
 
 const lowlight = createLowlight(common);
+
+/**
+ * Top-level node types that carry a stable data-block-id. AI patches address
+ * blocks by this id instead of by document position, so an edit that happens
+ * while the CLI is thinking cannot silently retarget the patch.
+ */
+const BLOCK_ID_TYPES = [
+  "paragraph",
+  "heading",
+  "bulletList",
+  "orderedList",
+  "taskList",
+  "blockquote",
+  "codeBlock",
+  "horizontalRule",
+  "table",
+  "image",
+  "attachmentBlock",
+  "mermaidBlock",
+  "plantUmlBlock",
+];
+
+const BlockId = Extension.create({
+  name: "blockId",
+  addGlobalAttributes() {
+    return [
+      {
+        types: BLOCK_ID_TYPES,
+        attributes: {
+          blockId: {
+            default: null,
+            parseHTML: (element) => element.getAttribute("data-block-id"),
+            renderHTML: (attributes) => (attributes.blockId ? { "data-block-id": attributes.blockId } : {}),
+          },
+        },
+      },
+      {
+        // 외부 도구 실행 기록 인용구는 편집 중에도 표식을 잃지 않아야 스타일이 유지된다.
+        types: ["blockquote"],
+        attributes: {
+          externalRecord: {
+            default: null,
+            parseHTML: (element) => element.getAttribute("data-external-record"),
+            renderHTML: (attributes) => (attributes.externalRecord ? { "data-external-record": attributes.externalRecord } : {}),
+          },
+        },
+      },
+    ];
+  },
+});
+
+/** Give every top-level node an id, and re-id duplicates left behind by paste. */
+const assignBlockIds = (instance) => {
+  if (!instance || instance.isDestroyed) return false;
+  const { state } = instance;
+  const tr = state.tr;
+  const seen = new Set();
+  let changed = false;
+  state.doc.forEach((node, pos) => {
+    const spec = node.type.spec.attrs;
+    if (!spec || !("blockId" in spec)) return;
+    const current = node.attrs.blockId;
+    if (current && !seen.has(current)) {
+      seen.add(current);
+      return;
+    }
+    const id = newBlockId();
+    seen.add(id);
+    tr.setNodeMarkup(pos, undefined, { ...node.attrs, blockId: id });
+    changed = true;
+  });
+  if (!changed) return false;
+  tr.setMeta("addToHistory", false);
+  instance.view.dispatch(tr);
+  return true;
+};
+
+/** Whole-note plain text, used for the full-replacement fallback diff. */
+const noteText = (html) => splitBlocks(html).map((block) => blockText(block.html)).filter(Boolean).join("\n");
+
+const AI_ACTION_LABELS = { replace: "교체", insert_after: "추가", delete: "삭제" };
+const AI_STATUS_LABELS = {
+  applied: "적용됨",
+  partial: "부분 적용",
+  rejected: "취소함",
+  cancelled: "실행 취소",
+  error: "실패",
+  answered: "답변",
+};
+
+/** "첫 실행 1회" 자동 진단 상태 — app 실행 단위로만 기억한다. */
+const diagnosedProviders = new Set();
 
 const SmartCodeBlock = CodeBlockLowlight.extend({
   addAttributes() {
@@ -650,11 +755,16 @@ function GridPicker({ onPick, onClose }) {
 
 export default function RichDocumentEditor({
   noteId,
+  noteTitle = "",
+  projectId = "",
   content,
   mode = "edit",
   preferredProvider = "codex",
   agentCommands = { codex: "codex", claude: "claude" },
   preferences = { fontSize: 14, fontFamily: "sans", spellcheck: false },
+  aiSessions = [],
+  externalRevision = 0,
+  onRecordSession,
   onChange,
 }) {
   const [gridOpen, setGridOpen] = useState(false);
@@ -687,7 +797,16 @@ export default function RichDocumentEditor({
     [aiLoading, setAiLoading] = useState(false),
     [aiResult, setAiResult] = useState(null),
     [aiError, setAiError] = useState("");
-  const aiTargetRef = useRef(null);
+  const [aiStream, setAiStream] = useState("");
+  const [aiSelected, setAiSelected] = useState([]);
+  const [aiConflict, setAiConflict] = useState(false);
+  const [aiConfirmFull, setAiConfirmFull] = useState(false);
+  const [aiSessionsOpen, setAiSessionsOpen] = useState(false);
+  const [aiDiagnosis, setAiDiagnosis] = useState(null);
+  const [aiDiagnosing, setAiDiagnosing] = useState(false);
+  const [aiJobId, setAiJobId] = useState("");
+  const aiRequestRef = useRef(null);
+  const aiJobRef = useRef(null);
   useEffect(() => setAiProvider(preferredProvider), [preferredProvider]);
   const slashCommands = [
     {
@@ -923,6 +1042,7 @@ export default function RichDocumentEditor({
   const editor = useEditor({
     extensions: [
       StarterKit.configure({ codeBlock: false, link: false }),
+      BlockId,
       SmartCodeBlock.configure({ lowlight, defaultLanguage: "plaintext" }),
       TextStyle,
       Color,
@@ -1148,11 +1268,16 @@ export default function RichDocumentEditor({
         return false;
       },
     },
+    onCreate: ({ editor }) => {
+      assignBlockIds(editor);
+    },
     onUpdate: ({ editor }) => {
       const html = editor.getHTML();
       setPreviewHtml(html);
       onChange(html);
       detectSlash(editor);
+      // Deferred: dispatching inside an update handler would re-enter ProseMirror.
+      window.setTimeout(() => assignBlockIds(editor), 0);
     },
     onSelectionUpdate: ({ editor }) => {
       const { from, to } = editor.state.selection;
@@ -1166,8 +1291,9 @@ export default function RichDocumentEditor({
       setPreviewHtml(incoming);
       if (editor.getHTML() !== incoming)
         editor.commands.setContent(incoming, false);
+      assignBlockIds(editor);
     }
-  }, [noteId]);
+  }, [noteId, externalRevision]);
   useEffect(() => {
     if (editor) editor.setEditable(mode !== "preview");
   }, [editor, mode]);
@@ -1178,6 +1304,39 @@ export default function RichDocumentEditor({
       preferences.spellcheck ? "true" : "false",
     );
   }, [editor, preferences.spellcheck]);
+  // 응답 스트리밍 / 취소: one subscription per channel, routed by jobId.
+  useEffect(() => {
+    if (!window.ksnoteAI?.onStream) return undefined;
+    const offStream = window.ksnoteAI.onStream((payload) => {
+      if (!payload || aiJobRef.current?.jobId !== payload.jobId) return;
+      setAiStream((text) => (text + String(payload.chunk || "")).slice(-20000));
+    });
+    const offDone = window.ksnoteAI.onDone((payload) => {
+      const job = aiJobRef.current;
+      if (!payload || job?.jobId !== payload.jobId) return;
+      aiJobRef.current = null;
+      job.resolve(String(payload.output || ""));
+    });
+    const offError = window.ksnoteAI.onError((payload) => {
+      const job = aiJobRef.current;
+      if (!payload || job?.jobId !== payload.jobId) return;
+      aiJobRef.current = null;
+      const error = new Error(payload.message || "AI 실행에 실패했습니다.");
+      error.cancelled = Boolean(payload.cancelled);
+      job.reject(error);
+    });
+    return () => {
+      offStream?.();
+      offDone?.();
+      offError?.();
+    };
+  }, []);
+  // CLI 설치·로그인 자동 진단: once per provider per app run, plus on every error.
+  useEffect(() => {
+    if (!aiOpen || diagnosedProviders.has(aiProvider)) return;
+    diagnosedProviders.add(aiProvider);
+    runDiagnosis(aiProvider);
+  }, [aiOpen, aiProvider]);
   useEffect(() => {
     if (!editor) return;
     const updateLineNumbers = () => editor.view.dom.querySelectorAll("pre").forEach((pre) => {
@@ -1323,13 +1482,6 @@ export default function RichDocumentEditor({
     pendingFilePos.current = null;
     if (fileInput.current) fileInput.current.value = "";
   };
-  const getTableRange = () => {
-    const { $from } = editor.state.selection;
-    for (let d = $from.depth; d > 0; d--)
-      if ($from.node(d).type.name === "table")
-        return { from: $from.before(d), to: $from.after(d) };
-    return null;
-  };
   const currentTableElement = () => {
     const anchor = window.getSelection()?.anchorNode;
     return (anchor?.nodeType === 3 ? anchor.parentElement : anchor)?.closest?.("table") || null;
@@ -1372,41 +1524,174 @@ export default function RichDocumentEditor({
     editor.view.dispatch(editor.state.tr.replaceWith(from, from + table.nodeSize, editor.schema.nodeFromJSON(json)));
     editor.commands.focus();
   };
+  // Function declaration (not const): the diagnosis effect above closes over it.
+  async function runDiagnosis(provider) {
+    const active = provider || aiProvider;
+    if (!window.ksnoteAI?.diagnose) return;
+    setAiDiagnosing(true);
+    try {
+      setAiDiagnosis(await window.ksnoteAI.diagnose({ provider: active, command: agentCommands[active] }));
+    } catch {
+      setAiDiagnosis(null);
+    } finally {
+      setAiDiagnosing(false);
+    }
+  }
+  /** One audit row + one session entry per run outcome, whatever the outcome is. */
+  const recordRun = async (entry) => {
+    const payload = {
+      provider: aiProvider,
+      mode: entry.mode || aiMode,
+      target: entry.target || "note",
+      noteId,
+      instruction: entry.instruction || "",
+      status: entry.status,
+      opsTotal: entry.opsTotal || 0,
+      opsApplied: entry.opsApplied || 0,
+      revisionBefore: entry.revisionBefore || 0,
+      error: entry.error || "",
+    };
+    try {
+      await window.ksnoteAI?.auditAppend?.(payload);
+    } catch {}
+    onRecordSession?.({
+      id: "s-" + Date.now().toString(36) + Math.random().toString(16).slice(2, 6),
+      projectId,
+      noteId,
+      noteTitle,
+      ts: Date.now(),
+      provider: aiProvider,
+      mode: payload.mode,
+      instruction: payload.instruction,
+      status: payload.status,
+      resultSummary: String(entry.summary || "").slice(0, 200),
+      revisionBefore: payload.revisionBefore,
+    });
+  };
+  /** Streamed run: resolves with the whole stdout once the CLI exits. */
+  const runAgent = (request) =>
+    new Promise((resolve, reject) => {
+      if (!window.ksnoteAI?.start) {
+        reject(new Error("데스크톱 앱에서 실행해야 AI CLI를 사용할 수 있습니다."));
+        return;
+      }
+      window.ksnoteAI
+        .start(request)
+        .then((started) => {
+          if (!started?.jobId) {
+            reject(new Error("AI 실행을 시작하지 못했습니다."));
+            return;
+          }
+          aiJobRef.current = { jobId: started.jobId, resolve, reject };
+          setAiJobId(started.jobId);
+        })
+        .catch(reject);
+    });
+  const cancelAI = () => {
+    const jobId = aiJobRef.current?.jobId || aiJobId;
+    if (jobId) window.ksnoteAI?.cancel?.(jobId);
+  };
+  /** Blocks intersecting the selection, recorded as ids rather than positions. */
+  const selectionBlockIds = (kind) => {
+    const { from, to } = editor.state.selection;
+    const ids = [];
+    editor.state.doc.forEach((node, pos) => {
+      const id = node.attrs?.blockId;
+      if (!id) return;
+      const start = pos;
+      const end = pos + node.nodeSize;
+      const hit = kind === "note" ? true : from === to ? start <= from && end >= from : start < to && end > from;
+      if (hit) ids.push(id);
+    });
+    return ids;
+  };
+  const tableBlockId = () => {
+    const { $from } = editor.state.selection;
+    for (let depth = $from.depth; depth > 0; depth -= 1) {
+      if ($from.node(depth).type.name === "table") return $from.node(depth).attrs?.blockId || "";
+    }
+    return "";
+  };
+  /**
+   * 선택 정확도: the target is the set of block ids intersecting the selection,
+   * and the prompt carries only those blocks plus the note outline — never raw
+   * positions, which a concurrent edit would invalidate.
+   */
   const askAI = async (instruction = aiPrompt, targetOverride) => {
     if (!instruction.trim() || aiLoading) return;
+    assignBlockIds(editor);
+    const noteHtml = editor.getHTML();
     const { from, to } = editor.state.selection;
     const selection = editor.state.doc.textBetween(from, to, "\n");
     const target = targetOverride || (from !== to ? "selection" : "note");
-    const range =
-      target === "table"
-        ? getTableRange()
-        : target === "selection"
-          ? { from, to }
-          : null;
-    aiTargetRef.current = { target, range };
+    const ids = target === "table" ? [tableBlockId()].filter(Boolean) : selectionBlockIds(target);
+    const blocks = splitBlocks(noteHtml).filter((block) => block.blockId && ids.includes(block.blockId));
+    const fingerprint = hashHtml(noteHtml);
+    aiRequestRef.current = { target, blockIds: ids, fingerprint };
     setAiOpen(true);
     setAiLoading(true);
     setAiError("");
     setAiResult(null);
+    setAiStream("");
+    setAiSelected([]);
+    setAiConflict(false);
+    setAiConfirmFull(false);
     try {
-      if (!window.ksnoteAI?.run)
-        throw new Error(
-          "데스크톱 앱에서 실행해야 AI CLI를 사용할 수 있습니다.",
-        );
-      const output = await window.ksnoteAI.run({
+      const output = await runAgent({
         provider: aiProvider,
         command: agentCommands[aiProvider],
         mode: aiMode,
         instruction,
-        content: editor.getHTML(),
-        selection,
         target,
+        prompt: buildPatchPrompt({
+          instruction,
+          mode: aiMode,
+          target,
+          blocks,
+          outline: outlineOf(noteHtml),
+          selection,
+        }),
       });
-      setAiResult({ output, instruction, mode: aiMode, target });
+      if (aiMode === "ask") {
+        setAiResult({ kind: "answer", output, instruction, mode: "ask", target, fingerprint });
+        recordRun({ status: "answered", instruction, target, mode: "ask", summary: output });
+        return;
+      }
+      const parsed = parsePatchResponse(output);
+      if (parsed.error) {
+        setAiError(parsed.error);
+        recordRun({ status: "error", instruction, target, error: parsed.error });
+        return;
+      }
+      if (parsed.fullHtml) {
+        setAiResult({
+          kind: "full",
+          html: parsed.fullHtml,
+          output,
+          instruction,
+          mode: "edit",
+          target,
+          fingerprint,
+          lines: diffLines(noteText(noteHtml), noteText(parsed.fullHtml)),
+        });
+        return;
+      }
+      const ops = diffBlocks(noteHtml, parsed.patch);
+      setAiSelected(ops.map((op) => !op.error));
+      setAiResult({ kind: "patch", patch: parsed.patch, ops, output, instruction, mode: "edit", target, fingerprint });
     } catch (err) {
-      setAiError(err.message || "AI 실행에 실패했습니다.");
+      if (err?.cancelled) {
+        setAiError("취소되었습니다.");
+        recordRun({ status: "cancelled", instruction, target });
+      } else {
+        setAiError(err.message || "AI 실행에 실패했습니다.");
+        recordRun({ status: "error", instruction, target, error: err.message });
+        runDiagnosis(aiProvider);
+      }
     } finally {
       setAiLoading(false);
+      setAiJobId("");
+      aiJobRef.current = null;
     }
   };
   const cleanAIHtml = (value) =>
@@ -1414,11 +1699,49 @@ export default function RichDocumentEditor({
       .replace(/^```(?:html)?\s*/i, "")
       .replace(/```\s*$/, "")
       .trim();
-  const applyAI = (action = "replace") => {
+  /** Every checked op in one chain, bottom-up, so Undo reverts the whole apply. */
+  const applyOpsToEditor = (ops) => {
+    const positions = new Map();
+    editor.state.doc.forEach((node, pos) => {
+      const id = node.attrs?.blockId;
+      if (id) positions.set(id, { pos, size: node.nodeSize });
+    });
+    const resolved = ops.map((op) => ({ op, at: positions.get(op.blockId) })).filter((entry) => entry.at);
+    if (!resolved.length) return 0;
+    resolved.sort((a, b) => b.at.pos - a.at.pos);
+    const chain = editor.chain().focus();
+    for (const entry of resolved) {
+      const op = entry.op;
+      const at = entry.at;
+      if (op.action === "delete") chain.deleteRange({ from: at.pos, to: at.pos + at.size });
+      else if (op.action === "replace") chain.insertContentAt({ from: at.pos, to: at.pos + at.size }, withBlockId(op.html, op.blockId));
+      else chain.insertContentAt(at.pos + at.size, withBlockId(op.html, newBlockId()));
+    }
+    chain.run();
+    return resolved.length;
+  };
+  /** 다시 diff 계산 — re-diff the patch against whatever the note looks like now. */
+  const recomputeDiff = () => {
     if (!aiResult) return;
-    const target = aiTargetRef.current;
-    const output = cleanAIHtml(aiResult.output);
-    if (aiResult.mode === "ask" || action === "insert") {
+    const currentHtml = editor.getHTML();
+    if (aiResult.kind === "patch") {
+      const ops = diffBlocks(currentHtml, aiResult.patch);
+      setAiSelected(ops.map((op) => !op.error));
+      setAiResult({ ...aiResult, ops, fingerprint: hashHtml(currentHtml) });
+    } else if (aiResult.kind === "full") {
+      setAiResult({
+        ...aiResult,
+        fingerprint: hashHtml(currentHtml),
+        lines: diffLines(noteText(currentHtml), noteText(aiResult.html)),
+      });
+    }
+    setAiConflict(false);
+  };
+  const applyAI = async (action = "replace") => {
+    if (!aiResult) return;
+    // 질문 답변과 "노트에 삽입"은 문서를 교체하지 않는 기존 인용 경로 그대로.
+    if (aiResult.kind === "answer" || action === "insert") {
+      const output = cleanAIHtml(aiResult.output);
       editor
         .chain()
         .focus()
@@ -1426,13 +1749,66 @@ export default function RichDocumentEditor({
           `<blockquote><p>${output.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>")}</p></blockquote>`,
         )
         .run();
-    } else if (target?.target === "note") {
-      editor.commands.setContent(output);
-    } else if (target?.range) {
-      editor.chain().focus().insertContentAt(target.range, output).run();
+      recordRun({
+        status: aiResult.mode === "ask" ? "answered" : "applied",
+        instruction: aiResult.instruction,
+        target: aiResult.target,
+        mode: aiResult.mode,
+        summary: output,
+      });
+      setAiResult(null);
+      setAiPrompt("");
+      return;
+    }
+    const currentHtml = editor.getHTML();
+    // revision 기반 충돌 확인: the note must still be what the diff was computed on.
+    if (hashHtml(currentHtml) !== aiResult.fingerprint) {
+      setAiConflict(true);
+      return;
+    }
+    if (aiResult.kind === "full" && !aiConfirmFull) return;
+    // AI 변경 revision 자동 저장 — 적용 전에 남겨야 모든 AI 변경이 복구 가능하다.
+    let revisionBefore = 0;
+    try {
+      const revision = await window.ksnoteStorage?.snapshotRevision?.({
+        noteId,
+        title: noteTitle,
+        content: currentHtml,
+        reason: "ai-edit",
+      });
+      revisionBefore = revision?.id || 0;
+    } catch {}
+    if (aiResult.kind === "full") {
+      editor.commands.setContent(aiResult.html);
+      window.setTimeout(() => assignBlockIds(editor), 0);
+      recordRun({
+        status: "applied",
+        instruction: aiResult.instruction,
+        target: aiResult.target,
+        opsTotal: 1,
+        opsApplied: 1,
+        revisionBefore,
+        summary: "전체 노트 교체",
+      });
+    } else {
+      const outcome = applyPatchToHtml(currentHtml, aiResult.patch, { selected: aiSelected });
+      const skipped = new Set(outcome.skipped.map((item) => item.blockId));
+      const ops = aiResult.patch.ops.filter((op, index) => aiSelected[index] && !skipped.has(op.blockId));
+      const applied = applyOpsToEditor(ops);
+      window.setTimeout(() => assignBlockIds(editor), 0);
+      recordRun({
+        status: applied === 0 ? "rejected" : applied === aiResult.patch.ops.length ? "applied" : "partial",
+        instruction: aiResult.instruction,
+        target: aiResult.target,
+        opsTotal: aiResult.patch.ops.length,
+        opsApplied: applied,
+        revisionBefore,
+        summary: aiResult.patch.summary || "",
+      });
     }
     setAiResult(null);
     setAiPrompt("");
+    setAiConfirmFull(false);
   };
   return (
     <section
@@ -1983,40 +2359,176 @@ export default function RichDocumentEditor({
                 <b>KsNote AI</b>
                 <small>노트 내용을 읽고 편집할 수 있습니다</small>
               </span>
+              <button
+                className={aiSessionsOpen ? "active" : ""}
+                title="AI 세션 목록"
+                onClick={() => setAiSessionsOpen((open) => !open)}
+              >
+                <ListTree />
+              </button>
               <button onClick={() => setAiOpen(false)}>
                 <X />
               </button>
             </header>
+            {aiDiagnosis && (
+              <div className={`ai-diagnosis ${aiDiagnosis.installed && aiDiagnosis.loggedIn ? "ok" : "warn"}`}>
+                <span>
+                  {aiDiagnosis.provider === "claude" ? "Claude" : "Codex"} CLI{" "}
+                  {aiDiagnosis.installed ? "✓ 설치됨" : "✗ 설치되지 않음"}
+                  {aiDiagnosis.installed && (aiDiagnosis.loggedIn ? " · 로그인됨" : " · 로그인 필요")}
+                  {aiDiagnosis.hint ? ` → ${aiDiagnosis.hint}` : ""}
+                </span>
+                <button type="button" disabled={aiDiagnosing} onClick={() => runDiagnosis(aiProvider)}>
+                  <ScanText /> 재진단
+                </button>
+              </div>
+            )}
+            {aiSessionsOpen && (
+              <div className="ai-sessions">
+                {(aiSessions || []).filter((session) => !projectId || session.projectId === projectId).length === 0 && (
+                  <p className="ai-sessions-empty">이 프로젝트의 AI 세션 기록이 아직 없습니다.</p>
+                )}
+                {(aiSessions || [])
+                  .filter((session) => !projectId || session.projectId === projectId)
+                  .slice(0, 50)
+                  .map((session) => (
+                    <button
+                      type="button"
+                      key={session.id}
+                      className="ai-session"
+                      onClick={() => {
+                        setAiPrompt(session.instruction || "");
+                        setAiMode(session.mode === "ask" ? "ask" : "edit");
+                      }}
+                    >
+                      <time>{new Date(session.ts).toLocaleString()}</time>
+                      <em className={`ai-session-mode ${session.mode}`}>{session.mode === "ask" ? "질문" : "편집"}</em>
+                      <b>{session.instruction}</b>
+                      <i className={`ai-session-status ${session.status}`}>
+                        {AI_STATUS_LABELS[session.status] || session.status}
+                      </i>
+                    </button>
+                  ))}
+              </div>
+            )}
             {(aiResult || aiError || aiLoading) && (
               <div className="ai-response">
                 {aiLoading && (
-                  <div className="ai-thinking">
-                    <LoaderCircle />{" "}
-                    {aiProvider === "codex" ? "Codex" : "Claude"}가 노트를 읽고
-                    있습니다…
-                  </div>
-                )}
-                {aiError && <div className="ai-error">{aiError}</div>}
-                {aiResult && (
                   <>
-                    <div className="ai-result-text">{aiResult.output}</div>
-                    <div className="ai-result-actions">
-                      {aiResult.mode === "edit" && (
-                        <button
-                          className="apply"
-                          onClick={() => applyAI("replace")}
-                        >
-                          <Check /> 변경 적용
-                        </button>
-                      )}
-                      <button onClick={() => applyAI("insert")}>
-                        <FilePenLine /> 노트에 삽입
-                      </button>
-                      <button onClick={() => setAiResult(null)}>
+                    <div className="ai-thinking">
+                      <LoaderCircle />{" "}
+                      {aiProvider === "codex" ? "Codex" : "Claude"}가 노트를 읽고
+                      있습니다…
+                      <button type="button" className="ai-cancel" onClick={cancelAI}>
                         <X /> 취소
                       </button>
                     </div>
+                    {aiStream && <pre className="ai-stream">{aiStream}</pre>}
                   </>
+                )}
+                {aiError && <div className="ai-error">{aiError}</div>}
+                {aiConflict && (
+                  <div className="ai-conflict">
+                    <span>노트가 그 사이에 변경되었습니다.</span>
+                    <button type="button" onClick={recomputeDiff}>
+                      다시 diff 계산
+                    </button>
+                  </div>
+                )}
+                {aiResult?.kind === "answer" && <div className="ai-result-text">{aiResult.output}</div>}
+                {aiResult?.kind === "full" && (
+                  <div className="ai-full-warning">
+                    <b>전체 노트를 교체합니다 — 계속하려면 확인</b>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={aiConfirmFull}
+                        onChange={(event) => setAiConfirmFull(event.target.checked)}
+                      />
+                      확인했습니다
+                    </label>
+                  </div>
+                )}
+                {aiResult?.kind === "full" && (
+                  <pre className="ai-diff">
+                    {(aiResult.lines || []).map((line, index) => (
+                      <span className={`diff-line ${line.type}`} key={index}>
+                        {line.type === "del" ? "- " : line.type === "add" ? "+ " : "  "}
+                        {line.text || " "}
+                      </span>
+                    ))}
+                  </pre>
+                )}
+                {aiResult?.kind === "patch" && (
+                  <div className="ai-ops">
+                    {aiResult.patch.summary && <p className="ai-summary">{aiResult.patch.summary}</p>}
+                    {aiResult.ops.map((op) => (
+                      <article className={`ai-op ${op.error ? "blocked" : ""}`} key={`${op.blockId}-${op.index}`}>
+                        <header>
+                          <label>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(aiSelected[op.index])}
+                              disabled={Boolean(op.error)}
+                              onChange={(event) =>
+                                setAiSelected((current) => {
+                                  const next = current.slice();
+                                  next[op.index] = event.target.checked;
+                                  return next;
+                                })
+                              }
+                            />
+                            <span className={`ai-op-action ${op.action}`}>{AI_ACTION_LABELS[op.action] || op.action}</span>
+                          </label>
+                          <code>{op.blockId}</code>
+                          {op.error && <em>{op.error}</em>}
+                        </header>
+                        <pre className="ai-diff">
+                          {op.lines.map((line, index) => (
+                            <span className={`diff-line ${line.type}`} key={index}>
+                              {line.type === "del" ? "- " : line.type === "add" ? "+ " : "  "}
+                              {line.text || " "}
+                            </span>
+                          ))}
+                        </pre>
+                      </article>
+                    ))}
+                  </div>
+                )}
+                {aiResult && !aiLoading && (
+                  <div className="ai-result-actions">
+                    {aiResult.mode === "edit" && (
+                      <button
+                        className="apply"
+                        disabled={aiResult.kind === "full" ? !aiConfirmFull : !aiSelected.some(Boolean)}
+                        onClick={() => applyAI("replace")}
+                      >
+                        <Check /> 변경 적용
+                        {aiResult.kind === "patch" ? ` (${aiSelected.filter(Boolean).length}/${aiResult.ops.length})` : ""}
+                      </button>
+                    )}
+                    {aiResult.kind === "answer" && (
+                      <button onClick={() => applyAI("insert")}>
+                        <FilePenLine /> 노트에 삽입
+                      </button>
+                    )}
+                    <button
+                      onClick={() => {
+                        recordRun({
+                          status: "rejected",
+                          instruction: aiResult.instruction,
+                          target: aiResult.target,
+                          mode: aiResult.mode,
+                          opsTotal: aiResult.kind === "patch" ? aiResult.ops.length : 1,
+                        });
+                        setAiResult(null);
+                        setAiConflict(false);
+                        setAiConfirmFull(false);
+                      }}
+                    >
+                      <X /> 취소
+                    </button>
+                  </div>
                 )}
               </div>
             )}
