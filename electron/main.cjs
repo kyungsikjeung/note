@@ -4,12 +4,12 @@ const fs = require("fs/promises");
 const { spawn } = require("child_process");
 const TurndownService = require("turndown");
 const { gfm } = require("turndown-plugin-gfm");
-const initSqlJs = require("sql.js");
+const nodeFs = require("fs");
+const { openStore } = require("../lib/ksnote-store.cjs");
 const { Document, Packer, Paragraph, HeadingLevel, Table: DocxTable, TableRow: DocxRow, TableCell: DocxCell } = require("docx");
 
 const isDev = !app.isPackaged;
-let noteDb;
-let noteDbPath;
+let store;
 
 const plainText = (value) => String(value || "")
   .replace(/<br\s*\/?>/gi, "\n")
@@ -39,56 +39,36 @@ function htmlToDocxChildren(html, title) {
 }
 
 async function initializeStorage() {
-  const SQL = await initSqlJs({ locateFile: () => require.resolve("sql.js/dist/sql-wasm.wasm") });
-  noteDbPath = path.join(app.getPath("userData"), "ksnote.db");
-  let bytes;
-  try { bytes = await fs.readFile(noteDbPath); } catch {}
-  noteDb = bytes ? new SQL.Database(bytes) : new SQL.Database();
-  noteDb.run("CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL, updated_at INTEGER NOT NULL)");
-  noteDb.run("CREATE TABLE IF NOT EXISTS revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, note_id TEXT NOT NULL, title TEXT, content TEXT NOT NULL, created_at INTEGER NOT NULL)");
-  await flushDatabase();
+  const dbPath = path.join(app.getPath("userData"), "ksnote.db");
+  store = await openStore(dbPath);
+  watchExternalChanges(dbPath);
 }
 
-async function flushDatabase() {
-  if (!noteDb || !noteDbPath) return;
-  await fs.writeFile(noteDbPath, Buffer.from(noteDb.export()));
+/** Writes made by another process (MCP server, second window) land in every open editor. */
+function watchExternalChanges(dbPath) {
+  nodeFs.watchFile(dbPath, { interval: 1500 }, async () => {
+    if (!store || !store.hasExternalChange()) return;
+    try {
+      if (!(await store.reload())) return;
+      const state = store.loadState();
+      if (!state) return;
+      for (const win of BrowserWindow.getAllWindows()) win.webContents.send("storage-external-change", state);
+    } catch (error) {
+      console.error("외부 변경을 반영하지 못했습니다.", error);
+    }
+  });
 }
 
-ipcMain.handle("storage-load", async () => {
-  const result = noteDb.exec("SELECT json FROM app_state WHERE id=1");
-  return result[0]?.values?.[0]?.[0] ? JSON.parse(result[0].values[0][0]) : null;
-});
+ipcMain.handle("storage-load", async () => store.loadState());
 
 ipcMain.handle("storage-save", async (_, data) => {
-  const previous = noteDb.exec("SELECT json FROM app_state WHERE id=1");
-  const previousData = previous[0]?.values?.[0]?.[0] ? JSON.parse(previous[0].values[0][0]) : null;
-  const now = Date.now();
-  if (previousData?.notes) {
-    const previousById = new Map(previousData.notes.map((note) => [note.id, note]));
-    const insert = noteDb.prepare("INSERT INTO revisions(note_id,title,content,created_at) VALUES(?,?,?,?)");
-    for (const note of data.notes || []) {
-      const old = previousById.get(note.id);
-      if (old && old.content !== note.content) insert.run([old.id, old.title || "", old.content || "", now]);
-    }
-    insert.free();
-  }
-  noteDb.run("INSERT INTO app_state(id,json,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json, updated_at=excluded.updated_at", [JSON.stringify(data), now]);
-  noteDb.run("DELETE FROM revisions WHERE id IN (SELECT id FROM revisions r WHERE (SELECT COUNT(*) FROM revisions newer WHERE newer.note_id=r.note_id AND newer.id>=r.id)>50)");
-  await flushDatabase();
+  await store.saveState(data);
   return true;
 });
 
-ipcMain.handle("revision-list", (_, noteId) => {
-  const statement = noteDb.prepare("SELECT id,title,created_at FROM revisions WHERE note_id=? ORDER BY id DESC LIMIT 50");
-  statement.bind([noteId]); const rows = [];
-  while (statement.step()) rows.push(statement.getAsObject());
-  statement.free(); return rows;
-});
+ipcMain.handle("revision-list", (_, noteId) => store.listRevisions(noteId, { limit: 50 }));
 
-ipcMain.handle("revision-get", (_, id) => {
-  const statement = noteDb.prepare("SELECT content FROM revisions WHERE id=?"); statement.bind([id]);
-  const row = statement.step() ? statement.getAsObject() : null; statement.free(); return row;
-});
+ipcMain.handle("revision-get", (_, id) => store.getRevision(id));
 
 ipcMain.handle("asset-save", async (_, { name, dataUrl }) => {
   const match = String(dataUrl).match(/^data:([^;]+);base64,(.+)$/);
@@ -97,6 +77,7 @@ ipcMain.handle("asset-save", async (_, { name, dataUrl }) => {
   const assetName = `${Date.now()}-${Math.random().toString(16).slice(2)}.${extension}`;
   const assetDir = path.join(app.getPath("userData"), "assets"); await fs.mkdir(assetDir, { recursive: true });
   const assetPath = path.join(assetDir, assetName); await fs.writeFile(assetPath, Buffer.from(match[2], "base64"));
+  await store.saveAsset({ id: assetName, name: name || assetName, path: assetPath, createdAt: Date.now() });
   return { path: assetPath, name: assetName };
 });
 

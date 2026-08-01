@@ -703,6 +703,9 @@ function App() {
   const undoStack = useRef([]);
   const redoStack = useRef([]);
   const storageReady = useRef(false);
+  const dataRef = useRef(data);
+  const lastPersisted = useRef(null);
+  dataRef.current = data;
   const dragItem = useRef(null);
   const [revisions, setRevisions] = useState([]);
   const [diagnostics, setDiagnostics] = useState({});
@@ -736,17 +739,53 @@ function App() {
     let live = true;
     window.ksnoteStorage?.load().then((stored) => {
       if (!live) return;
-      if (stored?.projects && stored?.notes) setData(stored);
+      if (stored?.projects && stored?.notes) {
+        lastPersisted.current = JSON.stringify(stored);
+        dataRef.current = stored;
+        setData(stored);
+        storageReady.current = true;
+        return;
+      }
+      let seed = dataRef.current;
+      try {
+        const backup = JSON.parse(localStorage.getItem("mori-data"));
+        if (backup?.projects && backup?.notes) seed = backup;
+      } catch {}
       storageReady.current = true;
-      if (!stored) window.ksnoteStorage?.save(data);
+      dataRef.current = seed;
+      setData(seed);
+      window.ksnoteStorage
+        ?.save(seed)
+        .then(() => { lastPersisted.current = JSON.stringify(seed); })
+        .catch(() => {});
     }).catch(() => { storageReady.current = true; });
     return () => { live = false; };
   }, []);
   useEffect(() => {
+    if (!window.ksnoteStorage?.onExternalChange) return;
+    window.ksnoteStorage.onExternalChange((state) => {
+      if (!state?.projects || !state?.notes) return;
+      const incoming = JSON.stringify(state);
+      if (incoming === JSON.stringify(dataRef.current)) return;
+      lastPersisted.current = incoming;
+      dataRef.current = state;
+      setData(state);
+      showToast("외부 변경이 반영되었습니다");
+    });
+  }, []);
+  useEffect(() => {
+    const serialized = JSON.stringify(data);
+    if (lastPersisted.current === serialized) {
+      setSaved(true);
+      return;
+    }
     setSaved(false);
     const t = setTimeout(() => {
-      localStorage.setItem("mori-data", JSON.stringify(data));
-      if (storageReady.current) window.ksnoteStorage?.save(data);
+      localStorage.setItem("mori-data", serialized);
+      if (storageReady.current) {
+        lastPersisted.current = serialized;
+        window.ksnoteStorage?.save(data);
+      }
       setSaved(true);
     }, 350);
     return () => clearTimeout(t);
