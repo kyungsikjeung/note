@@ -293,13 +293,13 @@ npm run desktop
 - [x] 결과로 대상 범위 교체
 - [x] 결과 취소
 - [x] 표 전용 AI 프롬프트
-- [ ] 선택 영역이 정확히 유지되는 AI Patch
-- [ ] 적용 전 실제 diff 표시
-- [ ] AI Prompt 세션 목록
-- [ ] 프로젝트별 AI 대화 이력
-- [ ] 실행 중 취소
-- [ ] 응답 스트리밍
-- [ ] CLI 설치 및 로그인 자동 진단
+- [x] 선택 영역이 정확히 유지되는 AI Patch
+- [x] 적용 전 실제 diff 표시
+- [x] AI Prompt 세션 목록
+- [x] 프로젝트별 AI 대화 이력
+- [x] 실행 중 취소
+- [x] 응답 스트리밍
+- [x] CLI 설치 및 로그인 자동 진단
 
 ## 2. AI 안전 편집
 
@@ -309,19 +309,19 @@ npm run desktop
 - [x] Claude 도구 사용을 제한한 print 모드 실행
 - [x] 앱이 계정 비밀번호나 웹 세션 쿠키를 저장하지 않음
 - [x] 사용자 설정 CLI 명령의 위험한 shell 구분자 차단
-- [ ] Block ID 기반 Patch Schema
-- [ ] revision 기반 충돌 확인
-- [ ] AI 변경 revision 자동 저장
-- [ ] 변경 전후 diff와 부분 선택 적용
-- [ ] 전체 노트 교체 경고
-- [ ] AI 실행 감사 로그
+- [x] Block ID 기반 Patch Schema
+- [x] revision 기반 충돌 확인
+- [x] AI 변경 revision 자동 저장
+- [x] 변경 전후 diff와 부분 선택 적용
+- [x] 전체 노트 교체 경고
+- [x] AI 실행 감사 로그
 
 ## MVP 2 완료 기준
 
-- [ ] 선택 영역 요약 → diff → 적용 → Undo가 안정적으로 동작한다.
-- [ ] 표를 AI로 수정해도 표 구조와 셀 서식이 유지된다.
-- [ ] AI 세션과 실제 노트 변경 이력이 연결된다.
-- [ ] Codex와 Claude가 동일한 Patch 응답 규격을 사용한다.
+- [x] 선택 영역 요약 → diff → 적용 → Undo가 안정적으로 동작한다.
+- [x] 표를 AI로 수정해도 표 구조와 셀 서식이 유지된다.
+- [x] AI 세션과 실제 노트 변경 이력이 연결된다.
+- [x] Codex와 Claude가 동일한 Patch 응답 규격을 사용한다.
 
 ---
 
@@ -333,63 +333,63 @@ npm run desktop
 
 ## 1. 저장소 기반
 
-- [ ] `localStorage` 데이터를 SQLite로 마이그레이션
-- [ ] Project Repository
-- [ ] Note Repository
-- [ ] Block Repository
-- [ ] Asset Repository
-- [ ] Task Repository
-- [ ] Revision Repository
-- [ ] 기존 사용자 데이터 자동 마이그레이션
-- [ ] Electron과 MCP 프로세스의 동시 접근 처리
-- [ ] 외부 변경 시 에디터 자동 갱신
+- [x] `localStorage` 데이터를 SQLite로 마이그레이션
+- [x] Project Repository
+- [x] Note Repository
+- [x] Block Repository
+- [x] Asset Repository
+- [x] Task Repository
+- [x] Revision Repository
+- [x] 기존 사용자 데이터 자동 마이그레이션
+- [x] Electron과 MCP 프로세스의 동시 접근 처리
+- [x] 외부 변경 시 에디터 자동 갱신
 
 ## 2. 읽기 전용 MCP Tools
 
-- [ ] `workspace_get_context`
-- [ ] `project_list`
-- [ ] `note_search`
-- [ ] `note_get`
-- [ ] `task_query`
-- [ ] `asset_get`
-- [ ] `history_list`
-- [ ] pagination
-- [ ] 검색 결과 score와 snippet
-- [ ] block/heading 범위 읽기
+- [x] `workspace_get_context`
+- [x] `project_list`
+- [x] `note_search`
+- [x] `note_get`
+- [x] `task_query`
+- [x] `asset_get`
+- [x] `history_list`
+- [x] pagination
+- [x] 검색 결과 score와 snippet
+- [x] block/heading 범위 읽기
 
 ## 3. 쓰기 MCP Tools
 
-- [ ] `note_create`
-- [ ] `note_patch`
-- [ ] `note_move`
-- [ ] `task_update`
-- [ ] `history_restore`
-- [ ] expected revision 검사
-- [ ] 최소 block patch
-- [ ] 쓰기 전 diff
-- [ ] 쓰기 승인
-- [ ] 충돌 응답
+- [x] `note_create`
+- [x] `note_patch`
+- [x] `note_move`
+- [x] `task_update`
+- [x] `history_restore`
+- [x] expected revision 검사
+- [x] 최소 block patch
+- [x] 쓰기 전 diff
+- [x] 쓰기 승인
+- [x] 충돌 응답
 
 ## 4. Codex 연결
 
-- [ ] `mcp/ksnote-server.mjs`
-- [ ] STDIO transport
-- [ ] 서버 `instructions`
-- [ ] Tool `description`
-- [ ] `inputSchema`와 `outputSchema`
-- [ ] `readOnlyHint`와 위험 annotation
-- [ ] 프로젝트 `.codex/config.toml`
-- [ ] `codex mcp add ksnote` 설치 흐름
-- [ ] KsNote 설정 UI에서 설정 파일 생성
-- [ ] MCP 상태/도구 목록/오류 로그 표시
+- [x] `mcp/ksnote-server.mjs`
+- [x] STDIO transport
+- [x] 서버 `instructions`
+- [x] Tool `description`
+- [x] `inputSchema`와 `outputSchema`
+- [x] `readOnlyHint`와 위험 annotation
+- [x] 프로젝트 `.codex/config.toml`
+- [x] `codex mcp add ksnote` 설치 흐름
+- [x] KsNote 설정 UI에서 설정 파일 생성
+- [x] MCP 상태/도구 목록/오류 로그 표시
 
 ## MVP 3 완료 기준
 
-- [ ] Codex에서 현재 노트와 선택 영역을 읽을 수 있다.
-- [ ] 프로젝트 전체 노트를 검색할 수 있다.
-- [ ] 쓰기 작업은 revision과 사용자 승인을 요구한다.
-- [ ] UI와 Codex가 동시에 편집해도 자동 덮어쓰지 않는다.
-- [ ] 모든 MCP 변경을 history에서 복구할 수 있다.
+- [x] Codex에서 현재 노트와 선택 영역을 읽을 수 있다.
+- [x] 프로젝트 전체 노트를 검색할 수 있다.
+- [x] 쓰기 작업은 revision과 사용자 승인을 요구한다.
+- [x] UI와 Codex가 동시에 편집해도 자동 덮어쓰지 않는다.
+- [x] 모든 MCP 변경을 history에서 복구할 수 있다.
 
 ---
 
@@ -397,20 +397,20 @@ npm run desktop
 
 목표: KsNote의 문서를 Jira, Confluence, GitHub, Markdown과 업무 도구에 맞게 변환하고 전송한다.
 
-- [ ] Markdown ↔ Rich Document 무손실 변환
-- [ ] Markdown → Jira 변환
-- [ ] Markdown → Confluence 변환
-- [ ] Markdown → GitHub 변환
-- [ ] 표 플랫폼별 호환 변환
-- [ ] Jira MCP 연결
-- [ ] Confluence MCP 연결
-- [ ] GitHub MCP 연결
-- [ ] Local Files MCP 연결
-- [ ] 실행 전 승인 화면
-- [ ] 실행 결과와 외부 URL을 노트에 기록
-- [ ] 회의 노트에서 Jira 티켓 생성
-- [ ] 노트에서 GitHub Issue 생성
-- [ ] 프로젝트 Context Capsule
+- [x] Markdown ↔ Rich Document 무손실 변환
+- [x] Markdown → Jira 변환
+- [x] Markdown → Confluence 변환
+- [x] Markdown → GitHub 변환
+- [x] 표 플랫폼별 호환 변환
+- [x] Jira MCP 연결
+- [x] Confluence MCP 연결
+- [x] GitHub MCP 연결
+- [x] Local Files MCP 연결
+- [x] 실행 전 승인 화면
+- [x] 실행 결과와 외부 URL을 노트에 기록
+- [x] 회의 노트에서 Jira 티켓 생성
+- [x] 노트에서 GitHub Issue 생성
+- [x] 프로젝트 Context Capsule
 
 ---
 
@@ -455,11 +455,14 @@ UX 원칙:
 
 ## 개발 시 주의할 현재 제한
 
-- 현재 노트 데이터는 `localStorage`에 있어 외부 MCP 프로세스가 직접 읽을 수 없다.
+- 노트 데이터는 SQLite(`ksnote.db`)가 정본이며 `localStorage`는 호환 백업이다. Electron·MCP 동시 접근은
+  잠금 파일과 외부 변경 감지로 조율되지만, 같은 노트를 동시에 편집하면 revision 검사·승인으로 충돌을 알릴 뿐
+  자동 병합은 하지 않는다.
 - 분할 프리뷰는 별도 Mermaid 렌더링 단계가 필요하다.
-- 설정 화면의 MCP 항목은 현재 구성 UI이며 실제 서버 연결은 구현되지 않았다.
+- 외부 MCP 서버(Jira/Confluence/GitHub/Local Files)는 프리셋으로 추가하되 토큰·경로는 사용자가 채워야 하며,
+  실제 도구 이름은 서버 구현에 따라 승인 화면에서 조정해야 할 수 있다.
 - PlantUML은 Java/JAR 또는 렌더링 서버가 필요하다.
-- 현재 내보내기는 HTML 문서 내용을 `.md`로 저장할 수 있으므로 정식 변환기가 필요하다.
+- Markdown↔Rich 변환기는 표 병합 셀처럼 대상 플랫폼이 표현하지 못하는 구조를 낮춰서(degrade) 변환한다.
 - 대용량 Mermaid 번들에 대한 code splitting이 필요하다.
 
 ## 검증 명령
