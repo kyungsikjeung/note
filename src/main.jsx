@@ -144,6 +144,14 @@ const MCP_TOOL_LABELS = {
   task_update: "할 일 변경",
   history_restore: "이전 버전 복원",
 };
+const AI_AUDIT_STATUS = {
+  applied: "적용됨",
+  partial: "부분 적용",
+  rejected: "취소함",
+  cancelled: "실행 취소",
+  error: "실패",
+  answered: "답변",
+};
 const diffLineClass = (line) => {
   if (line.startsWith("---") || line.startsWith("+++")) return "meta";
   if (line.startsWith("+")) return "add";
@@ -722,6 +730,7 @@ function App() {
   dataRef.current = data;
   const dragItem = useRef(null);
   const [revisions, setRevisions] = useState([]);
+  const [aiAudit, setAiAudit] = useState([]);
   const [diagnostics, setDiagnostics] = useState({});
   const [mcpPending, setMcpPending] = useState([]);
   const [mcpPanelOpen, setMcpPanelOpen] = useState(false);
@@ -818,6 +827,9 @@ function App() {
     if (settingsOpen && settingsTab === "data" && note?.id) window.ksnoteStorage?.revisions(note.id).then(setRevisions).catch(() => setRevisions([]));
   }, [settingsOpen, settingsTab, note?.id, data]);
   useEffect(() => {
+    if (settingsOpen && settingsTab === "security") window.ksnoteAI?.auditList?.({ limit: 50 }).then((rows) => setAiAudit(rows || [])).catch(() => setAiAudit([]));
+  }, [settingsOpen, settingsTab]);
+  useEffect(() => {
     localStorage.setItem("mori-prefs", JSON.stringify(prefs));
   }, [prefs]);
   useEffect(() => {
@@ -886,6 +898,15 @@ function App() {
     setSettingsOpen(true);
     setAccountMenuOpen(false);
     setMoreOpen(false);
+  };
+  /**
+   * AI Prompt 세션 목록 · 프로젝트별 AI 대화 이력.
+   * Sessions live in the app state JSON (so they persist with the note data) and
+   * carry revisionBefore, which links a session to the note revision it created.
+   */
+  const recordAiSession = (session) => {
+    if (!session) return;
+    setData((d) => ({ ...d, aiSessions: [session, ...(d.aiSessions || [])].slice(0, 200) }));
   };
   const updateNote = (patch, history = true) =>
     setData((d) => ({
@@ -1963,6 +1984,8 @@ function App() {
         )}
         <RichDocumentEditor
           noteId={note.id}
+          noteTitle={note.title}
+          projectId={projectId}
           content={note.content}
           mode={mode}
           preferredProvider={agents.defaultProvider}
@@ -1971,6 +1994,8 @@ function App() {
             claude: agents.claude.command,
           }}
           preferences={prefs}
+          aiSessions={data.aiSessions || []}
+          onRecordSession={recordAiSession}
           onChange={(html) => updateNote({ content: html })}
         />
         <div className={`editor-shell legacy-editor mode-${mode}`}>
@@ -2817,6 +2842,30 @@ function App() {
                         <input type="checkbox" defaultChecked />
                         <i />
                       </label>
+                    </div>
+                    <div className="setting-title">
+                      <h3>AI 실행 감사 로그</h3>
+                      <p>AI가 실행된 모든 요청과 결과를 최근 50건까지 기록합니다.</p>
+                    </div>
+                    <div className="ai-audit-list">
+                      {aiAudit.length === 0 && <p className="ai-audit-empty">아직 기록된 AI 실행이 없습니다.</p>}
+                      {aiAudit.map((row) => (
+                        <article className="ai-audit-row" key={row.id}>
+                          <time>{new Date(row.ts).toLocaleString()}</time>
+                          <em className="ai-audit-provider">{row.provider === "claude" ? "Claude" : "Codex"}</em>
+                          <em className="ai-audit-mode">{row.mode === "ask" ? "질문" : "편집"}</em>
+                          <b className={`ai-audit-status ${row.status}`}>{AI_AUDIT_STATUS[row.status] || row.status}</b>
+                          <span title={row.instruction}>
+                            {String(row.instruction || "").slice(0, 60)}
+                            {String(row.instruction || "").length > 60 ? "…" : ""}
+                          </span>
+                          {row.ops_total > 0 && (
+                            <i className="ai-audit-ops">
+                              {row.ops_applied}/{row.ops_total} 적용
+                            </i>
+                          )}
+                        </article>
+                      ))}
                     </div>
                   </>
                 )}

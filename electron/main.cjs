@@ -92,6 +92,16 @@ ipcMain.handle("revision-list", (_, noteId) => store.listRevisions(noteId, { lim
 
 ipcMain.handle("revision-get", (_, id) => store.getRevision(id));
 
+/** AI 변경 revision 자동 저장: the renderer snapshots the note BEFORE applying a patch. */
+ipcMain.handle("revision-snapshot", async (_, request) => store.snapshotRevision(request));
+
+ipcMain.handle("ai-audit-append", async (_, entry) => store.appendAiAudit(entry));
+
+ipcMain.handle("ai-audit-list", async (_, options) => {
+  if (store.hasExternalChange()) await store.reload();
+  return store.listAiAudit(options);
+});
+
 ipcMain.handle("asset-save", async (_, { name, dataUrl }) => {
   const match = String(dataUrl).match(/^data:([^;]+);base64,(.+)$/);
   if (!match) throw new Error("지원하지 않는 파일 데이터입니다.");
@@ -395,36 +405,156 @@ function formatCliError(stderr, command, code) {
   return message?.replace(/^\s*(?:ERROR|error):?\s*/i, "") || `${command} 실행 실패 (${code})`;
 }
 
-ipcMain.handle("ai-run", async (_, request) => {
+/** Prompt for callers that predate the renderer-side ksnote-patch@1 prompt. */
+function legacyPrompt(request) {
   const system =
     request.mode === "ask"
       ? "You answer questions about the supplied note. Answer in Korean, concisely. Do not use tools. Do not modify files."
       : "You are a document editor. Return ONLY the complete replacement HTML for the requested target. Preserve unrelated content and valid semantic HTML. Do not use markdown fences, explanations, or tools.";
-  const prompt = `${system}\n\nUSER INSTRUCTION:\n${request.instruction}\n\nTARGET: ${request.target}\n\nNOTE HTML:\n${request.content}\n\nSELECTED TEXT:\n${request.selection || "(none)"}`;
-  const command = String(request.command || request.provider || "").trim();
+  return `${system}\n\nUSER INSTRUCTION:\n${request.instruction}\n\nTARGET: ${request.target}\n\nNOTE HTML:\n${request.content}\n\nSELECTED TEXT:\n${request.selection || "(none)"}`;
+}
+
+/**
+ * Sanitized command, argv and prompt shared by ai-run (blocking) and ai-start
+ * (streaming). The prompt is provider independent: the renderer builds one
+ * ksnote-patch@1 prompt and both CLIs receive it verbatim.
+ */
+function prepareAiRun(request) {
+  const req = request || {};
+  const command = String(req.command || req.provider || "").trim();
   if (!command || /[;&|<>\r\n]/.test(command))
     throw new Error("AI Agent 실행 명령을 확인해 주세요.");
-  if (request.provider === "claude")
-    return runCli(
-      command,
-      ["--print", "--tools", "", "--permission-mode", "plan"],
-      prompt,
-    );
-  return runCli(
-    command,
-    [
-      "exec",
-      "--ignore-user-config",
-      "--skip-git-repo-check",
-      "--sandbox",
-      "read-only",
-      "--ephemeral",
-      "--color",
-      "never",
-      "-",
-    ],
-    prompt,
-  );
+  const args =
+    req.provider === "claude"
+      ? ["--print", "--tools", "", "--permission-mode", "plan"]
+      : ["exec", "--ignore-user-config", "--skip-git-repo-check", "--sandbox", "read-only", "--ephemeral", "--color", "never", "-"];
+  return { command, args, prompt: req.prompt ? String(req.prompt) : legacyPrompt(req) };
+}
+
+const aiJobs = new Map();
+
+/** On Windows the CLI runs under cmd.exe, so kill the tree or the child outlives us. */
+function killTree(child) {
+  if (!child) return;
+  if (process.platform === "win32" && child.pid) {
+    try {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+      return;
+    } catch {}
+  }
+  try { child.kill(); } catch {}
+}
+
+/** Legacy blocking call — kept working so nothing breaks if a caller misses ai-start. */
+ipcMain.handle("ai-run", async (_, request) => {
+  const job = prepareAiRun(request);
+  return runCli(job.command, job.args, job.prompt);
+});
+
+/** 응답 스트리밍: chunks go out on ai-stream, the result on ai-done / ai-error. */
+ipcMain.handle("ai-start", async (event, request) => {
+  const job = prepareAiRun(request);
+  const jobId = "ai-" + Date.now().toString(36) + "-" + Math.random().toString(16).slice(2, 8);
+  const sender = event.sender;
+  const send = (channel, payload) => { if (!sender.isDestroyed()) sender.send(channel, payload); };
+  const child = spawn(job.command, job.args, {
+    cwd: app.getPath("documents"),
+    shell: process.platform === "win32",
+    windowsHide: true,
+  });
+  const entry = { child, cancelled: false, timedOut: false };
+  aiJobs.set(jobId, entry);
+  let output = "";
+  let stderr = "";
+  const timer = setTimeout(() => { entry.timedOut = true; killTree(child); }, 180000);
+  child.stdout.on("data", (chunk) => {
+    const text = chunk.toString();
+    if (output.length < 4_000_000) output += text;
+    send("ai-stream", { jobId, chunk: text });
+  });
+  child.stderr.on("data", (chunk) => { if (stderr.length < 200_000) stderr += chunk.toString(); });
+  child.on("error", (error) => {
+    clearTimeout(timer);
+    aiJobs.delete(jobId);
+    send("ai-error", { jobId, message: error.message });
+  });
+  child.on("close", (code) => {
+    clearTimeout(timer);
+    aiJobs.delete(jobId);
+    if (entry.cancelled) send("ai-error", { jobId, message: "취소되었습니다.", cancelled: true });
+    else if (entry.timedOut) send("ai-error", { jobId, message: "AI 응답 시간이 초과되었습니다." });
+    else if (code === 0) send("ai-done", { jobId, output: output.trim(), code });
+    else send("ai-error", { jobId, message: formatCliError(stderr, job.command, code) });
+  });
+  child.stdin.end(job.prompt);
+  return { jobId };
+});
+
+/** 실행 중 취소 — the run still lands in the audit log, with status "cancelled". */
+ipcMain.handle("ai-cancel", async (_, request) => {
+  const entry = aiJobs.get(String((request || {}).jobId || ""));
+  if (!entry) return false;
+  entry.cancelled = true;
+  killTree(entry.child);
+  return true;
+});
+
+/** Run one short command and report whether it exited cleanly. */
+function probeCommand(command, args, timeoutMs) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(command, args, { windowsHide: true, shell: process.platform === "win32" });
+    } catch (error) {
+      resolve({ ok: false, output: String(error.message || error) });
+      return;
+    }
+    let output = "";
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      killTree(child);
+      resolve({ ok, output: output.trim().slice(0, 400) });
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.stdout.on("data", (chunk) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { output += chunk.toString(); });
+    child.on("error", (error) => { output += String(error.message || error); finish(false); });
+    child.on("close", (code) => finish(code === 0));
+  });
+}
+
+/** CLI 설치 및 로그인 자동 진단 — shown as a status line in the AI dock. */
+ipcMain.handle("ai-diagnose", async (_, request) => {
+  const req = request || {};
+  const provider = String(req.provider || "codex");
+  const command = String(req.command || provider).trim();
+  const base = { provider, command, installed: false, loggedIn: false, version: "" };
+  if (!command || /[;&|<>\r\n]/.test(command)) return { ...base, hint: "AI Agent 실행 명령을 확인해 주세요." };
+  const version = await probeCommand(command, ["--version"], 8000);
+  if (!version.ok) return { ...base, hint: command + " CLI 를 찾지 못했습니다. 설치한 뒤 PATH 를 확인해 주세요." };
+  const versionText = (version.output.split(/\r?\n/).find(Boolean) || "").slice(0, 80);
+  if (provider === "codex") {
+    const status = await probeCommand(command, ["login", "status"], 10000);
+    const loggedIn = status.ok && !/not logged in|logged out|login required|unauthorized/i.test(status.output);
+    return { ...base, installed: true, version: versionText, loggedIn, hint: loggedIn ? "" : "터미널에서 " + command + " login 을 실행해 주세요." };
+  }
+  // Claude Code has no cheap non-interactive auth probe: a `--print` ping would
+  // burn a real model turn every time the dock opens. Heuristic instead — the CLI
+  // keeps OAuth credentials under the home directory and API-key users export
+  // ANTHROPIC_API_KEY; either signal counts as "likely logged in".
+  const credentialFiles = [path.join(os.homedir(), ".claude", ".credentials.json"), path.join(os.homedir(), ".claude.json")];
+  const loggedIn = Boolean(process.env.ANTHROPIC_API_KEY) || credentialFiles.some((file) => nodeFs.existsSync(file));
+  return {
+    ...base,
+    installed: true,
+    version: versionText,
+    loggedIn,
+    heuristic: true,
+    hint: loggedIn ? "" : "터미널에서 " + command + " login 으로 로그인해 주세요.",
+  };
 });
 
 app.whenReady().then(async () => { await initializeStorage(); createWindow(); });
