@@ -1,0 +1,295 @@
+/* 외부 도구 — 실행 전 승인 화면, MCP 프리셋·연결 카드, 노트에 남는 실행 기록 */
+
+.external-approval {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 92vw);
+  max-height: 88vh;
+  overflow: hidden;
+  border-radius: 16px;
+  background: var(--paper, #fff);
+  box-shadow: 0 24px 60px rgba(16, 32, 34, 0.28);
+}
+
+.external-approval > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid var(--line, #e2e8e8);
+}
+
+.external-approval h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.external-approval header p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted, #6d7a7d);
+}
+
+.external-approval header > button {
+  border: 0;
+  background: none;
+  padding: 4px;
+  cursor: pointer;
+  color: var(--muted, #6d7a7d);
+}
+
+.external-approval-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 22px;
+  overflow: auto;
+}
+
+.external-target {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line, #e2e8e8);
+  border-radius: 10px;
+  background: var(--canvas, #f5f7f7);
+  font-size: 12px;
+}
+
+.external-target b {
+  display: block;
+  font-size: 13px;
+  color: var(--ink, #172426);
+}
+
+.external-target small {
+  color: var(--muted, #6d7a7d);
+}
+
+.external-approval label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted, #6d7a7d);
+}
+
+.external-approval label input,
+.external-approval label textarea {
+  border: 1px solid var(--line, #e2e8e8);
+  border-radius: 8px;
+  padding: 9px 11px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--ink, #172426);
+  background: var(--paper, #fff);
+}
+
+.external-approval label textarea {
+  min-height: 220px;
+  resize: vertical;
+  font-family: var(--mono, monospace);
+  line-height: 1.6;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+
+.external-approval-error {
+  padding: 10px 12px;
+  border: 1px solid #e5b4a4;
+  border-radius: 8px;
+  background: #fdefe9;
+  color: #a0442a;
+  font-size: 12px;
+}
+
+.external-approval-stderr {
+  margin: 8px 0 0;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  color: #7a4030;
+}
+
+.external-approval > footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 22px;
+  border-top: 1px solid var(--line, #e2e8e8);
+  background: var(--canvas, #f5f7f7);
+}
+
+.external-approval footer small {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--muted, #6d7a7d);
+}
+
+.external-approval footer button {
+  border-radius: 8px;
+  border: 1px solid var(--line, #e2e8e8);
+  background: var(--paper, #fff);
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.external-approval footer button.primary {
+  border-color: var(--teal, #147d72);
+  background: var(--teal, #147d72);
+  color: #fff;
+  font-weight: 600;
+}
+
+.external-approval footer button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 설정 > MCP 연결 — 프리셋 버튼과 연결 결과 */
+
+.mcp-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.mcp-presets button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line, #e2e8e8);
+  border-radius: 999px;
+  background: var(--paper, #fff);
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink, #172426);
+  cursor: pointer;
+}
+
+.mcp-presets button:hover {
+  border-color: var(--teal, #147d72);
+  color: var(--teal, #147d72);
+}
+
+/* 카드는 flex 한 줄이라, 힌트와 연결 결과는 자기 줄을 차지하도록 감싸 준다. */
+.mcp-card {
+  flex-wrap: wrap;
+}
+
+.mcp-server-hint {
+  flex: 0 0 100%;
+  margin: -2px 0 0;
+  font-size: 11px;
+  color: var(--muted, #6d7a7d);
+}
+
+.mcp-connection {
+  flex: 0 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line, #e2e8e8);
+  border-radius: 10px;
+  background: var(--canvas, #f5f7f7);
+}
+
+.mcp-connection > b {
+  font-size: 12px;
+}
+
+.mcp-connection.fail {
+  border-color: #e5b4a4;
+  background: #fdefe9;
+}
+
+.mcp-connection ul {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow: auto;
+  list-style: none;
+}
+
+.mcp-connection li {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.mcp-connection li code {
+  font-family: var(--mono, monospace);
+  color: var(--ink, #172426);
+}
+
+.mcp-connection li small {
+  color: var(--muted, #6d7a7d);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-connection .tool-read,
+.mcp-connection .tool-write {
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.mcp-connection .tool-read {
+  background: var(--teal-soft, #dcefeb);
+  color: var(--teal, #147d72);
+}
+
+.mcp-connection .tool-write {
+  background: #fdf4e0;
+  color: #8a5b09;
+}
+
+.mcp-connection summary {
+  font-size: 11px;
+  color: var(--muted, #6d7a7d);
+  cursor: pointer;
+}
+
+.mcp-connection pre {
+  margin: 6px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  color: #7a4030;
+}
+
+/* 노트 본문에 남는 외부 실행 기록 */
+
+blockquote[data-external-record] {
+  border-left: 3px solid var(--teal, #147d72);
+  background: var(--teal-soft, #dcefeb);
+  border-radius: 0 8px 8px 0;
+}
+
+blockquote[data-external-record] p {
+  margin: 4px 0;
+  font-size: 13px;
+}

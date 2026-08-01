@@ -1,5 +1,5 @@
 const { contextBridge, ipcRenderer } = require('electron');
-contextBridge.exposeInMainWorld('mori', { exportNote: (note) => ipcRenderer.invoke('export-note', note), importMarkdown: () => ipcRenderer.invoke('import-markdown') });
+contextBridge.exposeInMainWorld('mori', { exportNote: (note) => ipcRenderer.invoke('export-note', note), importMarkdown: () => ipcRenderer.invoke('import-markdown'), exportText: (request) => ipcRenderer.invoke('export-text', request) });
 /** Subscribe to a main-process channel and hand back the removal function. */
 const subscribe = (channel, cb) => {
   const handler = (_, payload) => cb(payload);
@@ -26,6 +26,11 @@ contextBridge.exposeInMainWorld('ksnoteMcp', {
   serverInfo: () => ipcRenderer.invoke('mcp-server-info'),
   readLog: (count) => ipcRenderer.invoke('mcp-read-log', count),
   writeCodexConfig: () => ipcRenderer.invoke('mcp-write-codex-config'),
+});
+contextBridge.exposeInMainWorld('ksnoteMcpClient', {
+  connect: (server) => ipcRenderer.invoke('mcp-client-connect', { server }),
+  call: (request) => ipcRenderer.invoke('mcp-client-call', request),
+  disconnect: (serverId) => ipcRenderer.invoke('mcp-client-disconnect', { serverId }),
 });
 contextBridge.exposeInMainWorld('ksnoteDiagnostics', { test: (request) => ipcRenderer.invoke('command-test', request) });
 contextBridge.exposeInMainWorld('ksnoteDiagram', { renderPlantUml: (request) => ipcRenderer.invoke('plantuml-render', request) });

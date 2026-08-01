@@ -7,6 +7,7 @@ const { gfm } = require("turndown-plugin-gfm");
 const nodeFs = require("fs");
 const os = require("os");
 const { openStore, applyPendingWrite } = require("../lib/ksnote-store.cjs");
+const { connectServer, callServerTool, getServer, disconnectServer, disconnectAll, assertSafeCommand, parseArgs, resultText } = require("./mcp-client.cjs");
 const { Document, Packer, Paragraph, HeadingLevel, Table: DocxTable, TableRow: DocxRow, TableCell: DocxCell } = require("docx");
 
 const isDev = !app.isPackaged;
@@ -117,6 +118,19 @@ ipcMain.handle("import-markdown", async () => {
   const result = await dialog.showOpenDialog({ properties: ["openFile"], filters: [{ name: "Markdown", extensions: ["md", "markdown"] }] });
   if (result.canceled || !result.filePaths[0]) return null;
   return { name: path.basename(result.filePaths[0]).replace(/\.(md|markdown)$/i, ""), markdown: await fs.readFile(result.filePaths[0], "utf8") };
+});
+
+/** Save an already-converted text document (Context Capsule, 플랫폼 Markdown) as-is. */
+ipcMain.handle("export-text", async (_, request) => {
+  const req = request || {};
+  const extension = String(req.extension || "md").replace(/[^a-z0-9]/gi, "") || "md";
+  const result = await dialog.showSaveDialog({
+    defaultPath: `${req.defaultName || "ksnote"}.${extension}`,
+    filters: [{ name: req.filterName || "Markdown", extensions: [extension] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+  await fs.writeFile(result.filePath, String(req.text || ""), "utf8");
+  return { ok: true, path: result.filePath };
 });
 
 ipcMain.handle("command-test", async (_, { commandLine, mode = "cli" }) => {
@@ -268,6 +282,72 @@ ipcMain.handle("mcp-write-codex-config", async () => {
   await fs.writeFile(configPath, result.text.replace(/\s*$/, "") + "\n", "utf8");
   return { path: configPath, merged: result.merged, backupPath, command: 'codex mcp add ksnote -- node "' + MCP_SERVER_PATH + '" --db "' + dbFilePath + '"' };
 });
+
+/* ------------------------------------------------- 외부 MCP 서버 (generic client) */
+
+/** Normalize one renderer-supplied server row into a client spec (and reject unsafe commands). */
+function mcpClientSpec(server) {
+  const config = server || {};
+  const spec = {
+    id: String(config.id || "").trim(),
+    name: String(config.name || config.id || "MCP 서버"),
+    command: String(config.command || "").trim(),
+    args: config.args,
+    env: config.env,
+  };
+  if (!spec.id) throw new Error("MCP 서버를 찾지 못했습니다.");
+  assertSafeCommand(spec.command, parseArgs(spec.args));
+  return spec;
+}
+
+/** Uniform failure envelope — the UI shows `error` and offers `stderrTail` in a collapsible. */
+const mcpClientFailure = (error, client) => ({
+  ok: false,
+  error: error && error.message ? error.message : String(error),
+  stderrTail: client && typeof client.stderrTailText === "function" ? client.stderrTailText(200) : "",
+});
+
+ipcMain.handle("mcp-client-connect", async (_, request) => {
+  let spec;
+  try {
+    spec = mcpClientSpec((request || {}).server);
+  } catch (error) {
+    return mcpClientFailure(error, null);
+  }
+  try {
+    const connected = await connectServer(spec);
+    return {
+      ok: true,
+      serverInfo: connected.serverInfo,
+      protocolVersion: connected.protocolVersion,
+      instructions: connected.instructions,
+      tools: connected.tools.map((tool) => ({ name: tool.name, title: tool.title, description: tool.description, readOnly: tool.readOnly })),
+    };
+  } catch (error) {
+    return mcpClientFailure(error, getServer(spec.id));
+  }
+});
+
+/** Approval already happened in the renderer; this only ensures a connection and forwards the call. */
+ipcMain.handle("mcp-client-call", async (_, request) => {
+  const req = request || {};
+  let spec;
+  try {
+    spec = mcpClientSpec(req.server || { id: req.serverId });
+  } catch (error) {
+    return mcpClientFailure(error, null);
+  }
+  try {
+    const called = await callServerTool(spec, req.tool, req.args || {}, { timeoutMs: 60000 });
+    const text = resultText(called.result);
+    if (called.result && called.result.isError) return { ok: false, error: text || "도구 실행이 실패했습니다.", stderrTail: called.client.stderrTailText(200) };
+    return { ok: true, result: called.result, text: text };
+  } catch (error) {
+    return mcpClientFailure(error, getServer(spec.id));
+  }
+});
+
+ipcMain.handle("mcp-client-disconnect", async (_, request) => ({ ok: disconnectServer((request || {}).serverId) }));
 
 ipcMain.handle("plantuml-render", async (_, { code, jarPath }) => {
   if (!jarPath) throw new Error("설정 > 편집기에서 PlantUML JAR 경로를 지정하세요.");
@@ -559,6 +639,7 @@ ipcMain.handle("ai-diagnose", async (_, request) => {
 
 app.whenReady().then(async () => { await initializeStorage(); createWindow(); });
 app.on("window-all-closed", () => {
+  disconnectAll();
   if (process.platform !== "darwin") app.quit();
 });
 app.on("activate", () => {

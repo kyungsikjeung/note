@@ -142,6 +142,17 @@ const BlockId = Extension.create({
           },
         },
       },
+      {
+        // 외부 도구 실행 기록 인용구는 편집 중에도 표식을 잃지 않아야 스타일이 유지된다.
+        types: ["blockquote"],
+        attributes: {
+          externalRecord: {
+            default: null,
+            parseHTML: (element) => element.getAttribute("data-external-record"),
+            renderHTML: (attributes) => (attributes.externalRecord ? { "data-external-record": attributes.externalRecord } : {}),
+          },
+        },
+      },
     ];
   },
 });
@@ -752,6 +763,7 @@ export default function RichDocumentEditor({
   agentCommands = { codex: "codex", claude: "claude" },
   preferences = { fontSize: 14, fontFamily: "sans", spellcheck: false },
   aiSessions = [],
+  externalRevision = 0,
   onRecordSession,
   onChange,
 }) {
@@ -1281,7 +1293,7 @@ export default function RichDocumentEditor({
         editor.commands.setContent(incoming, false);
       assignBlockIds(editor);
     }
-  }, [noteId]);
+  }, [noteId, externalRevision]);
   useEffect(() => {
     if (editor) editor.setEditable(mode !== "preview");
   }, [editor, mode]);

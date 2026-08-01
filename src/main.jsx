@@ -59,6 +59,15 @@ import {
   Terminal,
   History,
 } from "lucide-react";
+import {
+  richToMarkdown,
+  markdownToRich,
+  markdownToJira,
+  markdownToConfluence,
+  markdownToGithub,
+  buildContextCapsule,
+} from "./lib/converters.mjs";
+import { newBlockId } from "./lib/ai-patch.mjs";
 import "highlight.js/styles/github.css";
 import "./styles.css";
 import "./slash.css";
@@ -74,6 +83,7 @@ import "./page-management.css";
 import "./shortcuts.css";
 import "./themes.css";
 import "./mcp-approvals.css";
+import "./external-tools.css";
 
 mermaid.initialize({
   startOnLoad: false,
@@ -160,17 +170,60 @@ const diffLineClass = (line) => {
 };
 const uid = (prefix) =>
   `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-const escapeAttribute = (value) => String(value || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "&#10;");
-const markdownToRich = (markdown) => {
-  const diagrams = [];
-  const prepared = String(markdown || "").replace(/```(mermaid|plantuml)\s*\n([\s\S]*?)```/gi, (_, type, code) => {
-    const token = `KSNOTE_DIAGRAM_${diagrams.length}_TOKEN`;
-    diagrams.push(`<div data-type="${type.toLowerCase()}" data-code="${escapeAttribute(code.trim())}"></div>`);
-    return token;
-  });
-  let html = marked.parse(prepared);
-  diagrams.forEach((diagram, index) => { html = html.replace(`<p>KSNOTE_DIAGRAM_${index}_TOKEN</p>`, diagram).replace(`KSNOTE_DIAGRAM_${index}_TOKEN`, diagram); });
-  return html;
+/**
+ * 설정 > MCP 연결의 프리셋. 토큰·경로는 비워 두고 사용자가 직접 채운다.
+ * kind 는 "Jira 티켓 만들기" 같은 흐름이 어느 서버로 나가야 하는지 찾는 열쇠다.
+ */
+const MCP_PRESETS = [
+  {
+    kind: "jira",
+    name: "Jira",
+    command: "npx",
+    args: "-y mcp-remote https://mcp.atlassian.com/v1/sse",
+    env: "",
+    hint: "Atlassian 원격 MCP 서버입니다. 첫 연결 때 브라우저 로그인 창이 열립니다.",
+  },
+  {
+    kind: "confluence",
+    name: "Confluence",
+    command: "npx",
+    args: "-y mcp-remote https://mcp.atlassian.com/v1/sse",
+    env: "",
+    hint: "Jira 와 같은 Atlassian 원격 서버를 쓰며, 페이지 생성 도구가 함께 노출됩니다.",
+  },
+  {
+    kind: "github",
+    name: "GitHub",
+    command: "npx",
+    args: "-y @modelcontextprotocol/server-github",
+    env: "GITHUB_PERSONAL_ACCESS_TOKEN=",
+    hint: "환경변수 GITHUB_PERSONAL_ACCESS_TOKEN 에 repo 권한 토큰이 필요합니다.",
+  },
+  {
+    kind: "files",
+    name: "Local Files",
+    command: "npx",
+    args: "-y @modelcontextprotocol/server-filesystem C:/Notes",
+    env: "",
+    hint: "마지막 인자를 열어 줄 폴더 경로로 바꾸세요. 그 폴더 밖은 읽지 못합니다.",
+  },
+];
+
+/** 노트에 기록할 때 결과 본문에서 뽑아낼 외부 URL. */
+const EXTERNAL_URL_PATTERN = /https?:\/\/[^\s"'<>)\]]+/g;
+
+const escapeHtml = (value) =>
+  String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+/** 현재 노트를 플랫폼 문법으로 저장할 때 쓰는 변환기·확장자 묶음. */
+const PLATFORM_EXPORTS = {
+  jira: { label: "Jira", convert: markdownToJira, extension: "md", filterName: "Jira wiki markup" },
+  confluence: { label: "Confluence", convert: markdownToConfluence, extension: "xml", filterName: "Confluence storage" },
+  github: { label: "GitHub", convert: markdownToGithub, extension: "md", filterName: "GitHub Flavored Markdown" },
 };
 
 const slashCommands = [
@@ -704,6 +757,7 @@ function App() {
           {
             id: "filesystem",
             name: "Filesystem",
+            kind: "files",
             command: "npx @modelcontextprotocol/server-filesystem",
             enabled: true,
             status: "ready",
@@ -711,6 +765,7 @@ function App() {
           {
             id: "github",
             name: "GitHub",
+            kind: "github",
             command: "npx @modelcontextprotocol/server-github",
             enabled: false,
             status: "offline",
@@ -739,6 +794,9 @@ function App() {
   const [mcpLog, setMcpLog] = useState(null);
   const [mcpLogOpen, setMcpLogOpen] = useState(false);
   const [mcpConfigResult, setMcpConfigResult] = useState(null);
+  const [mcpConnections, setMcpConnections] = useState({});
+  const [approval, setApproval] = useState(null);
+  const [externalRevision, setExternalRevision] = useState(0);
   const selectionRef = useRef("");
   const noteRef = useRef(null);
   const activeNotes = data.notes.filter((n) => !n.trashed);
@@ -1308,6 +1366,209 @@ function App() {
         status: "offline",
       },
     ]);
+  /** 프리셋 한 줄 추가 — 토큰·경로는 비워 두고 카드 아래 힌트로 안내한다. */
+  const addPresetServer = (preset) => {
+    const server = {
+      id: uid("mcp"),
+      kind: preset.kind,
+      name: preset.name,
+      command: preset.command,
+      args: preset.args,
+      env: preset.env || "",
+      hint: preset.hint,
+      enabled: false,
+      status: "offline",
+    };
+    setMcpServers((list) => [...list, server]);
+    showToast(`${preset.name} 프리셋을 추가했습니다. 토큰·경로를 채운 뒤 연결하세요`);
+  };
+  /** 서버를 띄우고 initialize · tools/list 까지 마친 결과를 카드 안에 펼친다. */
+  const connectMcpServer = async (server) => {
+    if (!window.ksnoteMcpClient) {
+      showToast("데스크톱 앱에서 MCP 서버에 연결할 수 있습니다");
+      return;
+    }
+    setMcpConnections((current) => ({ ...current, [server.id]: { loading: true } }));
+    try {
+      const response = await window.ksnoteMcpClient.connect({
+        id: server.id,
+        name: server.name,
+        command: server.command,
+        args: server.args,
+        env: server.env,
+      });
+      setMcpConnections((current) => ({ ...current, [server.id]: { ...response, loading: false, showStderr: false } }));
+      if (response?.ok) showToast(`${server.name} 도구 ${response.tools.length}개를 불러왔습니다`);
+    } catch (error) {
+      setMcpConnections((current) => ({ ...current, [server.id]: { ok: false, loading: false, error: error.message } }));
+    }
+  };
+  const disconnectMcpServer = async (server) => {
+    await window.ksnoteMcpClient?.disconnect(server.id);
+    setMcpConnections((current) => ({ ...current, [server.id]: undefined }));
+  };
+  /** 흐름별 대상 서버 찾기 — 활성 서버를 먼저, 없으면 같은 종류의 아무 서버나. */
+  const findMcpServer = (kind) =>
+    mcpServers.find((server) => server.kind === kind && server.enabled) || mcpServers.find((server) => server.kind === kind);
+  const requireMcpServer = (kind, label) => {
+    const server = findMcpServer(kind);
+    if (server) return server;
+    showToast(`설정 > MCP 연결에서 ${label} 서버를 추가하세요`);
+    openSettings("mcp");
+    return null;
+  };
+  /** 외부로 나가는 호출은 예외 없이 이 승인 화면을 거친다. */
+  const requestExternalCall = (request) =>
+    setApproval({
+      server: request.server,
+      tool: request.tool,
+      title: request.title,
+      noteId: request.noteId || null,
+      argsText: JSON.stringify(request.args || {}, null, 2),
+      error: "",
+      stderrTail: "",
+      busy: false,
+    });
+  /** 실행 결과와 결과에 들어 있던 외부 URL 을 노트 끝에 인용 블록으로 남긴다. */
+  const recordExternalResult = (record) => {
+    const targetId = record.noteId || noteRef.current?.id;
+    if (!targetId || !dataRef.current.notes.some((item) => item.id === targetId && !item.trashed)) {
+      showToast("열려 있는 노트가 없어 결과를 기록하지 못했습니다");
+      return false;
+    }
+    const text = String(record.text || "").trim();
+    const urls = Array.from(new Set(text.match(EXTERNAL_URL_PATTERN) || [])).slice(0, 5);
+    const paragraphs = [
+      `<p>🔗 <strong>${escapeHtml(record.serverName)}/${escapeHtml(record.tool)}</strong> · ${escapeHtml(new Date().toLocaleString("ko-KR"))}</p>`,
+      `<p>${escapeHtml(text.slice(0, 300)) || "(결과 본문이 비어 있습니다)"}</p>`,
+      ...urls.map((url) => `<p><a href="${escapeHtml(url)}">${escapeHtml(url)}</a></p>`),
+    ];
+    const block = `<blockquote data-block-id="${newBlockId()}" data-external-record="true">${paragraphs.join("")}</blockquote>`;
+    setData((current) => ({
+      ...current,
+      notes: current.notes.map((item) =>
+        item.id === targetId ? { ...item, content: `${item.content || ""}\n${block}`, updatedAt: Date.now() } : item,
+      ),
+    }));
+    // 편집기는 노트를 바꿀 때만 본문을 다시 읽으므로, 바깥에서 덧붙였다는 신호를 준다.
+    setExternalRevision((value) => value + 1);
+    return true;
+  };
+  /** 승인 버튼 — 도구 이름과 인자 JSON 을 검증한 뒤에야 실제 호출이 나간다. */
+  const runApprovedCall = async () => {
+    if (!approval || approval.busy) return;
+    const tool = String(approval.tool || "").trim();
+    if (!tool) {
+      setApproval((current) => ({ ...current, error: "호출할 도구 이름을 입력해 주세요." }));
+      return;
+    }
+    let args;
+    try {
+      args = JSON.parse(approval.argsText || "{}");
+    } catch (error) {
+      setApproval((current) => ({ ...current, error: `인자 JSON 을 확인해 주세요: ${error.message}` }));
+      return;
+    }
+    if (!args || typeof args !== "object" || Array.isArray(args)) {
+      setApproval((current) => ({ ...current, error: "인자는 JSON 객체여야 합니다." }));
+      return;
+    }
+    setApproval((current) => ({ ...current, busy: true, error: "", stderrTail: "" }));
+    const server = approval.server;
+    try {
+      const response = await window.ksnoteMcpClient?.call({
+        serverId: server.id,
+        server: { id: server.id, name: server.name, command: server.command, args: server.args, env: server.env },
+        tool,
+        args,
+      });
+      if (!response?.ok) {
+        setApproval((current) => ({
+          ...current,
+          busy: false,
+          error: response?.error || "데스크톱 앱에서 실행해 주세요.",
+          stderrTail: response?.stderrTail || "",
+        }));
+        return;
+      }
+      const recorded = recordExternalResult({ serverName: server.name, tool, text: response.text, noteId: approval.noteId });
+      setApproval(null);
+      if (recorded) showToast(`${tool} 실행 결과를 노트에 기록했습니다`);
+    } catch (error) {
+      setApproval((current) => ({ ...current, busy: false, error: error.message }));
+    }
+  };
+  /** 회의 노트 → Jira 티켓. 본문은 Jira wiki markup 으로 변환해 넘긴다. */
+  const createJiraTicket = (target) => {
+    const server = requireMcpServer("jira", "Jira");
+    if (!server || !target) return;
+    requestExternalCall({
+      server,
+      tool: "createJiraIssue",
+      title: "Jira 티켓 만들기",
+      noteId: target.id,
+      args: {
+        summary: target.title || "제목 없는 노트",
+        description: markdownToJira(richToMarkdown(target.content || "")),
+      },
+    });
+  };
+  /** 노트 → GitHub Issue. 본문은 GFM 으로 정규화해 넘긴다. */
+  const createGithubIssue = (target) => {
+    const server = requireMcpServer("github", "GitHub");
+    if (!server || !target) return;
+    requestExternalCall({
+      server,
+      tool: "create_issue",
+      title: "GitHub Issue 만들기",
+      noteId: target.id,
+      args: {
+        title: target.title || "제목 없는 노트",
+        body: markdownToGithub(richToMarkdown(target.content || "")),
+      },
+    });
+  };
+  /** 프로젝트 전체를 한 장의 Markdown 으로 묶어 파일 또는 클립보드로 내보낸다. */
+  const exportContextCapsule = async (project, options) => {
+    if (!project) return;
+    setProjectMenu(null);
+    const text = buildContextCapsule({
+      project,
+      notes: dataRef.current.notes.filter((item) => item.projectId === project.id),
+      now: new Date(),
+    });
+    if (options?.copy) {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast("Context Capsule 을 클립보드에 복사했습니다");
+      } catch (error) {
+        showToast(`클립보드 복사에 실패했습니다: ${error.message}`);
+      }
+      return;
+    }
+    const result = await window.mori?.exportText({
+      defaultName: `${project.name || "project"}-context-capsule`,
+      text,
+      extension: "md",
+      filterName: "Markdown",
+    });
+    if (result?.ok) showToast("Context Capsule 을 저장했습니다");
+    else if (!result) showToast("데스크톱 앱에서 파일로 저장할 수 있습니다");
+  };
+  /** 현재 노트를 Jira · Confluence · GitHub 문법으로 저장한다. */
+  const exportForPlatform = async (targetName) => {
+    const target = PLATFORM_EXPORTS[targetName];
+    if (!target || !note) return;
+    setMoreOpen(false);
+    const result = await window.mori?.exportText({
+      defaultName: `${note.title || "note"}-${targetName}`,
+      text: target.convert(richToMarkdown(note.content || "")),
+      extension: target.extension,
+      filterName: target.filterName,
+    });
+    if (result?.ok) showToast(`${target.label} 문법으로 저장했습니다`);
+    else if (!result) showToast("데스크톱 앱에서 파일로 저장할 수 있습니다");
+  };
   const testCommand = async (id, commandLine, mode) => {
     setDiagnostics((current) => ({ ...current, [id]: { loading: true, message: "확인 중…" } }));
     try {
@@ -1474,6 +1735,12 @@ function App() {
                     >
                       <Pencil /> 이름 변경
                     </button>
+                    <button onClick={() => exportContextCapsule(p)}>
+                      <Download /> Context Capsule 내보내기
+                    </button>
+                    <button onClick={() => exportContextCapsule(p, { copy: true })}>
+                      <Copy /> Context Capsule 클립보드 복사
+                    </button>
                     <button
                       className="danger"
                       onClick={() => {
@@ -1555,6 +1822,22 @@ function App() {
                       }}
                     >
                       <Pencil /> 이름 변경
+                    </button>
+                    <button
+                      onClick={() => {
+                        setNoteMenu(null);
+                        createJiraTicket(n);
+                      }}
+                    >
+                      <ExternalLink /> Jira 티켓 만들기
+                    </button>
+                    <button
+                      onClick={() => {
+                        setNoteMenu(null);
+                        createGithubIssue(n);
+                      }}
+                    >
+                      <ExternalLink /> GitHub Issue 만들기
                     </button>
                     <button className="danger" onClick={() => trashNote(n.id)}>
                       <Trash2 /> 휴지통으로 이동
@@ -1826,6 +2109,63 @@ function App() {
                       <small>DOCX 문서</small>
                     </span>
                   </button>
+                  <button onClick={() => exportForPlatform("jira")}>
+                    <Download />
+                    <span>
+                      <b>Markdown (Jira)</b>
+                      <small>Jira wiki markup · 표 호환 변환</small>
+                    </span>
+                  </button>
+                  <button onClick={() => exportForPlatform("confluence")}>
+                    <Download />
+                    <span>
+                      <b>Markdown (Confluence)</b>
+                      <small>Confluence storage format · 표 호환 변환</small>
+                    </span>
+                  </button>
+                  <button onClick={() => exportForPlatform("github")}>
+                    <Download />
+                    <span>
+                      <b>Markdown (GitHub)</b>
+                      <small>GitHub Flavored Markdown · 표 호환 변환</small>
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMoreOpen(false);
+                      createJiraTicket(note);
+                    }}
+                  >
+                    <ExternalLink />
+                    <span>
+                      <b>Jira 티켓 만들기</b>
+                      <small>승인 후 MCP 로 전송</small>
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMoreOpen(false);
+                      createGithubIssue(note);
+                    }}
+                  >
+                    <ExternalLink />
+                    <span>
+                      <b>GitHub Issue 만들기</b>
+                      <small>승인 후 MCP 로 전송</small>
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMoreOpen(false);
+                      exportContextCapsule(data.projects.find((item) => item.id === projectId));
+                    }}
+                  >
+                    <Download />
+                    <span>
+                      <b>Context Capsule 내보내기</b>
+                      <small>프로젝트 전체를 한 장의 Markdown 으로</small>
+                    </span>
+                  </button>
                   <button
                     onClick={() => {
                       setShortcutsOpen(true);
@@ -1995,6 +2335,7 @@ function App() {
           }}
           preferences={prefs}
           aiSessions={data.aiSessions || []}
+          externalRevision={externalRevision}
           onRecordSession={recordAiSession}
           onChange={(html) => updateNote({ content: html })}
         />
@@ -2636,6 +2977,13 @@ function App() {
                         <Plus /> 서버 추가
                       </button>
                     </div>
+                    <div className="mcp-presets">
+                      {MCP_PRESETS.map((preset) => (
+                        <button key={preset.kind} onClick={() => addPresetServer(preset)}>
+                          <Plus size={13} /> {preset.name}
+                        </button>
+                      ))}
+                    </div>
                     <div className="mcp-callout">
                       <Plug />
                       <span>
@@ -2697,6 +3045,22 @@ function App() {
                                 }
                               />
                             </label>
+                            <label>
+                              환경변수
+                              <input
+                                value={server.env || ""}
+                                placeholder="예: GITHUB_PERSONAL_ACCESS_TOKEN=ghp_..."
+                                onChange={(e) =>
+                                  setMcpServers((s) =>
+                                    s.map((x) =>
+                                      x.id === server.id
+                                        ? { ...x, env: e.target.value }
+                                        : x,
+                                    ),
+                                  )
+                                }
+                              />
+                            </label>
                           </span>
                           <span
                             className={`server-status ${server.enabled ? "ready" : ""}`}
@@ -2742,6 +3106,60 @@ function App() {
                           >
                             <Trash2 />
                           </button>
+                          <button
+                            className="diagnostic-button"
+                            disabled={mcpConnections[server.id]?.loading}
+                            onClick={() =>
+                              mcpConnections[server.id]?.ok
+                                ? disconnectMcpServer(server)
+                                : connectMcpServer(server)
+                            }
+                          >
+                            {mcpConnections[server.id]?.loading
+                              ? "연결 중…"
+                              : mcpConnections[server.id]?.ok
+                                ? "연결 해제"
+                                : "연결"}
+                          </button>
+                          {server.hint && (
+                            <small className="mcp-server-hint">{server.hint}</small>
+                          )}
+                          {mcpConnections[server.id] && !mcpConnections[server.id].loading && (
+                            <div className={`mcp-connection ${mcpConnections[server.id].ok ? "" : "fail"}`}>
+                              {mcpConnections[server.id].ok ? (
+                                <>
+                                  <b>
+                                    {mcpConnections[server.id].serverInfo?.name || server.name}
+                                    {mcpConnections[server.id].serverInfo?.version
+                                      ? ` v${mcpConnections[server.id].serverInfo.version}`
+                                      : ""}
+                                    {` · MCP ${mcpConnections[server.id].protocolVersion} · 도구 ${mcpConnections[server.id].tools.length}개`}
+                                  </b>
+                                  <ul>
+                                    {mcpConnections[server.id].tools.map((tool) => (
+                                      <li key={tool.name}>
+                                        <code>{tool.name}</code>
+                                        <span className={tool.readOnly ? "tool-read" : "tool-write"}>
+                                          {tool.readOnly ? "읽기" : "쓰기 · 승인 필요"}
+                                        </span>
+                                        <small>{tool.description}</small>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </>
+                              ) : (
+                                <>
+                                  <b>{mcpConnections[server.id].error || "연결하지 못했습니다."}</b>
+                                  {mcpConnections[server.id].stderrTail && (
+                                    <details>
+                                      <summary>서버 오류 로그 보기</summary>
+                                      <pre>{mcpConnections[server.id].stderrTail}</pre>
+                                    </details>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -2919,6 +3337,83 @@ function App() {
             </div>
             <footer>
               <button onClick={() => setShortcutsOpen(false)}>확인</button>
+            </footer>
+          </section>
+        </div>
+      )}
+      {approval && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget && !approval.busy) setApproval(null);
+          }}
+        >
+          <section className="external-approval">
+            <header>
+              <span>
+                <h2>{approval.title || "외부 도구 실행"}</h2>
+                <p>승인하기 전에는 아무것도 전송되지 않습니다. 보낼 인자를 여기서 직접 고칠 수 있습니다.</p>
+              </span>
+              <button onClick={() => setApproval(null)} disabled={approval.busy} aria-label="닫기">
+                <X />
+              </button>
+            </header>
+            <div className="external-approval-body">
+              <div className="external-target">
+                <span>
+                  <b>{approval.server.name}</b>
+                  <small>
+                    {approval.server.command} {approval.server.args}
+                  </small>
+                </span>
+                <span>
+                  <b>{approval.tool || "(도구 미지정)"}</b>
+                  <small>실행할 MCP 도구</small>
+                </span>
+              </div>
+              <label>
+                도구 이름
+                <input
+                  list={`external-tools-${approval.server.id}`}
+                  value={approval.tool}
+                  onChange={(e) => setApproval((current) => ({ ...current, tool: e.target.value }))}
+                />
+              </label>
+              <datalist id={`external-tools-${approval.server.id}`}>
+                {(mcpConnections[approval.server.id]?.tools || []).map((tool) => (
+                  <option key={tool.name} value={tool.name}>
+                    {(tool.description || "").slice(0, 60)}
+                  </option>
+                ))}
+              </datalist>
+              <label>
+                인자 (JSON)
+                <textarea
+                  spellCheck={false}
+                  value={approval.argsText}
+                  onChange={(e) => setApproval((current) => ({ ...current, argsText: e.target.value }))}
+                />
+              </label>
+              {approval.error && (
+                <div className="external-approval-error">
+                  {approval.error}
+                  {approval.stderrTail && (
+                    <details>
+                      <summary>서버 오류 로그 보기</summary>
+                      <pre className="external-approval-stderr">{approval.stderrTail}</pre>
+                    </details>
+                  )}
+                </div>
+              )}
+            </div>
+            <footer>
+              <small>실행 결과와 결과에 들어 있는 외부 URL 은 현재 노트에 기록됩니다.</small>
+              <button onClick={() => setApproval(null)} disabled={approval.busy}>
+                취소
+              </button>
+              <button className="primary" onClick={runApprovedCall} disabled={approval.busy}>
+                {approval.busy ? "실행 중…" : "승인하고 실행"}
+              </button>
             </footer>
           </section>
         </div>
