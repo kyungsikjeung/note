@@ -5,11 +5,15 @@ const { spawn } = require("child_process");
 const TurndownService = require("turndown");
 const { gfm } = require("turndown-plugin-gfm");
 const nodeFs = require("fs");
-const { openStore } = require("../lib/ksnote-store.cjs");
+const os = require("os");
+const { openStore, applyPendingWrite } = require("../lib/ksnote-store.cjs");
 const { Document, Packer, Paragraph, HeadingLevel, Table: DocxTable, TableRow: DocxRow, TableCell: DocxCell } = require("docx");
 
 const isDev = !app.isPackaged;
+const MCP_SERVER_PATH = path.join(__dirname, "..", "mcp", "ksnote-server.mjs");
 let store;
+let dbFilePath = "";
+let lastPendingCount = -1;
 
 const plainText = (value) => String(value || "")
   .replace(/<br\s*\/?>/gi, "\n")
@@ -39,9 +43,26 @@ function htmlToDocxChildren(html, title) {
 }
 
 async function initializeStorage() {
-  const dbPath = path.join(app.getPath("userData"), "ksnote.db");
-  store = await openStore(dbPath);
-  watchExternalChanges(dbPath);
+  dbFilePath = path.join(app.getPath("userData"), "ksnote.db");
+  store = await openStore(dbFilePath);
+  watchExternalChanges(dbFilePath);
+}
+
+const mcpLogPath = () => path.join(app.getPath("userData"), "logs", "mcp-server.log");
+
+const broadcast = (channel, payload) => {
+  for (const win of BrowserWindow.getAllWindows()) win.webContents.send(channel, payload);
+};
+
+/** Push the approval queue to the UI whenever the MCP server enqueues or we resolve one. */
+function notifyPendingChanged(force) {
+  if (!store) return [];
+  const pending = store.listPendingWrites("pending");
+  if (force || pending.length !== lastPendingCount) {
+    lastPendingCount = pending.length;
+    broadcast("mcp-pending-changed", pending);
+  }
+  return pending;
 }
 
 /** Writes made by another process (MCP server, second window) land in every open editor. */
@@ -50,9 +71,10 @@ function watchExternalChanges(dbPath) {
     if (!store || !store.hasExternalChange()) return;
     try {
       if (!(await store.reload())) return;
+      notifyPendingChanged(false);
       const state = store.loadState();
       if (!state) return;
-      for (const win of BrowserWindow.getAllWindows()) win.webContents.send("storage-external-change", state);
+      broadcast("storage-external-change", state);
     } catch (error) {
       console.error("외부 변경을 반영하지 못했습니다.", error);
     }
@@ -100,6 +122,141 @@ ipcMain.handle("command-test", async (_, { commandLine, mode = "cli" }) => {
     child.on("error", (error) => { clearTimeout(timer); finish(false, error.message); });
     child.on("close", (code) => { clearTimeout(timer); finish(code === 0, output || `종료 코드 ${code}`); });
   });
+});
+
+/* ---------------------------------------------------------------- MCP 서버 연동 */
+
+ipcMain.handle("mcp-set-context", async (_, context) => {
+  if (!store) return false;
+  await store.saveContext(context || {});
+  return true;
+});
+
+ipcMain.handle("mcp-pending-list", async () => {
+  if (!store) return [];
+  if (store.hasExternalChange()) await store.reload();
+  const pending = store.listPendingWrites("pending");
+  lastPendingCount = pending.length;
+  return pending;
+});
+
+/** Approving applies the queued change (snapshotting a revision first); rejecting drops it. */
+ipcMain.handle("mcp-pending-resolve", async (_, request) => {
+  const { id, approve } = request || {};
+  if (!store || !id) throw new Error("처리할 변경을 찾지 못했습니다.");
+  try {
+    if (approve) await applyPendingWrite(store, id);
+    else await store.resolvePendingWrite(id, "rejected", null);
+  } catch (error) {
+    await store.resolvePendingWrite(id, "rejected", error.message).catch(() => {});
+    notifyPendingChanged(true);
+    return { ok: false, error: error.message, pending: store.listPendingWrites("pending") };
+  }
+  const pending = notifyPendingChanged(true);
+  return { ok: true, pending, state: store.loadState() };
+});
+
+ipcMain.handle("mcp-read-log", async (_, count) => {
+  const logPath = mcpLogPath();
+  const wanted = Math.min(Math.max(Number(count) || 100, 1), 500);
+  try {
+    const text = await fs.readFile(logPath, "utf8");
+    return { path: logPath, lines: text.split(/\r?\n/).filter(Boolean).slice(-wanted) };
+  } catch {
+    return { path: logPath, lines: [], error: "아직 MCP 서버 로그가 없습니다. Codex 에서 한 번 호출하면 생성됩니다." };
+  }
+});
+
+function runNodeScript(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, {
+      windowsHide: true,
+      env: Object.assign({}, process.env, { ELECTRON_RUN_AS_NODE: "1" }),
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("MCP 서버 응답 시간이 초과되었습니다."));
+    }, 15000);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout);
+      else reject(new Error(stderr.trim().split(/\r?\n/).pop() || ("종료 코드 " + code)));
+    });
+  });
+}
+
+ipcMain.handle("mcp-server-info", async () => {
+  const info = { serverPath: MCP_SERVER_PATH, dbPath: dbFilePath, logPath: mcpLogPath(), exists: nodeFs.existsSync(MCP_SERVER_PATH), ok: false, tools: [] };
+  if (!info.exists) return Object.assign(info, { error: "mcp/ksnote-server.mjs 를 찾을 수 없습니다." });
+  try {
+    const described = JSON.parse(await runNodeScript([MCP_SERVER_PATH, "--describe", "--db", dbFilePath]));
+    return Object.assign(info, {
+      ok: true,
+      name: described.name,
+      version: described.version,
+      protocolVersion: described.protocolVersion,
+      tools: described.tools || [],
+      logPath: described.logFile || info.logPath,
+    });
+  } catch (error) {
+    return Object.assign(info, { error: error.message });
+  }
+});
+
+/** [mcp_servers.ksnote] block for ~/.codex/config.toml (paths JSON-escaped, valid TOML). */
+function codexConfigBlock(serverPath, dbPath) {
+  const args = [serverPath, "--db", dbPath].map((value) => JSON.stringify(value)).join(", ");
+  return [
+    "[mcp_servers.ksnote]",
+    "# KsNote MCP server — generated by KsNote (설정 > MCP 연결)",
+    'command = "node"',
+    "args = [" + args + "]",
+    "",
+  ].join("\n");
+}
+
+/** Replace only our own section so the user's other MCP servers survive. */
+function mergeCodexConfig(existing, block) {
+  const lines = existing.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^\s*\[mcp_servers\.ksnote\]\s*$/.test(line));
+  if (start < 0) {
+    const head = existing.trim() ? existing.replace(/\s*$/, "") + "\n\n" : "";
+    return { text: head + block, merged: false };
+  }
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^\s*\[/.test(lines[index])) {
+      end = index;
+      break;
+    }
+  }
+  const next = lines.slice(0, start).concat(block.split("\n")).concat(lines.slice(end));
+  return { text: next.join("\n").replace(/\n{3,}/g, "\n\n"), merged: true };
+}
+
+ipcMain.handle("mcp-write-codex-config", async () => {
+  const configDir = path.join(os.homedir(), ".codex");
+  const configPath = path.join(configDir, "config.toml");
+  await fs.mkdir(configDir, { recursive: true });
+  let existing = "";
+  let hadFile = false;
+  try {
+    existing = await fs.readFile(configPath, "utf8");
+    hadFile = true;
+  } catch {}
+  const result = mergeCodexConfig(existing, codexConfigBlock(MCP_SERVER_PATH, dbFilePath));
+  let backupPath = "";
+  if (hadFile) {
+    backupPath = configPath + ".bak";
+    await fs.writeFile(backupPath, existing, "utf8");
+  }
+  await fs.writeFile(configPath, result.text.replace(/\s*$/, "") + "\n", "utf8");
+  return { path: configPath, merged: result.merged, backupPath, command: 'codex mcp add ksnote -- node "' + MCP_SERVER_PATH + '" --db "' + dbFilePath + '"' };
 });
 
 ipcMain.handle("plantuml-render", async (_, { code, jarPath }) => {

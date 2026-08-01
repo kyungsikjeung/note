@@ -1,0 +1,23 @@
+# KsNote MCP 서버 — 이 저장소 안에서 codex 를 실행할 때 쓰는 프로젝트 설정.
+#
+# 전역으로 쓰려면 아래 블록을 ~/.codex/config.toml 에 넣거나(KsNote 설정 > MCP 연결 >
+# "Codex 설정 파일 생성" 버튼이 같은 일을 합니다), 다음 명령을 씁니다.
+#
+#   codex mcp add ksnote -- node "<저장소 절대경로>/mcp/ksnote-server.mjs"
+#
+# 저장소 밖에서 실행할 때는 args 의 경로를 절대경로로 바꿔야 합니다.
+
+[mcp_servers.ksnote]
+command = "node"
+args = ["mcp/ksnote-server.mjs"]
+
+# 기본 DB 경로는 Electron userData 입니다.
+#   Windows : %APPDATA%/ksnote/ksnote.db
+#   macOS   : ~/Library/Application Support/ksnote/ksnote.db
+#   Linux   : ~/.config/ksnote/ksnote.db
+#
+# 다른 저장소를 열려면 --db 인자나 KSNOTE_DB 환경변수를 씁니다.
+# 경로 구분자는 슬래시(/)를 써도 Windows 에서 그대로 동작합니다.
+#
+# args = ["mcp/ksnote-server.mjs", "--db", "C:/Users/<user>/AppData/Roaming/ksnote/ksnote.db"]
+# env = { KSNOTE_DB = "C:/Users/<user>/AppData/Roaming/ksnote/ksnote.db" }

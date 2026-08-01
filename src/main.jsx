@@ -73,6 +73,7 @@ import "./page-actions.css";
 import "./page-management.css";
 import "./shortcuts.css";
 import "./themes.css";
+import "./mcp-approvals.css";
 
 mermaid.initialize({
   startOnLoad: false,
@@ -135,6 +136,19 @@ const loadData = () => {
   } catch {
     return starter;
   }
+};
+const MCP_TOOL_LABELS = {
+  note_create: "노트 생성",
+  note_patch: "노트 수정",
+  note_move: "노트 이동",
+  task_update: "할 일 변경",
+  history_restore: "이전 버전 복원",
+};
+const diffLineClass = (line) => {
+  if (line.startsWith("---") || line.startsWith("+++")) return "meta";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  return "ctx";
 };
 const uid = (prefix) =>
   `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -709,11 +723,21 @@ function App() {
   const dragItem = useRef(null);
   const [revisions, setRevisions] = useState([]);
   const [diagnostics, setDiagnostics] = useState({});
+  const [mcpPending, setMcpPending] = useState([]);
+  const [mcpPanelOpen, setMcpPanelOpen] = useState(false);
+  const [mcpBusy, setMcpBusy] = useState("");
+  const [mcpServerInfo, setMcpServerInfo] = useState(null);
+  const [mcpLog, setMcpLog] = useState(null);
+  const [mcpLogOpen, setMcpLogOpen] = useState(false);
+  const [mcpConfigResult, setMcpConfigResult] = useState(null);
+  const selectionRef = useRef("");
+  const noteRef = useRef(null);
   const activeNotes = data.notes.filter((n) => !n.trashed);
   const note =
     activeNotes.find((n) => n.id === noteId) ||
     activeNotes.find((n) => n.projectId === projectId) ||
     activeNotes[0];
+  noteRef.current = note;
   const notes = data.notes
     .filter(
       (n) =>
@@ -802,6 +826,45 @@ function App() {
   useEffect(() => {
     localStorage.setItem("mori-mcp", JSON.stringify(mcpServers));
   }, [mcpServers]);
+  useEffect(() => {
+    if (!window.ksnoteMcp) return;
+    window.ksnoteMcp.pendingList().then((pending) => setMcpPending(pending || [])).catch(() => {});
+    window.ksnoteMcp.onPendingChanged?.((pending) => setMcpPending(pending || []));
+  }, []);
+  useEffect(() => {
+    const capture = () => {
+      const selected = window.getSelection ? String(window.getSelection()) : "";
+      selectionRef.current = selected.slice(0, 2000);
+    };
+    document.addEventListener("selectionchange", capture);
+    return () => document.removeEventListener("selectionchange", capture);
+  }, []);
+  useEffect(() => {
+    if (!window.ksnoteMcp?.setContext) return;
+    let published = "";
+    const timer = setInterval(() => {
+      const current = noteRef.current;
+      if (!current) return;
+      const context = {
+        noteId: current.id,
+        noteTitle: current.title,
+        projectId: current.projectId,
+        selection: selectionRef.current,
+      };
+      const serialized = JSON.stringify(context);
+      if (serialized === published) return;
+      published = serialized;
+      window.ksnoteMcp.setContext(context).catch(() => {});
+    }, 2000);
+    return () => clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    if (!settingsOpen || settingsTab !== "mcp" || !window.ksnoteMcp?.serverInfo) return;
+    window.ksnoteMcp
+      .serverInfo()
+      .then(setMcpServerInfo)
+      .catch((error) => setMcpServerInfo({ ok: false, error: error.message }));
+  }, [settingsOpen, settingsTab]);
   useEffect(() => {
     if (!accountMenuOpen) return;
     const close = (event) => {
@@ -988,6 +1051,52 @@ function App() {
   const showToast = (message, icon) => {
     setToast({ message, icon });
     setTimeout(() => setToast(null), 2600);
+  };
+  /** Approve (apply + snapshot revision) or reject one queued MCP write. */
+  const resolveMcpWrite = async (id, approve) => {
+    if (!window.ksnoteMcp) return;
+    setMcpBusy(id);
+    try {
+      const result = await window.ksnoteMcp.resolvePending(id, approve);
+      setMcpPending(result?.pending || []);
+      if (result && result.ok === false) {
+        showToast("적용하지 못했습니다: " + result.error);
+        return;
+      }
+      if (!approve) {
+        showToast("MCP 쓰기 요청을 거절했습니다");
+        return;
+      }
+      const stored = await window.ksnoteStorage?.load();
+      if (stored?.projects && stored?.notes) {
+        lastPersisted.current = JSON.stringify(stored);
+        dataRef.current = stored;
+        setData(stored);
+      }
+      showToast("MCP 변경을 적용했습니다");
+    } catch (error) {
+      showToast(error?.message || "요청을 처리하지 못했습니다");
+    } finally {
+      setMcpBusy("");
+    }
+  };
+  const generateCodexConfig = async () => {
+    try {
+      setMcpConfigResult(await window.ksnoteMcp.writeCodexConfig());
+      showToast("Codex 설정 파일을 갱신했습니다");
+    } catch (error) {
+      setMcpConfigResult({ error: error?.message || "설정 파일을 쓰지 못했습니다" });
+    }
+  };
+  const toggleMcpLog = async () => {
+    const next = !mcpLogOpen;
+    setMcpLogOpen(next);
+    if (!next) return;
+    try {
+      setMcpLog(await window.ksnoteMcp.readLog(100));
+    } catch (error) {
+      setMcpLog({ lines: [], error: error?.message || "로그를 읽지 못했습니다" });
+    }
   };
   const onPaste = (e) => {
     const files = e.clipboardData.files;
@@ -1525,6 +1634,15 @@ function App() {
             <strong>{note.title}</strong>
           </div>
           <div className="top-actions">
+            {mcpPending.length > 0 && (
+              <button
+                className="mcp-pending-badge"
+                onClick={() => setMcpPanelOpen(true)}
+                title="Codex(MCP)가 요청한 쓰기 작업입니다. 승인해야 노트에 반영됩니다."
+              >
+                <Plug size={14} /> MCP 쓰기 요청 {mcpPending.length}건
+              </button>
+            )}
             <span className={`save-state ${saved ? "saved" : ""}`}>
               <span />
               {saved ? "저장됨" : "저장 중"}
@@ -2428,6 +2546,62 @@ function App() {
                 )}
                 {settingsTab === "mcp" && (
                   <>
+                    <div className="setting-title">
+                      <h3>KsNote MCP 서버</h3>
+                      <p>Codex가 이 노트 앱의 프로젝트·노트를 직접 읽고, 쓰기는 승인 후에만 반영합니다.</p>
+                    </div>
+                    <div className="ksnote-mcp-server">
+                      <div className="mcp-server-status">
+                        <span className={`status-pill ${mcpServerInfo?.ok ? "ok" : "fail"}`}>
+                          {mcpServerInfo ? (mcpServerInfo.ok ? "정상" : "확인 필요") : "확인 중"}
+                        </span>
+                        <span className="mcp-server-meta">
+                          <b>{mcpServerInfo?.serverPath || "mcp/ksnote-server.mjs"}</b>
+                          <small>
+                            {mcpServerInfo?.ok
+                              ? `${mcpServerInfo.name} v${mcpServerInfo.version} · MCP ${mcpServerInfo.protocolVersion} · 도구 ${mcpServerInfo.tools.length}개`
+                              : mcpServerInfo?.error || "서버 정보를 불러오는 중입니다."}
+                          </small>
+                          <small>저장소: {mcpServerInfo?.dbPath || "-"}</small>
+                        </span>
+                      </div>
+                      {!!mcpServerInfo?.tools?.length && (
+                        <ul className="mcp-tool-list">
+                          {mcpServerInfo.tools.map((tool) => (
+                            <li key={tool.name}>
+                              <code>{tool.name}</code>
+                              <span className={tool.readOnly ? "tool-read" : "tool-write"}>
+                                {tool.readOnly ? "읽기" : "쓰기 · 승인 필요"}
+                              </span>
+                              <small>{tool.description}</small>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      <div className="mcp-server-actions">
+                        <button onClick={generateCodexConfig}>Codex 설정 파일 생성</button>
+                        <button className="ghost" onClick={toggleMcpLog}>
+                          오류 로그 {mcpLogOpen ? "숨기기" : "보기"}
+                        </button>
+                      </div>
+                      {mcpConfigResult && (
+                        <small className={`mcp-config-result ${mcpConfigResult.error ? "fail" : "ok"}`}>
+                          {mcpConfigResult.error
+                            ? mcpConfigResult.error
+                            : `${mcpConfigResult.path} ${mcpConfigResult.merged ? "의 ksnote 항목을 갱신했습니다." : "에 ksnote 항목을 추가했습니다."}${mcpConfigResult.backupPath ? " (백업: " + mcpConfigResult.backupPath + ")" : ""}`}
+                        </small>
+                      )}
+                      {mcpLogOpen && (
+                        <pre className="mcp-log">
+                          {mcpLog?.error && <span className="diff-line meta">{mcpLog.error}</span>}
+                          {(mcpLog?.lines || []).map((line, index) => (
+                            <span className="diff-line ctx" key={index}>
+                              {line}
+                            </span>
+                          ))}
+                        </pre>
+                      )}
+                    </div>
                     <div className="setting-title with-action">
                       <span>
                         <h3>MCP 연결</h3>
@@ -2697,6 +2871,68 @@ function App() {
             <footer>
               <button onClick={() => setShortcutsOpen(false)}>확인</button>
             </footer>
+          </section>
+        </div>
+      )}
+      {mcpPanelOpen && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setMcpPanelOpen(false);
+          }}
+        >
+          <section className="mcp-approval-modal">
+            <header>
+              <span>
+                <Plug />
+                <span>
+                  <h2>MCP 쓰기 요청</h2>
+                  <p>Codex가 요청한 변경입니다. 승인하면 현재 내용을 이력에 보관한 뒤 적용합니다.</p>
+                </span>
+              </span>
+              <button onClick={() => setMcpPanelOpen(false)}>
+                <X />
+              </button>
+            </header>
+            <div className="mcp-approval-list">
+              {mcpPending.length === 0 && <p className="mcp-empty">대기 중인 요청이 없습니다.</p>}
+              {mcpPending.map((item) => {
+                const target = data.notes.find((n) => n.id === item.payload?.noteId);
+                return (
+                  <article className="mcp-approval-card" key={item.id}>
+                    <header>
+                      <span className={`mcp-tool ${item.tool}`}>{MCP_TOOL_LABELS[item.tool] || item.tool}</span>
+                      <strong>{item.payload?.summary || target?.title || item.payload?.title || item.tool}</strong>
+                      <time>{new Date(item.createdAt).toLocaleString()}</time>
+                    </header>
+                    {target && <small className="mcp-target">대상 노트: {target.title}</small>}
+                    <pre className="mcp-diff">
+                      {String(item.diff || "(변경 내용 없음)").split("\n").map((line, index) => (
+                        <span className={`diff-line ${diffLineClass(line)}`} key={index}>
+                          {line || " "}
+                        </span>
+                      ))}
+                    </pre>
+                    <footer>
+                      <button
+                        className="mcp-reject"
+                        disabled={mcpBusy === item.id}
+                        onClick={() => resolveMcpWrite(item.id, false)}
+                      >
+                        거절
+                      </button>
+                      <button
+                        className="mcp-approve"
+                        disabled={mcpBusy === item.id}
+                        onClick={() => resolveMcpWrite(item.id, true)}
+                      >
+                        승인하고 적용
+                      </button>
+                    </footer>
+                  </article>
+                );
+              })}
+            </div>
           </section>
         </div>
       )}
