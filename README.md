@@ -205,6 +205,14 @@ npm run desktop
 - [x] draw.io diagrams.net embed 편집기 블록
 - [x] draw.io XML 소스 보존과 파일 저장
 - [x] MCP `diagram_insert(format: "drawio")`를 draw.io 편집 블록으로 삽입
+- [x] draw.io 블록에 `Editor / XML / Preview` 3단 보기 전환
+- [x] draw.io `Preview`에서 편집 도구를 숨기고 저장된 XML의 읽기 전용 SVG 렌더 결과 표시
+- [x] `Editor ↔ XML ↔ Preview` 전환 시 iframe을 유지해 XML·현재 페이지·선택 상태 보존
+- [x] 새 Preview 실패 시 마지막 정상 SVG를 유지하고 오류·재시도 표시
+- [x] draw.io Preview 더블클릭·확대 버튼으로 전체화면 뷰어 열기
+- [x] 전체화면에서 25~400% 확대·축소, 100%, 화면 맞춤 제공
+- [x] 마우스 휠 확대·축소와 확대 상태의 드래그 이동, `Esc` 종료
+- [x] 마지막 배율은 앱 세션에서만 공유하고 XML·노트 revision은 변경하지 않음
 - [x] 다이어그램을 PNG/SVG로 내보내기
 
 ## 8. 체크리스트
@@ -519,6 +527,8 @@ Codex App Server가 Atlassian Rovo MCP의 연결 상태, OAuth, 도구 스키마
 
 상세 조사 문서: [KsNote × Codex MCP 연동 조사 및 100개 시나리오](docs/codex-mcp-integration-research.md)
 
+현재 구현 추적: [MVP 3.1 — Codex 타깃 다이어그램 삽입 추적](docs/mvp3-targeted-diagram-tracking.md)
+
 ## Codex에서 기대하는 핵심 사용 흐름
 
 사용자는 KsNote에서 페이지 또는 현재 커서/선택 영역 타깃을 복사한 뒤 Codex에
@@ -541,7 +551,7 @@ Codex App Server가 Atlassian Rovo MCP의 연결 상태, OAuth, 도구 스키마
 사용자가 복사하는 타깃 문자열은 다음 형태를 기본으로 한다.
 
 ```text
-KsNote target: ksnote://page/<pageId>?from=<from>&to=<to>
+KsNote target: ksnote://page/<pageId>?block=<blockId>&offset=<offset>&from=<from>&to=<to>&revision=<revision>&operation=<operation>
 Project: <project name/id>
 Page: <page title>
 Operation: append | replace-selection
@@ -614,16 +624,25 @@ Codex가 노트 내용을 안전하게 읽고 삽입하려면 최소한 다음 t
   - Codex가 사용자의 "프로젝트 > 페이지" 표현을 실제 ID로 해석할 수 있게 한다.
 - `note_get`
   - 페이지 HTML/JSON, 제목, revision, block 목록과 선택 영역 주변 문맥을 읽는다.
+- `note_create`
+  - 명시한 프로젝트에 새 페이지를 만들고 생성된 pageId를 operation 결과로 반환한다.
 - `note_search`
   - 프로젝트 전체 구조나 관련 페이지를 검색한다.
 - `diagram_insert`
   - Mermaid, PlantUML, draw.io를 전용 블록으로 삽입한다.
   - 입력값은 `targetRef`, `format`, `code`, `title`, `operation`, `expectedRevision`을 포함한다.
+  - `operation`은 `insert`, `append`, `replace-selection`, 정확한 block ID 기반 `replace-block`을 지원한다.
+  - Mermaid/PlantUML은 실제 SVG 렌더, draw.io는 embed load 후 SVG export가 성공해야 `completed`가 된다.
+- `diagram_delete`
+  - 안정 block ID를 포함한 명시적 `targetRef`와 최신 `expectedRevision`으로 다이어그램 한 개만 삭제한다.
+  - 커서 fallback을 사용하지 않으며 대상이 다이어그램이 아니면 실패한다.
+- `diagram_capabilities`
+  - 현재 앱에서 Mermaid, PlantUML, draw.io 렌더러를 사용할 수 있는지와 권장 용도를 반환한다.
 - `text_insert`
   - 일반 텍스트를 현재 커서, 선택 영역 또는 페이지 끝에 삽입한다.
   - 인코딩 손상으로 보이는 `??`/`�` 텍스트는 저장 전에 거부한다.
 - `operation_get`
-  - `diagram_insert`와 `text_insert`로 큐에 들어간 작업의 `pending`, `applying`, `completed`, `error`, `expired` 상태를 조회한다.
+  - `diagram_insert`, `diagram_delete`, `text_insert`로 큐에 들어간 작업의 `pending`, `applying`, `completed`, `error`, `expired` 상태를 조회한다.
 - `note_patch`
   - 다이어그램 외 일반 HTML/Markdown 조각을 삽입하거나 교체한다.
 
@@ -643,7 +662,7 @@ Codex가 노트 내용을 안전하게 읽고 삽입하려면 최소한 다음 t
 지원 포맷 우선순위:
 
 1. Mermaid: 기본 포맷. 코드 구조, 플로우, 시퀀스, ERD에 우선 사용한다.
-2. PlantUML: UML sequence/class/component에 사용한다. 로컬 Java/JAR 설정이 필요하다.
+2. PlantUML: UML sequence/class/component에 사용한다. JAR는 앱에 번들되며 로컬 Java 런타임이 필요하다.
 3. draw.io: 사용자가 diagrams.net/draw.io 편집 가능한 다이어그램을 명시적으로 요구할 때 사용한다.
 
 쓰기 tool은 `expectedRevision`이 전달되면 충돌 시 `revision_conflict`를 반환한다.
@@ -651,6 +670,8 @@ Codex는 충돌 방지가 필요한 작업에서 `note_get`으로 최신 revisio
 충돌이 나면 최신 내용을 다시 읽고 사용자에게 재시도 여부를 물어야 한다.
 작업 큐는 atomic write로 기록하며, KsNote 앱 heartbeat가 없거나 TTL을 넘긴 작업은
 `operation_get`에서 `expired`로 확인된다.
+Electron renderer는 창이 가려지거나 최소화된 상태에서도 heartbeat와 MCP operation
+polling을 유지하므로, 백그라운드 절전 때문에 열린 앱을 닫힌 앱으로 오판하지 않는다.
 
 ## 1. 저장소 기반
 
@@ -671,6 +692,7 @@ Codex는 충돌 방지가 필요한 작업에서 `note_get`으로 최신 revisio
 - [x] `project_list`
 - [ ] `note_search`
 - [x] `note_get`
+- [x] `diagram_capabilities`
 - [x] 앱 heartbeat 조회
 - [ ] `task_query`
 - [ ] `asset_get`
@@ -681,10 +703,11 @@ Codex는 충돌 방지가 필요한 작업에서 `note_get`으로 최신 revisio
 
 ## 3. 쓰기 MCP Tools
 
-- [ ] `note_create`
+- [x] `note_create`
 - [ ] `note_patch`
 - [x] `text_insert`
 - [x] `diagram_insert`
+- [x] `diagram_delete`
 - [x] `operation_get`
 - [ ] `note_move`
 - [ ] `task_update`
@@ -693,7 +716,10 @@ Codex는 충돌 방지가 필요한 작업에서 `note_get`으로 최신 revisio
 - [x] 작업 queue atomic write
 - [x] pending/applying/completed/error/expired 상태
 - [x] operation TTL
-- [x] append/replace-selection/insert operation 처리
+- [x] append/replace-selection/replace-block/insert operation 처리
+- [x] Mermaid/PlantUML 실제 SVG 렌더 검증
+- [x] draw.io embed load + SVG export 렌더 검증
+- [x] 렌더 provenance와 `data-render-status="verified"` 저장
 - [x] 텍스트 인코딩 손상 의심 입력 차단
 - [ ] 최소 block patch
 - [ ] 쓰기 전 diff
@@ -715,6 +741,8 @@ Codex는 충돌 방지가 필요한 작업에서 `note_get`으로 최신 revisio
 - [ ] MCP 도구 목록/오류 로그 표시
 - [x] 현재 페이지 ID 복사 UI
 - [x] 현재 커서/선택 타깃 복사 UI
+- [x] block ID, offset, revision을 포함한 안정적인 타깃 복사
+- [x] 다른 페이지 MCP 작업의 대상 페이지 자동 라우팅
 - [x] 설정 화면에 Codex용 KsNote MCP 연결 가이드 표시
 
 ## MVP 3 완료 기준
@@ -722,9 +750,12 @@ Codex는 충돌 방지가 필요한 작업에서 `note_get`으로 최신 revisio
 - [x] Codex에서 현재 노트와 선택 영역을 읽을 수 있다.
 - [x] Codex가 `text_insert`로 현재 페이지에 일반 텍스트를 삽입할 수 있다.
 - [x] Codex가 `diagram_insert`로 현재 클릭 지점에 Mermaid/PlantUML/draw.io 블록을 삽입할 수 있다.
+- [x] Codex가 안정 block ID로 기존 다이어그램을 교체하거나 정확히 삭제할 수 있다.
+- [x] Codex가 `diagram_capabilities`로 적합한 다이어그램 형식을 선택할 수 있다.
 - [ ] 프로젝트 전체 노트를 검색할 수 있다.
-- [ ] 쓰기 작업은 사용자 승인을 요구한다.
+- [x] 쓰기 작업은 변경 미리보기 후 사용자 승인을 요구한다.
 - [x] UI와 Codex가 동시에 편집할 때 expected revision이 있으면 자동 덮어쓰지 않는다.
+- [x] 완료 operation은 SQLite 저장 확인 뒤 성공을 반환하며 토스트에서 즉시 Undo할 수 있다.
 - [ ] 모든 MCP 변경을 history에서 복구할 수 있다.
 
 ---
@@ -792,10 +823,12 @@ UX 원칙:
 ## 개발 시 주의할 현재 제한
 
 - 현재 노트 데이터는 SQLite에 저장되며, 외부 MCP 프로세스는 `KSNOTE_DB_PATH`로 DB를 읽는다.
+- SQLite export와 MCP operation JSON은 임시 파일에 완전히 쓴 뒤 원자 교체하며, Windows 파일 공유 충돌은 제한 재시도한다.
+- 패키지 renderer asset은 Electron `file://` 로딩을 위해 `./assets/...` 상대 경로를 사용한다.
 - 분할 프리뷰는 별도 Mermaid 렌더링 단계가 필요하다.
 - 설정 화면의 MCP 항목은 Codex 등록과 설정 복사를 지원하지만, 이미 열린 Codex 세션에는 새 MCP가 즉시 반영되지 않을 수 있다.
 - MCP 쓰기 작업은 operation queue를 통해 열려 있는 KsNote 앱이 적용하므로 앱 heartbeat가 필요하다.
-- PlantUML은 Java/JAR 또는 렌더링 서버가 필요하다.
+- PlantUML JAR는 패키지 리소스로 번들되며 실행 환경에는 Java 런타임이 필요하다.
 - draw.io 편집 블록은 diagrams.net embed를 사용하므로 인터넷 연결이 필요하다.
 - 현재 내보내기는 HTML 문서 내용을 `.md`로 저장할 수 있으므로 정식 변환기가 필요하다.
 - 대용량 Mermaid 번들에 대한 code splitting이 필요하다.
@@ -804,5 +837,8 @@ UX 원칙:
 
 ```powershell
 npm run build
+npm run test:mvp
+node scripts/verify-diagram-e2e.mjs --page-id <pageId>
+node scripts/verify-diagram-e2e.mjs --page-id <pageId> --package-dir <win-unpacked>
 git diff --check
 ```

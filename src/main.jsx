@@ -3,6 +3,11 @@ import { createRoot } from "react-dom/client";
 import { marked } from "marked";
 import mermaid from "mermaid";
 import hljs from "highlight.js";
+import { buildKsNoteTargetRef } from "../mcp/target-ref.mjs";
+import {
+  isApprovedMcpOperation,
+  requiresMcpUserApproval,
+} from "../mcp/write-approval.mjs";
 import {
   Search,
   Plus,
@@ -70,7 +75,7 @@ import "./settings.css";
 import "./settings-agent.css";
 import "./developer-logs.css";
 import "./table.css";
-import RichDocumentEditor from "./RichDocumentEditor";
+import RichDocumentEditor, { RichPreview } from "./RichDocumentEditor";
 import "./editor-migration.css";
 import "./project-manager.css";
 import "./workspace-menu.css";
@@ -217,6 +222,16 @@ const loadData = () => {
 const uid = (prefix) =>
   `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const escapeAttribute = (value) => String(value || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "&#10;");
+const mcpOperationPreviewHtml = (operation) => {
+  if (operation?.type !== "diagram_insert" || !operation.code) return "";
+  const type =
+    operation.format === "plantuml"
+      ? "plantuml"
+      : operation.format === "drawio"
+        ? "drawio"
+        : "mermaid";
+  return `<div data-type="${type}" data-code="${escapeAttribute(operation.code)}"></div>`;
+};
 const markdownToRich = (markdown) => {
   const diagrams = [];
   const prepared = String(markdown || "").replace(/```(mermaid|plantuml)\s*\n([\s\S]*?)```/gi, (_, type, code) => {
@@ -698,6 +713,8 @@ function App() {
   const [search, setSearch] = useState("");
   const [saved, setSaved] = useState(true);
   const [toast, setToast] = useState(null);
+  const [mcpApproval, setMcpApproval] = useState(null);
+  const [mcpApprovalBusy, setMcpApprovalBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [editorTarget, setEditorTarget] = useState(null);
   const [slash, setSlash] = useState(null);
@@ -718,26 +735,27 @@ function App() {
   const [noteMenu, setNoteMenu] = useState(null);
   const [entityMenuPosition, setEntityMenuPosition] = useState(null);
   const [prefs, setPrefs] = useState(() => {
+    const defaults = {
+      theme: "light",
+      fontSize: 14,
+      fontFamily: "sans",
+      spellcheck: false,
+      plantumlJar: "",
+      customSlashCommands: [],
+    };
     try {
-      return (
-        JSON.parse(localStorage.getItem("mori-prefs")) || {
-          theme: "light",
-          fontSize: 14,
-          fontFamily: "mono",
-          spellcheck: false,
-          plantumlJar: "",
-          customSlashCommands: [],
-        }
-      );
+      const saved = JSON.parse(localStorage.getItem("mori-prefs"));
+      if (!saved) return defaults;
+      if (
+        saved.fontFamily === "mono" &&
+        !localStorage.getItem("ksnote-font-default-v2")
+      ) {
+        localStorage.setItem("ksnote-font-default-v2", "sans");
+        return { ...defaults, ...saved, fontFamily: "sans" };
+      }
+      return { ...defaults, ...saved };
     } catch {
-      return {
-        theme: "light",
-        fontSize: 14,
-        fontFamily: "mono",
-        spellcheck: false,
-        plantumlJar: "",
-        customSlashCommands: [],
-      };
+      return defaults;
     }
   });
   const [agents, setAgents] = useState(() => {
@@ -794,6 +812,9 @@ function App() {
   const undoStack = useRef([]);
   const redoStack = useRef([]);
   const storageReady = useRef(false);
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  const mcpRoutedOperationIds = useRef(new Set());
   const dragItem = useRef(null);
   const [dragOverProjectId, setDragOverProjectId] = useState(null);
   const [revisions, setRevisions] = useState([]);
@@ -881,6 +902,109 @@ function App() {
     }, 350);
     return () => clearTimeout(t);
   }, [data]);
+  useEffect(() => {
+    if (!window.ksnoteMcp?.pending || !note?.id) return undefined;
+    let stopped = false;
+    const routePendingOperation = async () => {
+      const operations = await window.ksnoteMcp.pending({}).catch(() => []);
+      if (stopped) return;
+      const approvalOperation = operations.find(requiresMcpUserApproval);
+      if (approvalOperation) {
+        if (mcpApproval?.id !== approvalOperation.id)
+          setMcpApproval(approvalOperation);
+        return;
+      }
+      if (mcpApproval) setMcpApproval(null);
+      const createOperation = operations.find(
+        (item) =>
+          item?.id &&
+          item.type === "note_create" &&
+          isApprovedMcpOperation(item) &&
+          !mcpRoutedOperationIds.current.has(item.id),
+      );
+      if (createOperation) {
+        mcpRoutedOperationIds.current.add(createOperation.id);
+        const claimed = await window.ksnoteMcp.claim({ id: createOperation.id });
+        if (claimed?.status !== "applying") return;
+        const project = data.projects.find(
+          (item) => item.id === claimed.projectId,
+        );
+        if (!project) {
+          await window.ksnoteMcp.complete({
+            id: claimed.id,
+            status: "error",
+            code: "project_not_found",
+            message: "대상 프로젝트를 찾을 수 없습니다.",
+          });
+          return;
+        }
+        const createdAt = Date.now();
+        const createdNote = {
+          id: uid("n"),
+          projectId: project.id,
+          parentId: null,
+          title: claimed.title || "제목 없는 노트",
+          content:
+            claimed.content ||
+            `<h1>${escapeAttribute(claimed.title || "제목 없는 노트")}</h1><p></p>`,
+          updatedAt: createdAt,
+        };
+        const nextData = { ...data, notes: [createdNote, ...data.notes] };
+        await window.ksnoteStorage?.save?.(nextData);
+        setData(nextData);
+        setProjectId(project.id);
+        setNoteId(createdNote.id);
+        if (mode === "preview") setMode("edit");
+        await window.ksnoteMcp.complete({
+          id: claimed.id,
+          status: "completed",
+          noteId: createdNote.id,
+          projectId: project.id,
+          revision: contentRevision(createdNote.content),
+        });
+        showToast(`'${createdNote.title}' 페이지를 MCP로 생성했습니다.`, "diagram");
+        return;
+      }
+      const operation = operations.find(
+        (item) =>
+          item?.id &&
+          isApprovedMcpOperation(item) &&
+          item.noteId &&
+          item.noteId !== note.id &&
+          !mcpRoutedOperationIds.current.has(item.id),
+      );
+      if (!operation) return;
+      const targetNote = data.notes.find(
+        (item) => item.id === operation.noteId && !item.trashed,
+      );
+      if (!targetNote) {
+        const claimed = await window.ksnoteMcp.claim({
+          id: operation.id,
+          noteId: operation.noteId,
+        });
+        if (claimed?.status === "applying") {
+          await window.ksnoteMcp.complete({
+            id: operation.id,
+            status: "error",
+            code: "note_not_found",
+            message: "대상 페이지가 삭제되었거나 휴지통에 있습니다.",
+          });
+        }
+        return;
+      }
+      mcpRoutedOperationIds.current.add(operation.id);
+      setProjectId(targetNote.projectId);
+      setNoteId(targetNote.id);
+      if (mode === "preview") setMode("edit");
+      showToast(`Codex 다이어그램을 '${targetNote.title}' 페이지에 적용합니다.`, "diagram");
+    };
+    routePendingOperation();
+    const timer = window.setInterval(routePendingOperation, 1000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [data.notes, note?.id, mode, mcpApproval?.id]);
   useEffect(() => {
     if (settingsOpen && settingsTab === "data" && note?.id) window.ksnoteStorage?.revisions(note.id).then(setRevisions).catch(() => setRevisions([]));
   }, [settingsOpen, settingsTab, note?.id, data]);
@@ -1111,6 +1235,28 @@ function App() {
         return { ...n, ...patch, updatedAt: Date.now() };
       }),
     }));
+  const persistNoteContent = async (targetNoteId, content) => {
+    const current = dataRef.current;
+    const target = current.notes.find((item) => item.id === targetNoteId);
+    if (!target) throw new Error("저장할 페이지를 찾을 수 없습니다.");
+    const next = {
+      ...current,
+      notes: current.notes.map((item) =>
+        item.id === targetNoteId
+          ? { ...item, content, updatedAt: Date.now() }
+          : item,
+      ),
+    };
+    dataRef.current = next;
+    setData(next);
+    setSaved(false);
+    localStorage.setItem("mori-data", JSON.stringify(next));
+    if (!storageReady.current || !window.ksnoteStorage?.save)
+      throw new Error("SQLite 저장소가 아직 준비되지 않았습니다.");
+    await window.ksnoteStorage.save(next);
+    setSaved(true);
+    return contentRevision(content);
+  };
   const addNote = (targetProjectId = projectId, parentId = null) => {
     if (!targetProjectId) return;
     const n = {
@@ -1291,15 +1437,62 @@ function App() {
     undoStack.current.push(note.content);
     updateNote({ content: next }, false);
   };
-  const showToast = (message, icon) => {
-    setToast({ message, icon });
+  const showToast = (message, icon, options = {}) => {
+    setToast({ message, icon, ...options });
     setTimeout(() => setToast(null), 2600);
   };
-  const pageRefFor = (targetNote = note) => `ksnote://page/${targetNote.id}`;
+  const approveMcpReview = async () => {
+    if (!mcpApproval || mcpApprovalBusy) return;
+    setMcpApprovalBusy(true);
+    try {
+      const approved = await window.ksnoteMcp?.approve?.({
+        id: mcpApproval.id,
+        noteId: mcpApproval.noteId,
+      });
+      if (approved?.status !== "approved")
+        throw new Error(
+          approved?.message || "MCP 작업을 승인 상태로 전환하지 못했습니다.",
+        );
+      setMcpApproval(null);
+      showToast("MCP 변경을 승인했습니다. 정확한 대상에 적용합니다.", "diagram");
+    } catch (error) {
+      showToast(error.message || "MCP 변경 승인에 실패했습니다.", "warning");
+    } finally {
+      setMcpApprovalBusy(false);
+    }
+  };
+  const rejectMcpReview = async () => {
+    if (!mcpApproval || mcpApprovalBusy) return;
+    setMcpApprovalBusy(true);
+    try {
+      await window.ksnoteMcp?.reject?.({
+        id: mcpApproval.id,
+        noteId: mcpApproval.noteId,
+      });
+      setMcpApproval(null);
+      showToast("MCP 변경을 적용하지 않았습니다.", "warning");
+    } catch (error) {
+      showToast(error.message || "MCP 변경 거절 처리에 실패했습니다.", "warning");
+    } finally {
+      setMcpApprovalBusy(false);
+    }
+  };
+  const pageRefFor = (targetNote = note) =>
+    buildKsNoteTargetRef({ pageId: targetNote.id });
   const selectionRefFor = (target = editorTarget, targetNote = note) => {
     const from = Number.isFinite(target?.from) ? target.from : 0;
     const to = Number.isFinite(target?.to) ? target.to : from;
-    return `${pageRefFor(targetNote)}?from=${from}&to=${to}`;
+    return buildKsNoteTargetRef({
+      pageId: targetNote.id,
+      blockId: target?.blockId,
+      offset: target?.offset,
+      toBlockId: target?.toBlockId,
+      toOffset: target?.toOffset,
+      from,
+      to,
+      revision: contentRevision(targetNote.content),
+      operation: from === to ? "insert" : "replace-selection",
+    });
   };
   const handleEditorTargetChange = (target) => {
     setEditorTarget(target);
@@ -1315,7 +1508,17 @@ function App() {
       pageTitle: note.title,
       projectId: note.projectId,
       projectName: data.projects.find((project) => project.id === note.projectId)?.name || note.projectId,
-      targetRef: `${pageRefFor(note)}?from=${from}&to=${to}`,
+      targetRef: buildKsNoteTargetRef({
+        pageId: note.id,
+        blockId: target.blockId,
+        offset: target.offset,
+        toBlockId: target.toBlockId,
+        toOffset: target.toOffset,
+        from,
+        to,
+        revision: contentRevision(note.content),
+        operation: from === to ? "insert" : "replace-selection",
+      }),
       operation: from === to ? "insert" : "replace-selection",
       revision: contentRevision(note.content),
     };
@@ -1329,7 +1532,11 @@ function App() {
     copyText(pageRefFor(targetNote), "페이지 ID를 복사했습니다");
   const copyCodexTarget = (targetNote = note, target = editorTarget) => {
     const ref = targetNote.id === note.id ? selectionRefFor(target, targetNote) : pageRefFor(targetNote);
-    const mode = targetNote.id === note.id && target?.from !== target?.to ? "replace-selection" : "append";
+    const mode = targetNote.id === note.id
+      ? target?.from !== target?.to
+        ? "replace-selection"
+        : "insert"
+      : "append";
     return copyText(
       [
         `KsNote target: ${ref}`,
@@ -2312,10 +2519,15 @@ function App() {
           onChange={(html) => updateNote({ content: html })}
           onCreateChildPage={() => addNote(note.projectId, note.id)}
           onTargetChange={handleEditorTargetChange}
+          onPersistContent={(html) => persistNoteContent(note.id, html)}
           onExternalOperation={(event) =>
             showToast(
               event.message,
               event.status === "completed" ? "diagram" : "warning",
+              {
+                undoable: Boolean(event.undoable),
+                onUndo: event.undo,
+              },
             )
           }
         />
@@ -2449,6 +2661,65 @@ function App() {
           </div>
         </footer>
       </main>
+      {mcpApproval && (
+        <div className="mcp-review-backdrop" role="presentation">
+          <section
+            className="mcp-review-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mcp-review-title"
+          >
+            <header>
+              <span>
+                <Workflow />
+                <b id="mcp-review-title">Codex 변경 검토</b>
+              </span>
+              <small>승인 전에는 노트와 SQLite에 반영되지 않습니다.</small>
+            </header>
+            <div className="mcp-review-meta">
+              <span><b>작업</b> {mcpApproval.type}</span>
+              <span><b>대상 페이지</b> {mcpApproval.noteId || "새 페이지"}</span>
+              <span><b>적용 방식</b> {mcpApproval.operation || "create"}</span>
+              {mcpApproval.target?.blockId && (
+                <span><b>Block ID</b> {mcpApproval.target.blockId}</span>
+              )}
+            </div>
+            {mcpApproval.type === "diagram_insert" && (
+              <div className="mcp-review-diagram">
+                <RichPreview html={mcpOperationPreviewHtml(mcpApproval)} />
+              </div>
+            )}
+            <details open>
+              <summary>적용할 원본 내용</summary>
+              <pre>{
+                mcpApproval.code ||
+                mcpApproval.text ||
+                mcpApproval.content ||
+                (mcpApproval.type === "diagram_delete"
+                  ? `다이어그램 블록 삭제: ${mcpApproval.target?.blockId || "대상 없음"}`
+                  : mcpApproval.title || "내용 없음")
+              }</pre>
+            </details>
+            <footer>
+              <button
+                type="button"
+                onClick={rejectMcpReview}
+                disabled={mcpApprovalBusy}
+              >
+                <X /> 거절
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={approveMcpReview}
+                disabled={mcpApprovalBusy}
+              >
+                <Check /> {mcpApprovalBusy ? "처리 중…" : "승인하고 적용"}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
       {toast && (
         <div className="toast">
           {toast.icon === "code" ? (
@@ -2462,9 +2733,21 @@ function App() {
           )}
           <span>
             <b>{toast.message}</b>
-            <small>실행 취소는 Ctrl+Z</small>
+            <small>{toast.undoable ? "실행 취소할 수 있습니다." : "KsNote 작업 알림"}</small>
           </span>
-          <button onClick={() => setToast(null)}>
+          {toast.undoable && (
+            <button
+              className="toast-undo"
+              onClick={() => {
+                if (typeof toast.onUndo === "function") toast.onUndo();
+                else doUndo();
+                setToast(null);
+              }}
+            >
+              <Undo2 /> 실행 취소
+            </button>
+          )}
+          <button className="toast-close" onClick={() => setToast(null)}>
             <X size={15} />
           </button>
         </div>
@@ -2766,8 +3049,8 @@ function App() {
                           setPrefs({ ...prefs, fontFamily: e.target.value })
                         }
                       >
-                        <option value="mono">DM Mono</option>
-                        <option value="sans">Noto Sans KR</option>
+                        <option value="sans">기본 한글 글꼴</option>
+                        <option value="mono">DM Mono (코드형)</option>
                         <option value="system">시스템 글꼴</option>
                       </select>
                     </div>

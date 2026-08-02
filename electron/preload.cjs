@@ -49,10 +49,15 @@ contextBridge.exposeInMainWorld('ksnoteMcp', {
   saveTarget: (target) => ipcRenderer.invoke('mcp-target-save', target),
   heartbeat: (payload) => ipcRenderer.invoke('mcp-heartbeat-save', payload),
   pending: (request) => ipcRenderer.invoke('mcp-operation-list', request),
+  approve: (request) => ipcRenderer.invoke('mcp-operation-approve', request),
+  reject: (request) => ipcRenderer.invoke('mcp-operation-reject', request),
   claim: (request) => ipcRenderer.invoke('mcp-operation-claim', request),
   complete: (result) => ipcRenderer.invoke('mcp-operation-complete', result),
   operation: (id) => ipcRenderer.invoke('mcp-operation-get', id),
 });
 contextBridge.exposeInMainWorld('ksnoteImage', { generate: (request) => ipcRenderer.invoke('image-generate', request) });
 contextBridge.exposeInMainWorld('ksnoteDiagnostics', { test: (request) => ipcRenderer.invoke('command-test', request) });
-contextBridge.exposeInMainWorld('ksnoteDiagram', { renderPlantUml: (request) => ipcRenderer.invoke('plantuml-render', request) });
+contextBridge.exposeInMainWorld('ksnoteDiagram', {
+  capabilities: (request) => ipcRenderer.invoke('plantuml-info', request),
+  renderPlantUml: (request) => ipcRenderer.invoke('plantuml-render', request),
+});

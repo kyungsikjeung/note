@@ -12,6 +12,10 @@
     "preview": "vite preview",
     "desktop": "electron .",
     "mcp:ksnote": "node mcp/ksnote-server.mjs",
+    "test:mvp-target": "node --test tests/target-ref.test.mjs",
+    "test:mvp-diagrams": "node --test tests/diagram-validation.test.mjs",
+    "test:mvp": "node --test tests/target-ref.test.mjs tests/diagram-validation.test.mjs tests/drawio-preview.test.mjs tests/write-approval.test.mjs tests/note-html.test.mjs tests/package-config.test.mjs tests/atomic-write.test.mjs",
+    "verify:mcp-diagrams": "node scripts/verify-diagram-e2e.mjs",
     "package:win": "npm run build && electron-builder --win --dir"
   },
   "build": {
@@ -24,8 +28,13 @@
       "dist/**/*",
       "electron/**/*",
       "mcp/**/*",
-      "package.json",
-      "node_modules/**/*"
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build-resources/plantuml/plantuml.jar",
+        "to": "plantuml/plantuml.jar"
+      }
     ],
     "win": {
       "target": [

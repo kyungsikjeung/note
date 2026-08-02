@@ -56,9 +56,15 @@
 .ai-thinking>span b { color: #445557; font-size: 10px; font-weight: 600; }
 .ai-thinking>span small { color: #849193; font-size: 8px; }
 .ai-quick-actions { position: sticky; z-index: 3; top: -12px; display: flex; gap: 6px; margin: -12px -12px 10px; padding: 8px 12px; border-bottom: 1px solid #dfe7e6; background: #f8fbfaee; backdrop-filter: blur(8px); }
+.ai-quick-actions>span { align-self: center; margin-right: auto; color: #637274; font-size: 9px; font-weight: 600; }
 .ai-quick-actions button { display: flex; height: 28px; align-items: center; gap: 5px; padding: 0 9px; border: 1px solid #d7e0df; border-radius: 6px; background: #fff; font-size: 9px; }
 .ai-quick-actions button.apply { border-color: #147d72; background: #147d72; color: #fff; }
 .ai-quick-actions svg { width: 12px; }
+.ai-diff .split-preview.ai-diff-preview { display: block; padding: 9px; border: 0; border-radius: 0; background: #fff; }
+.ai-diff-preview .preview-mermaid { min-height: 100px; margin: 6px 0; padding: 8px; border: 1px solid #e1e7e7; border-radius: 6px; display: grid; place-items: center; overflow: auto; }
+.ai-diff-preview .preview-mermaid svg { max-width: 100%; height: auto; }
+.ai-result-rendered.split-preview { display: block; padding: 0; border: 0; background: transparent; }
+.ai-review-readonly { margin: 8px 0 0; color: #849193; font-size: 8px; }
 @keyframes aiProgressPulse { 0%,100% { opacity:.65 } 50% { opacity:1 } }
 .ai-modes button.research.active { color: #075e9c; }
 @media (max-width: 640px) { .ai-diff { grid-template-columns: 1fr; } }

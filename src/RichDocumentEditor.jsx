@@ -6,7 +6,9 @@ import {
   ReactNodeViewRenderer,
 } from "@tiptap/react";
 import { DragHandle } from "@tiptap/extension-drag-handle-react";
-import { Node } from "@tiptap/core";
+import { createPortal } from "react-dom";
+import { Extension, Node } from "@tiptap/core";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
 import StarterKit from "@tiptap/starter-kit";
 import { Table } from "@tiptap/extension-table";
 import TableRow from "@tiptap/extension-table-row";
@@ -25,6 +27,14 @@ import { common, createLowlight } from "lowlight";
 import mermaid from "mermaid";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import { validateDiagramSource } from "../mcp/diagram-validation.mjs";
+import {
+  clampDrawioZoom,
+  isDrawioSvgDataUrl,
+  normalizeDrawioView,
+  stepDrawioZoom,
+} from "../mcp/drawio-preview.mjs";
+import { isApprovedMcpOperation } from "../mcp/write-approval.mjs";
 import {
   Bold,
   Italic,
@@ -84,6 +94,7 @@ import {
   Globe2,
   FilePlus2,
   Command,
+  Maximize2,
 } from "lucide-react";
 import "./rich-editor.css";
 import "./palette-fix.css";
@@ -104,6 +115,126 @@ import "./diagram-picker.css";
 import "./image-gen-block.css";
 
 const lowlight = createLowlight(common);
+
+const createBlockId = () =>
+  globalThis.crypto?.randomUUID?.() ||
+  `block-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+const BLOCK_ID_TYPES = [
+  "paragraph",
+  "heading",
+  "blockquote",
+  "codeBlock",
+  "bulletList",
+  "orderedList",
+  "taskList",
+  "horizontalRule",
+  "image",
+  "imageGenerationBlock",
+  "attachmentBlock",
+  "mermaidBlock",
+  "plantUmlBlock",
+  "drawIoBlock",
+  "table",
+  "tableOfContents",
+];
+
+const StableBlockId = Extension.create({
+  name: "stableBlockId",
+  addGlobalAttributes() {
+    return [
+      {
+        types: BLOCK_ID_TYPES,
+        attributes: {
+          blockId: {
+            default: null,
+            parseHTML: (element) => element.getAttribute("data-block-id"),
+            renderHTML: (attributes) =>
+              attributes.blockId
+                ? { "data-block-id": attributes.blockId }
+                : {},
+          },
+        },
+      },
+    ];
+  },
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey("stableBlockId"),
+        appendTransaction(_transactions, _oldState, newState) {
+          let transaction = newState.tr;
+          let changed = false;
+          newState.doc.descendants((node, pos) => {
+            if (!("blockId" in node.attrs) || node.attrs.blockId) return;
+            transaction = transaction.setNodeMarkup(pos, undefined, {
+              ...node.attrs,
+              blockId: createBlockId(),
+            });
+            changed = true;
+          });
+          return changed ? transaction : null;
+        },
+      }),
+    ];
+  },
+});
+
+const blockAnchorAt = (doc, resolvedPos, absolutePos) => {
+  const direct = doc.nodeAt(absolutePos);
+  if (direct?.attrs?.blockId) {
+    return { blockId: direct.attrs.blockId, offset: 0 };
+  }
+  for (let depth = resolvedPos.depth; depth > 0; depth -= 1) {
+    const node = resolvedPos.node(depth);
+    if (!node.attrs?.blockId) continue;
+    const contentStart = resolvedPos.before(depth) + 1;
+    return {
+      blockId: node.attrs.blockId,
+      offset: Math.max(0, absolutePos - contentStart),
+    };
+  }
+  return { blockId: undefined, offset: undefined };
+};
+
+const editorTargetSnapshot = (editor, noteId, projectId) => {
+  const { from, to, $from, $to } = editor.state.selection;
+  const start = blockAnchorAt(editor.state.doc, $from, from);
+  const end = blockAnchorAt(editor.state.doc, $to, to);
+  return {
+    noteId,
+    projectId,
+    from,
+    to,
+    blockId: start.blockId,
+    offset: start.offset,
+    toBlockId: end.blockId,
+    toOffset: end.offset,
+    empty: from === to,
+    text: editor.state.doc.textBetween(from, to, "\n").slice(0, 240),
+  };
+};
+
+const resolveBlockOffset = (doc, blockId, offset = 0) => {
+  if (!blockId) return undefined;
+  let resolved;
+  doc.descendants((node, pos) => {
+    if (resolved !== undefined || node.attrs?.blockId !== blockId) return;
+    const contentSize = Math.max(0, node.content.size);
+    resolved = pos + 1 + Math.min(Math.max(0, offset), contentSize);
+  });
+  return resolved;
+};
+
+const resolveBlockNode = (doc, blockId) => {
+  if (!blockId) return null;
+  let resolved = null;
+  doc.descendants((node, pos) => {
+    if (resolved || node.attrs?.blockId !== blockId) return;
+    resolved = { node, pos };
+  });
+  return resolved;
+};
 
 const stripHtmlFence = (value) =>
   String(value || "")
@@ -315,12 +446,31 @@ const normalizeRichHtml = (
   const source = /<\/?[a-z][\s\S]*>/i.test(stripped)
     ? stripped
     : marked.parse(stripped);
-  const sanitized = DOMPurify.sanitize(source, {
+  const protectedDocument = new DOMParser().parseFromString(source, "text/html");
+  const protectedDiagramCodes = new Map();
+  protectedDocument
+    .querySelectorAll(
+      'div[data-type="mermaid"][data-code],div[data-type="plantuml"][data-code],div[data-type="drawio"][data-code]',
+    )
+    .forEach((element, index) => {
+      const token = `__KSNOTE_DIAGRAM_CODE_${index}__`;
+      protectedDiagramCodes.set(token, element.getAttribute("data-code") || "");
+      element.setAttribute("data-code", token);
+    });
+  const sanitized = DOMPurify.sanitize(protectedDocument.body.innerHTML, {
     USE_PROFILES: { html: true },
     FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form"],
     FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover"],
   });
   const documentNode = new DOMParser().parseFromString(sanitized, "text/html");
+  documentNode
+    .querySelectorAll(
+      'div[data-type="mermaid"][data-code],div[data-type="plantuml"][data-code],div[data-type="drawio"][data-code]',
+    )
+    .forEach((element) => {
+      const code = protectedDiagramCodes.get(element.getAttribute("data-code"));
+      if (code !== undefined) element.setAttribute("data-code", code);
+    });
   if (!allowImages)
     documentNode.querySelectorAll("img").forEach((image) => image.remove());
   documentNode.querySelectorAll("li").forEach((item) => {
@@ -747,11 +897,34 @@ const AttachmentBlock = Node.create({
   addNodeView() { return ReactNodeViewRenderer(AttachmentView); },
 });
 
+const diagramAuditAttributes = () => ({
+  mcpOperationId: {
+    default: "",
+    parseHTML: (element) => element.getAttribute("data-mcp-operation-id") || "",
+    renderHTML: (attrs) => attrs.mcpOperationId
+      ? { "data-mcp-operation-id": attrs.mcpOperationId }
+      : {},
+  },
+  renderStatus: {
+    default: "",
+    parseHTML: (element) => element.getAttribute("data-render-status") || "",
+    renderHTML: (attrs) => attrs.renderStatus
+      ? { "data-render-status": attrs.renderStatus }
+      : {},
+  },
+});
+
 function PlantUmlView({ node, selected, updateAttributes, deleteNode, editor, getPos }) {
   const [mode, setMode] = useState("split");
   const [svg, setSvg] = useState("");
   const [error, setError] = useState("");
+  const sourceEmpty = !String(node.attrs.code || "").trim();
   useEffect(() => {
+    if (!String(node.attrs.code || "").trim()) {
+      setSvg("");
+      setError("");
+      return undefined;
+    }
     let live = true;
     const timer = setTimeout(async () => {
       try {
@@ -775,7 +948,7 @@ function PlantUmlView({ node, selected, updateAttributes, deleteNode, editor, ge
       </header>
       <div className={`mermaid-body mode-${mode}`}>
         {mode !== "preview" && <textarea value={node.attrs.code} onChange={(event) => updateAttributes({ code: event.target.value })} spellCheck="false" />}
-        {mode !== "source" && <div className="mermaid-preview">{error ? <p>{error}</p> : <div dangerouslySetInnerHTML={{ __html: svg }} />}</div>}
+        {mode !== "source" && <div className="mermaid-preview">{sourceEmpty ? <p>PlantUML 소스를 입력하세요.</p> : error ? <p>{error}</p> : <div dangerouslySetInnerHTML={{ __html: svg }} />}</div>}
       </div>
     </NodeViewWrapper>
   );
@@ -787,7 +960,12 @@ const PlantUmlBlock = Node.create({
   atom: true,
   draggable: true,
   selectable: true,
-  addAttributes() { return { code: { default: "@startuml\nAlice -> Bob: Hello\n@enduml", parseHTML: (element) => element.getAttribute("data-code") || "", renderHTML: (attrs) => ({ "data-code": attrs.code }) } }; },
+  addAttributes() {
+    return {
+      code: { default: "@startuml\nAlice -> Bob: Hello\n@enduml", parseHTML: (element) => element.getAttribute("data-code") || "", renderHTML: (attrs) => ({ "data-code": attrs.code }) },
+      ...diagramAuditAttributes(),
+    };
+  },
   parseHTML() { return [{ tag: 'div[data-type="plantuml"]' }]; },
   renderHTML({ HTMLAttributes }) { return ["div", { ...HTMLAttributes, "data-type": "plantuml" }]; },
   addNodeView() { return ReactNodeViewRenderer(PlantUmlView); },
@@ -798,18 +976,72 @@ mermaid.initialize({
   theme: "neutral",
   securityLevel: "strict",
 });
+
+const assertSvg = (value, label) => {
+  const svg = String(value || "");
+  if (!/<svg\b/i.test(svg)) throw new Error(`${label} SVG 출력이 생성되지 않았습니다.`);
+  return svg;
+};
+
+const verifyDiagramBeforeInsert = async (format, code, operationId, preferences) => {
+  const source = validateDiagramSource(format, code);
+  if (!source.ok) {
+    const error = new Error(source.message);
+    error.code = source.code;
+    throw error;
+  }
+  if (format === "mermaid") {
+    const safeId = String(operationId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, "");
+    const { svg } = await mermaid.render(`ks-mcp-verify-${safeId}`, source.code);
+    const output = assertSvg(svg, "Mermaid");
+    return {
+      renderVerified: true,
+      renderFormat: "mermaid",
+      renderedAs: "svg",
+      renderBytes: new TextEncoder().encode(output).length,
+    };
+  }
+  if (format === "plantuml") {
+    const svg = await window.ksnoteDiagram?.renderPlantUml?.({
+      code: source.code,
+      jarPath: preferences?.plantumlJar,
+    });
+    const output = assertSvg(svg, "PlantUML");
+    return {
+      renderVerified: true,
+      renderFormat: "plantuml",
+      renderedAs: "svg",
+      renderBytes: new TextEncoder().encode(output).length,
+    };
+  }
+  const parsed = new DOMParser().parseFromString(source.code, "application/xml");
+  if (parsed.querySelector("parsererror")) {
+    const error = new Error("draw.io XML parser가 문서를 읽지 못했습니다.");
+    error.code = "drawio_xml_parse_failed";
+    throw error;
+  }
+  return {
+    renderVerified: false,
+    renderFormat: "drawio",
+    renderedAs: "pending-embed-export",
+    ...source.details,
+  };
+};
+
 function MermaidView({ node, selected, updateAttributes, deleteNode, editor, getPos }) {
   const [mode, setMode] = useState("split"),
     [error, setError] = useState(""),
     [svgOutput, setSvgOutput] = useState("");
   const renderSeq = useRef(0);
   const id = useId().replace(/:/g, "");
+  const sourceEmpty = !String(node.attrs.code || "").trim();
   useEffect(() => {
     const currentSeq = renderSeq.current + 1;
     renderSeq.current = currentSeq;
     let live = true;
     setError("");
     setSvgOutput("");
+    if (!String(node.attrs.code || "").trim()) return undefined;
     mermaid
       .render(`ks-mermaid-${id}-${currentSeq}`, node.attrs.code)
       .then(({ svg }) => {
@@ -877,7 +1109,7 @@ function MermaidView({ node, selected, updateAttributes, deleteNode, editor, get
         )}
         {mode !== "source" && (
           <div className="mermaid-preview">
-            {error ? <p>{error}</p> : <div dangerouslySetInnerHTML={{ __html: svgOutput }} />}
+            {sourceEmpty ? <p>Mermaid 소스를 입력하세요.</p> : error ? <p>{error}</p> : <div dangerouslySetInnerHTML={{ __html: svgOutput }} />}
           </div>
         )}
       </div>
@@ -897,6 +1129,7 @@ const MermaidBlock = Node.create({
         parseHTML: (e) => e.getAttribute("data-code") || "",
         renderHTML: (a) => ({ "data-code": a.code }),
       },
+      ...diagramAuditAttributes(),
     };
   },
   parseHTML() {
@@ -929,16 +1162,366 @@ const DRAWIO_ALLOWED_ORIGINS = new Set([
 const DRAWIO_EDITOR_URL =
   `${DRAWIO_ORIGIN}/?embed=1&proto=json&spin=1&libraries=1&saveAndExit=1&noExitBtn=1&suppressNewWindows=1&ui=atlas`;
 
-function DrawIoView({ node, selected, updateAttributes, deleteNode }) {
+const requestMcpPersistence = (html) =>
+  new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(
+      () => reject(new Error("SQLite 저장 확인 시간이 초과되었습니다.")),
+      10000,
+    );
+    window.dispatchEvent(
+      new CustomEvent("ksnote:mcp-persist-request", {
+        detail: {
+          html,
+          resolve: (value) => {
+            window.clearTimeout(timeout);
+            resolve(value);
+          },
+          reject: (error) => {
+            window.clearTimeout(timeout);
+            reject(error);
+          },
+        },
+      }),
+    );
+  });
+
+let drawioViewerSessionState = { mode: "fit", scale: 1 };
+
+function DrawIoFullscreenViewer({ src, onClose }) {
+  const titleId = useId();
+  const helpId = useId();
+  const dialogRef = useRef(null);
+  const viewportRef = useRef(null);
+  const closeRef = useRef(onClose);
+  const dragRef = useRef(null);
+  const [zoomMode, setZoomMode] = useState(drawioViewerSessionState.mode);
+  const [zoom, setZoom] = useState(() =>
+    clampDrawioZoom(drawioViewerSessionState.scale),
+  );
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const [naturalSize, setNaturalSize] = useState({ width: 0, height: 0 });
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
+  closeRef.current = onClose;
+
+  const availableWidth = Math.max(1, viewportSize.width - 48);
+  const availableHeight = Math.max(1, viewportSize.height - 48);
+  const fitScale = naturalSize.width && naturalSize.height
+    ? Math.min(
+        1,
+        availableWidth / naturalSize.width,
+        availableHeight / naturalSize.height,
+      )
+    : 1;
+  const effectiveScale = zoomMode === "fit" ? fitScale : zoom;
+  const canPan = zoomMode === "manual" && effectiveScale > fitScale + 0.001;
+
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.setTimeout(() => dialogRef.current?.focus(), 0);
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeRef.current?.();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = [...dialogRef.current.querySelectorAll("button:not(:disabled)")];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return undefined;
+    const measure = () =>
+      setViewportSize({ width: viewport.clientWidth, height: viewport.clientHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+
+  const applyManualZoom = (value, anchor = null) => {
+    const nextZoom = clampDrawioZoom(value);
+    setPan((current) => {
+      if (nextZoom <= fitScale + 0.001) return { x: 0, y: 0 };
+      if (!anchor || !viewportRef.current || effectiveScale <= 0) return current;
+      const bounds = viewportRef.current.getBoundingClientRect();
+      const relativeX = anchor.x - (bounds.left + bounds.width / 2) - current.x;
+      const relativeY = anchor.y - (bounds.top + bounds.height / 2) - current.y;
+      const ratio = nextZoom / effectiveScale;
+      return {
+        x: current.x + relativeX * (1 - ratio),
+        y: current.y + relativeY * (1 - ratio),
+      };
+    });
+    setZoomMode("manual");
+    setZoom(nextZoom);
+    drawioViewerSessionState = { mode: "manual", scale: nextZoom };
+  };
+
+  const fitToScreen = () => {
+    setZoomMode("fit");
+    setPan({ x: 0, y: 0 });
+    drawioViewerSessionState = { mode: "fit", scale: zoom };
+  };
+
+  const handleWheel = (event) => {
+    event.preventDefault();
+    const direction = event.deltaY > 0 ? -1 : 1;
+    applyManualZoom(stepDrawioZoom(effectiveScale, direction, 0.15), {
+      x: event.clientX,
+      y: event.clientY,
+    });
+  };
+
+  const startPan = (event) => {
+    if (!canPan || event.button !== 0) return;
+    event.preventDefault();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic accessibility and regression events may not own pointer capture.
+    }
+    dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+    setDragging(true);
+  };
+  const movePan = (event) => {
+    if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - dragRef.current.x;
+    const deltaY = event.clientY - dragRef.current.y;
+    dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+    setPan((current) => ({ x: current.x + deltaX, y: current.y + deltaY }));
+  };
+  const stopPan = (event) => {
+    if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    setDragging(false);
+    try {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    } catch {
+      // The pointer can already be released when the viewer loses focus.
+    }
+  };
+
+  return createPortal(
+    <div
+      className="drawio-viewer-backdrop"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) closeRef.current?.();
+      }}
+    >
+      <section
+        ref={dialogRef}
+        className="drawio-viewer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={helpId}
+        tabIndex={-1}
+      >
+        <header>
+          <div>
+            <strong id={titleId}>draw.io Preview</strong>
+            <small id={helpId}>휠로 확대·축소하고, 확대된 화면을 드래그해 이동할 수 있습니다.</small>
+          </div>
+          <nav aria-label="다이어그램 확대 도구">
+            <button
+              type="button"
+              title="축소"
+              aria-label="축소"
+              onClick={() => applyManualZoom(stepDrawioZoom(effectiveScale, -1))}
+            >
+              <Minus />
+            </button>
+            <output aria-live="polite">{Math.round(effectiveScale * 100)}%</output>
+            <button
+              type="button"
+              title="확대"
+              aria-label="확대"
+              onClick={() => applyManualZoom(stepDrawioZoom(effectiveScale, 1))}
+            >
+              <Plus />
+            </button>
+            <button type="button" onClick={() => applyManualZoom(1)}>100%</button>
+            <button
+              type="button"
+              className={zoomMode === "fit" ? "active" : ""}
+              onClick={fitToScreen}
+            >
+              화면 맞춤
+            </button>
+            <button type="button" title="닫기 (Esc)" aria-label="닫기" onClick={onClose}>
+              <X />
+            </button>
+          </nav>
+        </header>
+        <div
+          ref={viewportRef}
+          className={`drawio-viewer-viewport ${canPan ? "can-pan" : ""} ${dragging ? "is-dragging" : ""}`}
+          onWheel={handleWheel}
+          onPointerDown={startPan}
+          onPointerMove={movePan}
+          onPointerUp={stopPan}
+          onPointerCancel={stopPan}
+        >
+          <img
+            src={src}
+            alt="확대된 draw.io 다이어그램"
+            draggable="false"
+            onLoad={(event) =>
+              setNaturalSize({
+                width: event.currentTarget.naturalWidth || 1,
+                height: event.currentTarget.naturalHeight || 1,
+              })
+            }
+            style={{
+              transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${effectiveScale})`,
+            }}
+          />
+        </div>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
+function DrawIoView({ node, selected, updateAttributes, deleteNode, editor }) {
   const iframeRef = useRef(null);
-  const [mode, setMode] = useState(node.attrs.view || "edit");
+  const settledOperationRef = useRef("");
+  const previewTimeoutRef = useRef(null);
+  const editorReadyRef = useRef(false);
+  const sourceDirtyRef = useRef(false);
+  const currentCodeRef = useRef(node.attrs.code || defaultDrawIoXml);
+  const modeRef = useRef(normalizeDrawioView(node.attrs.view));
+  const [mode, setMode] = useState(modeRef.current);
   const [status, setStatus] = useState("loading");
+  const [previewData, setPreviewData] = useState("");
+  const [previewError, setPreviewError] = useState("");
+  const [previewStale, setPreviewStale] = useState(true);
+  const [viewerOpen, setViewerOpen] = useState(false);
   const code = node.attrs.code || defaultDrawIoXml;
+  currentCodeRef.current = code;
   const postDrawIo = (message) => {
-    iframeRef.current?.contentWindow?.postMessage(JSON.stringify(message), "*");
+    iframeRef.current?.contentWindow?.postMessage(JSON.stringify(message), DRAWIO_ORIGIN);
+  };
+  const clearPreviewTimeout = () => {
+    if (!previewTimeoutRef.current) return;
+    window.clearTimeout(previewTimeoutRef.current);
+    previewTimeoutRef.current = null;
+  };
+  const requestPreview = () => {
+    if (!editorReadyRef.current) return false;
+    clearPreviewTimeout();
+    setStatus("previewing");
+    setPreviewError("");
+    postDrawIo({ action: "export", format: "svg" });
+    previewTimeoutRef.current = window.setTimeout(() => {
+      previewTimeoutRef.current = null;
+      setStatus("ready");
+      setPreviewError(
+        "새 미리보기를 받지 못했습니다. 마지막 정상 미리보기는 그대로 유지합니다.",
+      );
+    }, 15000);
+    return true;
+  };
+  const loadCurrentSource = () => {
+    editorReadyRef.current = false;
+    sourceDirtyRef.current = false;
+    setStatus("loading");
+    postDrawIo({
+      action: "load",
+      xml: currentCodeRef.current,
+      autosave: 1,
+      saveAndExit: 1,
+      noExitBtn: 1,
+      title: "KsNote draw.io",
+      modified: 0,
+    });
+  };
+  const changeMode = (value) => {
+    const nextMode = normalizeDrawioView(value);
+    modeRef.current = nextMode;
+    setMode(nextMode);
+    if (node.attrs.view !== nextMode) updateAttributes({ view: nextMode });
+    if (nextMode === "source") return;
+    if (sourceDirtyRef.current) {
+      loadCurrentSource();
+      return;
+    }
+    if (nextMode === "preview") requestPreview();
+  };
+  const retryPreview = () => {
+    if (sourceDirtyRef.current || !editorReadyRef.current) loadCurrentSource();
+    else requestPreview();
   };
   useEffect(() => {
-    if (mode !== "edit") return undefined;
+    const operationId = node.attrs.mcpOperationId || "";
+    const verifyMcpRender = Boolean(operationId) && node.attrs.renderStatus === "pending";
+    const settleOperation = async (result) => {
+      if (!verifyMcpRender || settledOperationRef.current === operationId) return;
+      settledOperationRef.current = operationId;
+      let finalResult = result;
+      updateAttributes({
+        renderStatus: result.status === "completed" ? "verified" : "error",
+      });
+      if (result.status === "completed") {
+        try {
+          // Persist the verified attribute together with the diagram. Persisting
+          // before updateAttributes leaves a delayed pending -> verified save
+          // after the operation has already reported completion.
+          await requestMcpPersistence(editor.getHTML());
+        } catch (error) {
+          finalResult = {
+            status: "error",
+            code: "persistence_failed",
+            message: error.message || "SQLite 저장을 확인하지 못했습니다.",
+            renderVerified: false,
+            renderFormat: "drawio",
+          };
+          updateAttributes({ renderStatus: "error" });
+        }
+      }
+      const completed = finalResult.status === "completed";
+      await window.ksnoteMcp?.complete?.({
+        id: operationId,
+        ...finalResult,
+        appliedRevision: contentRevision(editor.getHTML()),
+      });
+      window.dispatchEvent(
+        new CustomEvent("ksnote:mcp-operation-result", {
+          detail: {
+            status: finalResult.status,
+            undoable: completed,
+            undo: completed
+              ? () => editor.chain().focus().undo().run()
+              : undefined,
+            message: completed
+              ? "MCP 작업 완료: draw.io 다이어그램을 삽입했습니다."
+              : `MCP 작업 실패: ${finalResult.message || "draw.io 다이어그램을 적용하지 못했습니다."}`,
+          },
+        }),
+      );
+      if (!completed) window.setTimeout(() => deleteNode(), 0);
+    };
     const handleMessage = (event) => {
       if (!DRAWIO_ALLOWED_ORIGINS.has(event.origin) || !event.data) return;
       let payload = event.data;
@@ -951,10 +1534,11 @@ function DrawIoView({ node, selected, updateAttributes, deleteNode }) {
       }
       if (!payload || typeof payload !== "object") return;
       if (payload.event === "init") {
-        setStatus("ready");
+        editorReadyRef.current = false;
+        setStatus("loading");
         postDrawIo({
           action: "load",
-          xml: code,
+          xml: currentCodeRef.current,
           autosave: 1,
           saveAndExit: 1,
           noExitBtn: 1,
@@ -962,18 +1546,96 @@ function DrawIoView({ node, selected, updateAttributes, deleteNode }) {
           modified: 0,
         });
       } else if ((payload.event === "autosave" || payload.event === "save") && payload.xml) {
+        currentCodeRef.current = payload.xml;
+        sourceDirtyRef.current = false;
         updateAttributes({ code: payload.xml });
+        setPreviewStale(true);
         setStatus(payload.event === "save" ? "saved" : "autosaved");
-        if (payload.exit) setMode("source");
+        if (payload.exit) changeMode("source");
       } else if (payload.event === "load") {
+        editorReadyRef.current = true;
+        if (verifyMcpRender) {
+          setStatus("verifying");
+          postDrawIo({ action: "export", format: "svg" });
+        } else if (modeRef.current === "preview") {
+          requestPreview();
+        } else {
+          setStatus("ready");
+        }
+      } else if (payload.event === "export") {
+        const data = String(payload.data || "");
+        clearPreviewTimeout();
+        if (!isDrawioSvgDataUrl(data)) {
+          setStatus("ready");
+          setPreviewError(
+            "draw.io가 유효한 SVG 미리보기를 반환하지 않았습니다. 마지막 정상 미리보기는 유지됩니다.",
+          );
+          if (verifyMcpRender)
+            settleOperation({
+              status: "error",
+              code: "drawio_export_invalid",
+              message: "draw.io가 유효한 SVG 검증 결과를 반환하지 않았습니다.",
+              renderVerified: false,
+              renderFormat: "drawio",
+            });
+          return;
+        }
+        setPreviewData(data);
+        setPreviewError("");
+        setPreviewStale(false);
         setStatus("ready");
+        if (verifyMcpRender) {
+          const validation = validateDiagramSource(
+            "drawio",
+            currentCodeRef.current,
+          );
+          settleOperation({
+            status: "completed",
+            renderVerified: true,
+            renderFormat: "drawio",
+            renderedAs: "svg",
+            renderBytes: new TextEncoder().encode(data).length,
+            renderBounds: payload.bounds || null,
+            ...(validation.details || {}),
+          });
+        }
+      } else if (payload.event === "error") {
+        clearPreviewTimeout();
+        const message = String(
+          payload.message || "draw.io 편집기가 다이어그램을 불러오지 못했습니다.",
+        );
+        setStatus("ready");
+        setPreviewError(message);
+        if (verifyMcpRender)
+          settleOperation({
+            status: "error",
+            code: "drawio_runtime_error",
+            message,
+            renderVerified: false,
+            renderFormat: "drawio",
+          });
       } else if (payload.event === "exit") {
-        setMode("source");
+        changeMode("source");
       }
     };
+    const timeout = verifyMcpRender
+      ? window.setTimeout(() => {
+          settleOperation({
+            status: "error",
+            code: "drawio_render_timeout",
+            message: "draw.io 편집기가 제한 시간 안에 SVG 렌더 검증을 완료하지 못했습니다.",
+            renderVerified: false,
+            renderFormat: "drawio",
+          });
+        }, 30000)
+      : null;
     window.addEventListener("message", handleMessage);
-    return () => window.removeEventListener("message", handleMessage);
-  }, [mode, code, updateAttributes]);
+    return () => {
+      window.removeEventListener("message", handleMessage);
+      if (timeout) window.clearTimeout(timeout);
+      clearPreviewTimeout();
+    };
+  }, [node.attrs.mcpOperationId, node.attrs.renderStatus, updateAttributes, deleteNode, editor]);
   return (
     <NodeViewWrapper className={`mermaid-block drawio-block ${selected ? "selected" : ""}`}>
       <header>
@@ -982,36 +1644,103 @@ function DrawIoView({ node, selected, updateAttributes, deleteNode }) {
           {[
             ["edit", "Editor"],
             ["source", "XML"],
+            ["preview", "Preview"],
           ].map(([item, label]) => (
-            <button key={item} className={mode === item ? "active" : ""} onClick={() => setMode(item)}>
+            <button key={item} className={mode === item ? "active" : ""} onClick={() => changeMode(item)}>
               {label}
             </button>
           ))}
         </nav>
+        <button
+          type="button"
+          title="Preview 전체화면"
+          aria-label="Preview 전체화면"
+          disabled={!previewData}
+          onClick={() => setViewerOpen(true)}
+        >
+          <Maximize2 />
+        </button>
         <button title="저장 요청" onClick={() => postDrawIo({ action: "save" })}><Check /></button>
         <button title="XML 복사" onClick={() => navigator.clipboard.writeText(code)}><Copy /></button>
         <button title="draw.io 파일 저장" onClick={() => downloadTextFile(code, "drawio-diagram", "drawio", "application/xml")}><Download /></button>
         <button title="삭제" onClick={deleteNode}><Trash2 /></button>
       </header>
       <div className={`drawio-body mode-${mode}`}>
-        {mode === "source" ? (
+        {mode === "source" && (
           <textarea
             value={code}
-            onChange={(event) => updateAttributes({ code: event.target.value })}
+            onChange={(event) => {
+              currentCodeRef.current = event.target.value;
+              sourceDirtyRef.current = true;
+              setPreviewStale(true);
+              updateAttributes({ code: event.target.value });
+            }}
             spellCheck="false"
+            aria-label="draw.io XML"
           />
-        ) : (
-          <div className="drawio-frame-shell">
-            <iframe
-              ref={iframeRef}
-              title="draw.io editor"
-              src={DRAWIO_EDITOR_URL}
-              allow="clipboard-read; clipboard-write"
-            />
-            <span className={`drawio-status ${status}`}>{status === "loading" ? "Loading" : status === "saved" ? "Saved" : status === "autosaved" ? "Autosaved" : "Ready"}</span>
+        )}
+        {mode === "preview" && (
+          <div className="drawio-preview" aria-live="polite">
+            {previewError && (
+              <div className="drawio-preview-error">
+                <span>{previewError}</span>
+                <button type="button" onClick={retryPreview}>다시 시도</button>
+              </div>
+            )}
+            {previewData ? (
+              <>
+                <img
+                  src={previewData}
+                  alt="draw.io 다이어그램 미리보기"
+                  title="더블클릭하여 전체화면으로 보기"
+                  onDoubleClick={() => setViewerOpen(true)}
+                />
+                <button
+                  type="button"
+                  className="drawio-preview-open"
+                  onClick={() => setViewerOpen(true)}
+                >
+                  <Maximize2 /> 전체화면
+                </button>
+              </>
+            ) : (
+              <div className="drawio-preview-empty">
+                {status === "loading" || status === "previewing"
+                  ? "최신 XML을 렌더링하고 있습니다…"
+                  : "Preview를 생성할 수 없습니다."}
+              </div>
+            )}
+            {previewStale && previewData && (
+              <small>최신 XML로 미리보기를 갱신하는 중입니다.</small>
+            )}
           </div>
         )}
+        <div className={`drawio-frame-shell ${mode === "edit" ? "" : "is-hidden"}`} aria-hidden={mode !== "edit"}>
+          <iframe
+            ref={iframeRef}
+            title="draw.io editor"
+            src={DRAWIO_EDITOR_URL}
+            allow="clipboard-read; clipboard-write"
+            tabIndex={mode === "edit" ? 0 : -1}
+          />
+          <span className={`drawio-status ${status}`}>
+            {status === "loading"
+              ? "Loading"
+              : status === "verifying"
+                ? "Verifying"
+                : status === "previewing"
+                  ? "Previewing"
+                  : status === "saved"
+                    ? "Saved"
+                    : status === "autosaved"
+                      ? "Autosaved"
+                      : "Ready"}
+          </span>
+        </div>
       </div>
+      {viewerOpen && previewData && (
+        <DrawIoFullscreenViewer src={previewData} onClose={() => setViewerOpen(false)} />
+      )}
     </NodeViewWrapper>
   );
 }
@@ -1031,9 +1760,10 @@ const DrawIoBlock = Node.create({
       },
       view: {
         default: "edit",
-        parseHTML: (e) => e.getAttribute("data-view") || "edit",
-        renderHTML: (a) => ({ "data-view": a.view || "edit" }),
+        parseHTML: (e) => normalizeDrawioView(e.getAttribute("data-view")),
+        renderHTML: (a) => ({ "data-view": normalizeDrawioView(a.view) }),
       },
+      ...diagramAuditAttributes(),
     };
   },
   parseHTML() {
@@ -1121,7 +1851,7 @@ const TableOfContentsBlock = Node.create({
 const asHtml = (value) =>
   normalizeRichHtml(value, { preserveEmptyParagraphs: true });
 
-function RichPreview({ html }) {
+export function RichPreview({ html, className = "" }) {
   const root = useRef(null);
   useEffect(() => {
     const host = root.current;
@@ -1133,6 +1863,10 @@ function RichPreview({ html }) {
       const code = element.getAttribute("data-code") || "";
       element.classList.add("preview-mermaid");
       element.setAttribute("aria-label", "Mermaid 다이어그램");
+      if (!code.trim()) {
+        element.innerHTML = '<p class="preview-mermaid-error">Mermaid 소스가 비어 있습니다.</p>';
+        return;
+      }
       mermaid
         .render(
           `ks-preview-${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`,
@@ -1150,18 +1884,120 @@ function RichPreview({ html }) {
     const plantDiagrams = Array.from(host.querySelectorAll('[data-type="plantuml"]'));
     plantDiagrams.forEach(async (element) => {
       try {
+        const code = element.getAttribute("data-code") || "";
+        if (!code.trim()) {
+          element.innerHTML = '<p class="preview-mermaid-error">PlantUML 소스가 비어 있습니다.</p>';
+          return;
+        }
         const prefs = JSON.parse(localStorage.getItem("mori-prefs") || "{}");
-        const svg = await window.ksnoteDiagram?.renderPlantUml({ code: element.getAttribute("data-code") || "", jarPath: prefs.plantumlJar });
+        const svg = await window.ksnoteDiagram?.renderPlantUml({ code, jarPath: prefs.plantumlJar });
         if (live && element.isConnected) { element.classList.add("preview-mermaid"); element.innerHTML = svg; }
       } catch (error) {
         if (live && element.isConnected) element.innerHTML = `<p class="preview-mermaid-error">${String(error.message || "PlantUML 렌더링 실패").replace(/[<>]/g, "")}</p>`;
       }
     });
+    const drawIoEntries = Array.from(
+      host.querySelectorAll('[data-type="drawio"]'),
+    ).map((element, index) => {
+      const code = element.getAttribute("data-code") || "";
+      element.classList.add("preview-mermaid", "preview-drawio");
+      element.setAttribute("aria-label", "draw.io 다이어그램");
+      if (!code.trim()) {
+        element.innerHTML =
+          '<p class="preview-mermaid-error">draw.io XML이 비어 있습니다.</p>';
+        return null;
+      }
+      const iframe = document.createElement("iframe");
+      iframe.title = `draw.io preview renderer ${index + 1}`;
+      iframe.src = DRAWIO_EDITOR_URL;
+      iframe.tabIndex = -1;
+      iframe.setAttribute("aria-hidden", "true");
+      element.replaceChildren(iframe);
+      const entry = {
+        code,
+        element,
+        iframe,
+        settled: false,
+        timeout: null,
+      };
+      entry.timeout = window.setTimeout(() => {
+        if (!live || entry.settled || !element.isConnected) return;
+        entry.settled = true;
+        element.innerHTML =
+          '<p class="preview-mermaid-error">draw.io 미리보기 응답 시간이 초과되었습니다.</p>';
+      }, 20000);
+      return entry;
+    }).filter(Boolean);
+    const settleDrawIoPreview = (entry, data, errorMessage = "") => {
+      if (!live || entry.settled || !entry.element.isConnected) return;
+      entry.settled = true;
+      if (entry.timeout) window.clearTimeout(entry.timeout);
+      if (isDrawioSvgDataUrl(data)) {
+        const image = document.createElement("img");
+        image.src = data;
+        image.alt = "draw.io 다이어그램 미리보기";
+        entry.element.replaceChildren(image);
+      } else {
+        const message = document.createElement("p");
+        message.className = "preview-mermaid-error";
+        message.textContent =
+          errorMessage || "draw.io가 유효한 SVG 미리보기를 반환하지 않았습니다.";
+        entry.element.replaceChildren(message);
+      }
+    };
+    const handleDrawIoMessage = (event) => {
+      if (!DRAWIO_ALLOWED_ORIGINS.has(event.origin) || !event.data) return;
+      const entry = drawIoEntries.find(
+        (item) => !item.settled && item.iframe.contentWindow === event.source,
+      );
+      if (!entry) return;
+      let payload = event.data;
+      if (typeof payload === "string") {
+        try {
+          payload = JSON.parse(payload);
+        } catch {
+          return;
+        }
+      }
+      if (!payload || typeof payload !== "object") return;
+      if (payload.event === "init") {
+        entry.iframe.contentWindow?.postMessage(
+          JSON.stringify({
+            action: "load",
+            xml: entry.code,
+            autosave: 0,
+            saveAndExit: 0,
+            noExitBtn: 1,
+            modified: 0,
+          }),
+          DRAWIO_ORIGIN,
+        );
+      } else if (payload.event === "load") {
+        entry.iframe.contentWindow?.postMessage(
+          JSON.stringify({ action: "export", format: "svg" }),
+          DRAWIO_ORIGIN,
+        );
+      } else if (payload.event === "export") {
+        settleDrawIoPreview(entry, String(payload.data || ""));
+      } else if (payload.event === "error") {
+        settleDrawIoPreview(
+          entry,
+          "",
+          String(payload.message || "draw.io 미리보기를 생성하지 못했습니다."),
+        );
+      }
+    };
+    if (drawIoEntries.length)
+      window.addEventListener("message", handleDrawIoMessage);
     return () => {
       live = false;
+      window.removeEventListener("message", handleDrawIoMessage);
+      drawIoEntries.forEach((entry) => {
+        if (entry.timeout) window.clearTimeout(entry.timeout);
+      });
     };
   }, [html]);
-  return <article ref={root} className="split-preview" />;
+  return <article ref={root} className={`split-preview ${className}`.trim()} />;
 }
 
 const readImage = (file) =>
@@ -1259,6 +2095,7 @@ export default function RichDocumentEditor({
   onCreateChildPage,
   onTargetChange,
   onExternalOperation,
+  onPersistContent,
 }) {
   const [gridOpen, setGridOpen] = useState(false);
   const [diagramOpen, setDiagramOpen] = useState(false);
@@ -1292,6 +2129,11 @@ export default function RichDocumentEditor({
   const savedSelection = useRef(null);
   const composingRef = useRef(false);
   const externalOperationIds = useRef(new Set());
+  const [plantUmlCapability, setPlantUmlCapability] = useState({
+    available: false,
+    bundled: false,
+    jarPath: "",
+  });
   const [aiOpen, setAiOpen] = useState(false),
     [aiMode, setAiMode] = useState("edit"),
     [aiPrompt, setAiPrompt] = useState(""),
@@ -1349,6 +2191,17 @@ export default function RichDocumentEditor({
     } catch {}
   };
   useEffect(() => setAiModel(preferredModel), [preferredModel]);
+  useEffect(() => {
+    let live = true;
+    window.ksnoteDiagram?.capabilities?.({ jarPath: preferences.plantumlJar })
+      .then((result) => {
+        if (live) setPlantUmlCapability(result || { available: false });
+      })
+      .catch(() => {
+        if (live) setPlantUmlCapability({ available: false, bundled: false, jarPath: "" });
+      });
+    return () => { live = false; };
+  }, [preferences.plantumlJar]);
   useEffect(() => {
     localStorage.setItem("ksnote-ai-prompt-sessions", JSON.stringify(aiSessions.slice(0, 100)));
   }, [aiSessions]);
@@ -1787,6 +2640,7 @@ export default function RichDocumentEditor({
   };
   const editor = useEditor({
     extensions: [
+      StableBlockId,
       StarterKit.configure({ codeBlock: false, link: false }),
       SmartCodeBlock.configure({ lowlight, defaultLanguage: "plaintext" }),
       TextStyle,
@@ -2090,28 +2944,14 @@ export default function RichDocumentEditor({
       const { from, to } = editor.state.selection;
       if (from !== to) savedSelection.current = { from, to };
       setTableContextOpen(editor.isActive("table"));
-      onTargetChange?.({
-        noteId,
-        projectId,
-        from,
-        to,
-        empty: from === to,
-        text: editor.state.doc.textBetween(from, to, "\n").slice(0, 240),
-      });
+      onTargetChange?.(editorTargetSnapshot(editor, noteId, projectId));
       detectSlash(editor);
     },
   });
   useEffect(() => {
     if (editor) {
-      const { from, to } = editor.state.selection;
-      onTargetChange?.({
-        noteId,
-        projectId,
-        from,
-        to,
-        empty: from === to,
-        text: editor.state.doc.textBetween(from, to, "\n").slice(0, 240),
-      });
+      editor.view.dispatch(editor.state.tr.setMeta("ensureBlockIds", true));
+      onTargetChange?.(editorTargetSnapshot(editor, noteId, projectId));
       const incoming = asHtml(content);
       setPreviewHtml(incoming);
       if (editor.getHTML() !== incoming)
@@ -2129,11 +2969,43 @@ export default function RichDocumentEditor({
     if (editor) editor.setEditable(mode !== "preview");
   }, [editor, mode]);
   useEffect(() => {
+    const handleOperationResult = (event) =>
+      onExternalOperation?.(event.detail || {});
+    window.addEventListener(
+      "ksnote:mcp-operation-result",
+      handleOperationResult,
+    );
+    return () =>
+      window.removeEventListener(
+        "ksnote:mcp-operation-result",
+        handleOperationResult,
+      );
+  }, [onExternalOperation]);
+  useEffect(() => {
+    const handlePersistRequest = async (event) => {
+      try {
+        if (!onPersistContent)
+          throw new Error("SQLite 저장 브리지가 준비되지 않았습니다.");
+        const result = await onPersistContent(event.detail?.html || "");
+        event.detail?.resolve?.(result);
+      } catch (error) {
+        event.detail?.reject?.(error);
+      }
+    };
+    window.addEventListener("ksnote:mcp-persist-request", handlePersistRequest);
+    return () =>
+      window.removeEventListener(
+        "ksnote:mcp-persist-request",
+        handlePersistRequest,
+      );
+  }, [onPersistContent]);
+  useEffect(() => {
     if (!editor || !noteId || mode === "preview") return undefined;
     let stopped = false;
     const applyOperation = async (operation) => {
       if (!operation?.id || externalOperationIds.current.has(operation.id))
         return;
+      if (!isApprovedMcpOperation(operation)) return;
       const claimed = await window.ksnoteMcp?.claim?.({
         id: operation.id,
         noteId,
@@ -2157,6 +3029,43 @@ export default function RichDocumentEditor({
           onExternalOperation?.({
             status: "error",
             message: "MCP 작업 실패: 노트가 변경되어 다이어그램을 삽입하지 않았습니다.",
+          });
+          return;
+        }
+        const isDiagramDelete = claimed.type === "diagram_delete";
+        if (isDiagramDelete) {
+          const blockId = claimed.target?.blockId;
+          const resolvedBlock = resolveBlockNode(editor.state.doc, blockId);
+          const diagramTypes = new Set(["mermaidBlock", "plantUmlBlock", "drawIoBlock"]);
+          if (!resolvedBlock || !diagramTypes.has(resolvedBlock.node.type.name)) {
+            const error = new Error("지정한 block ID에 해당하는 다이어그램을 현재 편집기에서 찾을 수 없습니다.");
+            error.code = "diagram_block_not_found";
+            throw error;
+          }
+          editor
+            .chain()
+            .focus()
+            .deleteRange({
+              from: resolvedBlock.pos,
+              to: resolvedBlock.pos + resolvedBlock.node.nodeSize,
+            })
+            .run();
+          const appliedRevision = contentRevision(editor.getHTML());
+          if (!onPersistContent)
+            throw new Error("SQLite 저장 브리지가 준비되지 않았습니다.");
+          await onPersistContent(editor.getHTML());
+          await window.ksnoteMcp?.complete?.({
+            id: claimed.id,
+            status: "completed",
+            appliedRevision,
+            deletedBlockId: blockId,
+            deletedFormat: claimed.format,
+          });
+          onExternalOperation?.({
+            status: "completed",
+            undoable: true,
+            undo: () => editor.chain().focus().undo().run(),
+            message: "MCP 작업 완료: 지정한 다이어그램 블록을 삭제했습니다.",
           });
           return;
         }
@@ -2185,18 +3094,55 @@ export default function RichDocumentEditor({
             : format === "drawio"
               ? "drawIoBlock"
               : "mermaidBlock";
+        const renderEvidence = isTextInsert
+          ? null
+          : await verifyDiagramBeforeInsert(
+              format,
+              claimed.code || "",
+              claimed.id,
+              preferences,
+            );
         const maxPos = editor.state.doc.content.size;
         const target = claimed.target || {};
-        const from = claimed.operation === "append"
+        const replaceBlockTarget = claimed.operation === "replace-block"
+          ? resolveBlockNode(editor.state.doc, target.blockId)
+          : null;
+        if (
+          claimed.operation === "replace-block" &&
+          (!replaceBlockTarget || !new Set(["mermaidBlock", "plantUmlBlock", "drawIoBlock"]).has(replaceBlockTarget.node.type.name))
+        ) {
+          const error = new Error("교체할 다이어그램 블록을 현재 편집기에서 찾을 수 없습니다.");
+          error.code = "diagram_block_not_found";
+          throw error;
+        }
+        const blockFrom = resolveBlockOffset(
+          editor.state.doc,
+          target.blockId,
+          target.offset,
+        );
+        const blockTo = resolveBlockOffset(
+          editor.state.doc,
+          target.toBlockId,
+          target.toOffset,
+        );
+        const from = replaceBlockTarget
+          ? replaceBlockTarget.pos
+          : claimed.operation === "append"
           ? maxPos
-          : Number.isFinite(target.from)
-          ? Math.max(0, Math.min(target.from, maxPos))
-          : maxPos;
-        const to = Number.isFinite(target.to)
-          ? Math.max(from, Math.min(target.to, maxPos))
-          : from;
+          : Number.isFinite(blockFrom)
+            ? Math.max(0, Math.min(blockFrom, maxPos))
+            : Number.isFinite(target.from)
+              ? Math.max(0, Math.min(target.from, maxPos))
+              : maxPos;
+        const to = replaceBlockTarget
+          ? replaceBlockTarget.pos + replaceBlockTarget.node.nodeSize
+          : Number.isFinite(blockTo)
+          ? Math.max(from, Math.min(blockTo, maxPos))
+          : Number.isFinite(target.to)
+            ? Math.max(from, Math.min(target.to, maxPos))
+            : from;
         const range =
-          claimed.operation === "replace-selection" || from !== to
+          claimed.operation === "replace-selection" || claimed.operation === "replace-block" || from !== to
             ? { from, to }
             : from;
         editor
@@ -2210,19 +3156,37 @@ export default function RichDocumentEditor({
                   type: nodeType,
                   attrs: {
                     code: claimed.code || "",
+                    ...(claimed.operation === "replace-block" && target.blockId
+                      ? { blockId: target.blockId }
+                      : {}),
                     ...(format === "drawio" ? { view: "edit" } : {}),
+                    mcpOperationId: claimed.id,
+                    renderStatus: format === "drawio" ? "pending" : "verified",
                   },
                 },
           )
           .run();
         const appliedRevision = contentRevision(editor.getHTML());
+        if (!isTextInsert && format === "drawio") {
+          onExternalOperation?.({
+            status: "applying",
+            message: "MCP 작업 적용 중: draw.io 편집기에서 실제 SVG 렌더를 검증합니다.",
+          });
+          return;
+        }
+        if (!onPersistContent)
+          throw new Error("SQLite 저장 브리지가 준비되지 않았습니다.");
+        await onPersistContent(editor.getHTML());
         await window.ksnoteMcp?.complete?.({
           id: claimed.id,
           status: "completed",
           appliedRevision,
+          ...(renderEvidence || {}),
         });
         onExternalOperation?.({
           status: "completed",
+          undoable: true,
+          undo: () => editor.chain().focus().undo().run(),
           message:
             isTextInsert
               ? "MCP 작업 완료: 텍스트를 삽입했습니다."
@@ -2236,8 +3200,10 @@ export default function RichDocumentEditor({
         await window.ksnoteMcp?.complete?.({
           id: operation.id,
           status: "error",
-          code: "apply_failed",
+          code: error.code || (operation.type === "diagram_insert" ? "diagram_render_failed" : "apply_failed"),
           message: error.message || "MCP 작업 적용에 실패했습니다.",
+          renderVerified: false,
+          renderFormat: operation.format || undefined,
         });
         onExternalOperation?.({
           status: "error",
@@ -2250,7 +3216,9 @@ export default function RichDocumentEditor({
       const operations = await window.ksnoteMcp.pending({ noteId }).catch(
         () => [],
       );
-      for (const operation of operations) await applyOperation(operation);
+      for (const operation of operations) {
+        if (isApprovedMcpOperation(operation)) await applyOperation(operation);
+      }
     };
     poll();
     const timer = window.setInterval(poll, 1000);
@@ -2258,7 +3226,7 @@ export default function RichDocumentEditor({
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [editor, noteId, mode]);
+  }, [editor, noteId, mode, preferences.plantumlJar]);
   useEffect(() => {
     if (!editor || !noteId) return undefined;
     const writeHeartbeat = () => {
@@ -2270,12 +3238,18 @@ export default function RichDocumentEditor({
         editable: mode !== "preview",
         revision: contentRevision(editor.getHTML()),
         selection: { from, to, empty: from === to },
+        diagramCapabilities: {
+          mermaid: true,
+          plantuml: Boolean(plantUmlCapability.available),
+          plantumlBundled: Boolean(plantUmlCapability.bundled),
+          drawio: true,
+        },
       }).catch(() => {});
     };
     writeHeartbeat();
     const timer = window.setInterval(writeHeartbeat, 5000);
     return () => window.clearInterval(timer);
-  }, [editor, noteId, projectId, mode]);
+  }, [editor, noteId, projectId, mode, plantUmlCapability.available, plantUmlCapability.bundled]);
   useEffect(() => {
     if (!editor) return;
     editor.view.dom.setAttribute(
@@ -3474,39 +4448,41 @@ export default function RichDocumentEditor({
                   <>
                     {!aiResult.replay && (
                       <div className="ai-quick-actions">
+                        <span>검토 후 적용</span>
                         {aiResult.mode === "edit" && <button className="apply" onClick={() => applyAI("replace")}><Check /> 변경 적용</button>}
-                        <button onClick={() => applyAI("insert")}><FilePenLine /> 커서에 삽입</button>
-                        <button onClick={() => setAiResult(null)}><X /> 닫기</button>
+                        {aiResult.mode === "research" && aiResult.target === "selection" && (
+                          <button className="apply" onClick={() => applyAI("replace")}><Check /> 선택 영역 교체</button>
+                        )}
+                        <button onClick={() => applyAI("insert")}><FilePenLine /> 노트에 삽입</button>
+                        <button onClick={() => setAiResult(null)}><X /> 취소</button>
                       </div>
                     )}
                     {aiResult.mode === "edit" && !aiResult.replay && (
                       <div className="ai-diff">
                         <section>
                           <b>변경 전</b>
-                          <div
+                          <RichPreview
                             className="ai-diff-preview"
-                            dangerouslySetInnerHTML={{
-                              __html: cleanAIHtml(aiResult.beforeHtml || aiResult.originalHtml),
-                            }}
+                            html={cleanAIHtml(
+                              aiResult.beforeHtml || aiResult.originalHtml,
+                            )}
                           />
                         </section>
                         <section>
                           <b>변경 후</b>
-                          <div
+                          <RichPreview
                             className="ai-diff-preview"
-                            dangerouslySetInnerHTML={{
-                              __html: cleanAIHtml(aiResult.output),
-                            }}
+                            html={cleanAIHtml(aiResult.output)}
                           />
                         </section>
                       </div>
                     )}
-                    <div
-                      className="ai-result-text ai-result-rendered"
-                      dangerouslySetInnerHTML={{
-                        __html: cleanAIHtml(aiResult.output),
-                      }}
-                    />
+                    {(aiResult.mode !== "edit" || aiResult.replay) && (
+                      <RichPreview
+                        className="ai-result-text ai-result-rendered"
+                        html={cleanAIHtml(aiResult.output)}
+                      />
+                    )}
                     {aiResult.patch?.summary && (
                       <p className="ai-patch-summary">{aiResult.patch.summary}</p>
                     )}
@@ -3523,30 +4499,9 @@ export default function RichDocumentEditor({
                         <small>{new Date().toLocaleString("ko-KR")} 조회</small>
                       </div>
                     )}
-                    <div className="ai-result-actions">
-                      {aiResult.mode === "edit" && !aiResult.replay && (
-                        <button
-                          className="apply"
-                          onClick={() => applyAI("replace")}
-                        >
-                          <Check /> 변경 적용
-                        </button>
-                      )}
-                      {aiResult.mode === "research" && aiResult.target === "selection" && !aiResult.replay && (
-                        <button
-                          className="apply"
-                          onClick={() => applyAI("replace")}
-                        >
-                          <Check /> 선택 영역 교체
-                        </button>
-                      )}
-                      <button onClick={() => applyAI("insert")}>
-                        <FilePenLine /> 노트에 삽입
-                      </button>
-                      <button onClick={() => setAiResult(null)}>
-                        <X /> 취소
-                      </button>
-                    </div>
+                    {aiResult.replay && (
+                      <p className="ai-review-readonly">이전 결과는 읽기 전용입니다.</p>
+                    )}
                   </>
                 )}
               </div>

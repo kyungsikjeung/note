@@ -10,7 +10,9 @@
   --teal-soft: #dcefeb;
   --coral: #e57b58;
   --mono: "DM Mono", "D2Coding", "Noto Sans Mono CJK KR", "Malgun Gothic", monospace;
-  --body: "Manrope", "Noto Sans KR", sans-serif;
+  --body: "Pretendard Variable", Pretendard, "SUIT Variable", SUIT,
+    "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", system-ui,
+    sans-serif;
 }
 * {
   box-sizing: border-box;
@@ -25,6 +27,8 @@ body,
 }
 body {
   font-family: var(--body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
   color: var(--ink);
   background: var(--canvas);
   font-size: 13px;
@@ -567,6 +571,149 @@ button {
 }
 .toast button {
   color: #8da09f;
+}
+.toast .toast-undo {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid #3b5957;
+  border-radius: 6px;
+  color: #d7e5e3;
+  font-size: 9px;
+}
+.toast .toast-undo svg {
+  width: 12px;
+}
+.toast .toast-close {
+  width: 24px;
+  display: grid;
+  place-items: center;
+}
+.mcp-review-backdrop {
+  position: fixed;
+  z-index: 120;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #13232666;
+  backdrop-filter: blur(3px);
+}
+.mcp-review-dialog {
+  width: min(820px, 94vw);
+  max-height: min(820px, 90vh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #cad7d6;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 22px 70px #1023253d;
+}
+.mcp-review-dialog>header {
+  padding: 14px 16px;
+  border-bottom: 1px solid #e1e8e7;
+  background: #f5f9f8;
+}
+.mcp-review-dialog>header span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.mcp-review-dialog>header svg {
+  width: 17px;
+  color: #147d72;
+}
+.mcp-review-dialog>header b {
+  font-size: 13px;
+}
+.mcp-review-dialog>header small {
+  display: block;
+  margin-top: 4px;
+  color: #708082;
+  font-size: 9px;
+}
+.mcp-review-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #e6eceb;
+}
+.mcp-review-meta span {
+  padding: 5px 7px;
+  border-radius: 5px;
+  background: #edf3f2;
+  color: #4f6062;
+  font: 9px var(--mono);
+}
+.mcp-review-meta b {
+  margin-right: 4px;
+  color: #172426;
+}
+.mcp-review-diagram {
+  min-height: 220px;
+  max-height: 420px;
+  overflow: auto;
+  border-bottom: 1px solid #e5ebea;
+}
+.mcp-review-diagram .split-preview {
+  min-height: 220px;
+  padding: 18px;
+  background: #fbfdfc;
+}
+.mcp-review-dialog details {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 16px 14px;
+}
+.mcp-review-dialog summary {
+  cursor: pointer;
+  color: #526264;
+  font-size: 10px;
+}
+.mcp-review-dialog pre {
+  max-height: 180px;
+  margin: 8px 0 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 7px;
+  background: #172426;
+  color: #e7efee;
+  white-space: pre-wrap;
+  font: 9px/1.55 var(--mono);
+}
+.mcp-review-dialog>footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  padding: 10px 16px;
+  border-top: 1px solid #e2e9e8;
+  background: #f8faf9;
+}
+.mcp-review-dialog>footer button {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 11px;
+  border: 1px solid #d4dedd;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 10px;
+}
+.mcp-review-dialog>footer button.primary {
+  border-color: #147d72;
+  background: #147d72;
+  color: #fff;
+}
+.mcp-review-dialog>footer button:disabled {
+  opacity: .55;
+}
+.mcp-review-dialog>footer svg {
+  width: 13px;
 }
 .empty {
   height: 100%;

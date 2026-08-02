@@ -8,12 +8,14 @@ const { gfm } = require("turndown-plugin-gfm");
 const initSqlJs = require("sql.js");
 const { Document, Packer, Paragraph, HeadingLevel, Table: DocxTable, TableRow: DocxRow, TableCell: DocxCell } = require("docx");
 const { CodexAppServerClient } = require("./codex-app-server-client.cjs");
+const { createSerializedFileWriter, writeFileAtomic } = require("./atomic-write.cjs");
 
 const isDev = !app.isPackaged;
 const isMcpMode = process.argv.includes("--ksnote-mcp");
 const MCP_OPERATION_TTL_MS = 5 * 60 * 1000;
 let noteDb;
 let noteDbPath;
+const writeDatabaseSnapshot = createSerializedFileWriter();
 const aiProcesses = new Map();
 let codexAppServer;
 
@@ -33,6 +35,23 @@ function getMcpOperationDirectory() {
 
 function getMcpServerScriptPath() {
   return path.join(__dirname, "..", "mcp", "ksnote-server.mjs");
+}
+
+function getBundledPlantUmlJarPath() {
+  return isDev
+    ? path.join(__dirname, "..", "build-resources", "plantuml", "plantuml.jar")
+    : path.join(process.resourcesPath, "plantuml", "plantuml.jar");
+}
+
+async function resolvePlantUmlJarPath(requestedPath) {
+  const candidates = [String(requestedPath || "").trim(), getBundledPlantUmlJarPath()].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {}
+  }
+  throw new Error("PlantUML JAR 파일을 찾을 수 없습니다.");
 }
 
 function tomlString(value) {
@@ -91,9 +110,7 @@ async function ensureMcpDirectories() {
 }
 
 async function writeJsonAtomic(filePath, value) {
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tempPath, JSON.stringify(value, null, 2), "utf8");
-  await fs.rename(tempPath, filePath);
+  await writeFileAtomic(filePath, JSON.stringify(value, null, 2), "utf8");
 }
 
 async function readMcpOperation(id) {
@@ -195,7 +212,8 @@ async function initializeStorage() {
 
 async function flushDatabase() {
   if (!noteDb || !noteDbPath) return;
-  await fs.writeFile(noteDbPath, Buffer.from(noteDb.export()));
+  const snapshot = Buffer.from(noteDb.export());
+  await writeDatabaseSnapshot(noteDbPath, snapshot);
 }
 
 ipcMain.handle("storage-load", async () => {
@@ -304,7 +322,7 @@ ipcMain.handle("mcp-operation-list", async (_, { noteId } = {}) => {
       const filePath = path.join(getMcpOperationDirectory(), entry);
       const operation = JSON.parse(await fs.readFile(filePath, "utf8"));
       if (
-        operation.status === "pending" &&
+        ["pending", "approved"].includes(operation.status) &&
         now - (operation.createdAt || now) > MCP_OPERATION_TTL_MS
       ) {
         const expired = {
@@ -318,8 +336,8 @@ ipcMain.handle("mcp-operation-list", async (_, { noteId } = {}) => {
         await writeJsonAtomic(filePath, expired);
         continue;
       }
-      if (operation.status !== "pending") continue;
-      if (noteId && operation.noteId && operation.noteId !== noteId) continue;
+      if (!["pending", "approved"].includes(operation.status)) continue;
+      if (noteId && (!operation.noteId || operation.noteId !== noteId)) continue;
       operations.push(operation);
     } catch {}
   }
@@ -330,7 +348,7 @@ ipcMain.handle("mcp-operation-claim", async (_, { id, noteId } = {}) => {
   const found = await readMcpOperation(id);
   if (!found) return null;
   const operation = found.operation;
-  if (operation.status !== "pending") return operation;
+  if (operation.status !== "approved") return operation;
   if (noteId && operation.noteId && operation.noteId !== noteId) return operation;
   if (Date.now() - (operation.createdAt || Date.now()) > MCP_OPERATION_TTL_MS)
     return updateMcpOperation(id, {
@@ -350,9 +368,48 @@ ipcMain.handle("mcp-operation-complete", async (_, result = {}) => {
   await ensureMcpDirectories();
   const id = String(result.id || "").replace(/[^a-zA-Z0-9_.-]/g, "");
   if (!id) throw new Error("MCP operation id가 없습니다.");
+  const { code: resultCode, ...resultWithoutCode } = result;
+  const operationResult = result.status === "error" && resultCode
+    ? { ...resultWithoutCode, errorCode: resultCode }
+    : result;
   return updateMcpOperation(id, {
-    ...result,
+    ...operationResult,
     status: result.status || "completed",
+    completedAt: Date.now(),
+  });
+});
+
+ipcMain.handle("mcp-operation-approve", async (_, { id, noteId } = {}) => {
+  const found = await readMcpOperation(id);
+  if (!found) return null;
+  const operation = found.operation;
+  if (operation.status !== "pending") return operation;
+  if (noteId && operation.noteId && operation.noteId !== noteId) return operation;
+  if (Date.now() - (operation.createdAt || Date.now()) > MCP_OPERATION_TTL_MS)
+    return updateMcpOperation(id, {
+      status: "expired",
+      code: "operation_expired",
+      message: "승인 전에 MCP 작업의 유효 시간이 만료되었습니다.",
+      completedAt: Date.now(),
+    });
+  return updateMcpOperation(id, {
+    status: "approved",
+    approvedAt: Date.now(),
+    approvedBy: "local-user",
+  });
+});
+
+ipcMain.handle("mcp-operation-reject", async (_, { id, noteId } = {}) => {
+  const found = await readMcpOperation(id);
+  if (!found) return null;
+  const operation = found.operation;
+  if (operation.status !== "pending") return operation;
+  if (noteId && operation.noteId && operation.noteId !== noteId) return operation;
+  return updateMcpOperation(id, {
+    status: "error",
+    errorCode: "user_rejected",
+    message: "사용자가 KsNote에서 변경 적용을 거절했습니다.",
+    rejectedAt: Date.now(),
     completedAt: Date.now(),
   });
 });
@@ -773,18 +830,47 @@ ipcMain.handle("rovo-diagnose", async (_, request) => {
   };
 });
 
-ipcMain.handle("plantuml-render", async (_, { code, jarPath }) => {
-  if (!jarPath) throw new Error("설정 > 편집기에서 PlantUML JAR 경로를 지정하세요.");
-  try { await fs.access(jarPath); } catch { throw new Error("PlantUML JAR 파일을 찾을 수 없습니다."); }
+ipcMain.handle("plantuml-info", async (_, { jarPath } = {}) => {
+  try {
+    const resolvedJarPath = await resolvePlantUmlJarPath(jarPath);
+    const java = await captureCommand("java", ["-version"], 5000);
+    return {
+      available: java.ok,
+      jarPath: resolvedJarPath,
+      bundled: resolvedJarPath === getBundledPlantUmlJarPath(),
+      java: java.output || java.error || "",
+      message: java.ok ? "PlantUML 로컬 SVG 렌더러를 사용할 수 있습니다." : "Java 실행 환경을 찾을 수 없습니다.",
+    };
+  } catch (error) {
+    return {
+      available: false,
+      jarPath: "",
+      bundled: false,
+      java: "",
+      message: error.message || "PlantUML 런타임을 확인할 수 없습니다.",
+    };
+  }
+});
+
+ipcMain.handle("plantuml-render", async (_, { code, jarPath } = {}) => {
+  const resolvedJarPath = await resolvePlantUmlJarPath(jarPath);
   return new Promise((resolve, reject) => {
-    const child = spawn("java", ["-jar", jarPath, "-pipe", "-tsvg"], { windowsHide: true });
+    const child = spawn("java", ["-jar", resolvedJarPath, "-pipe", "-tsvg", "-failfast2"], { windowsHide: true });
     const chunks = []; let error = "";
     const timer = setTimeout(() => { child.kill(); reject(new Error("PlantUML 렌더링 시간이 초과되었습니다.")); }, 20000);
     child.stdout.on("data", (chunk) => chunks.push(chunk));
     child.stderr.on("data", (chunk) => { error += chunk.toString(); });
     child.on("error", (err) => { clearTimeout(timer); reject(err); });
-    child.on("close", (exitCode) => { clearTimeout(timer); exitCode === 0 ? resolve(Buffer.concat(chunks).toString("utf8")) : reject(new Error(error || `PlantUML 종료 코드 ${exitCode}`)); });
-    child.stdin.end(code);
+    child.on("close", (exitCode) => {
+      clearTimeout(timer);
+      const svg = Buffer.concat(chunks).toString("utf8");
+      if (exitCode !== 0 || !/<svg\b/i.test(svg) || /Syntax Error/i.test(svg)) {
+        reject(new Error(error.trim() || `PlantUML 렌더링 실패 (종료 코드 ${exitCode})`));
+        return;
+      }
+      resolve(svg);
+    });
+    child.stdin.end(String(code || ""));
   });
 });
 
@@ -799,6 +885,10 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
+      // MCP operations can arrive while the note window is covered or minimized.
+      // Keep renderer polling/heartbeats alive so the server does not mistake
+      // background throttling for a closed application.
+      backgroundThrottling: false,
     },
   });
   if (isDev) win.loadURL("http://127.0.0.1:5173");
