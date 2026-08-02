@@ -1,0 +1,116 @@
+.toc-block {
+  margin: 18px 0;
+  padding: 12px 12px 10px;
+  border: 1px solid #dce5e4;
+  border-radius: 9px;
+  background: #f8faf9;
+  color: #283739;
+}
+.toc-block.selected {
+  border-color: #4aa99b;
+  box-shadow: 0 0 0 2px #16917f1f;
+}
+.toc-block > header {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 4px 7px;
+  border-bottom: 1px solid #e4eae9;
+}
+.toc-block > header svg {
+  width: 14px;
+  color: #168579;
+}
+.toc-block > header b {
+  font-size: 11px;
+  font-weight: 700;
+}
+.toc-block > header small {
+  margin-left: auto;
+  color: #829092;
+  font-size: 9px;
+}
+.toc-block nav {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 7px 0 1px;
+}
+.toc-block nav::before {
+  content: "";
+  position: absolute;
+  top: 9px;
+  bottom: 3px;
+  left: 9px;
+  width: 1px;
+  background: #d5dfdd;
+}
+.toc-block nav button {
+  position: relative;
+  width: 100%;
+  min-height: 29px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 5px;
+  color: #526164;
+  text-align: left;
+  font-size: 11px;
+}
+.toc-block nav button:hover,
+.toc-block nav button:focus-visible {
+  background: #e9f1ef;
+  color: #172729;
+}
+.toc-block nav button:focus-visible {
+  outline: 2px solid #168579;
+  outline-offset: -2px;
+}
+.toc-block nav button i {
+  position: relative;
+  z-index: 1;
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  border-radius: 50%;
+  background: #9caaa8;
+  box-shadow: 0 0 0 3px #f8faf9;
+}
+.toc-block nav button:hover i {
+  background: #168579;
+  box-shadow: 0 0 0 3px #e9f1ef;
+}
+.toc-block nav button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.toc-block .toc-level-1 {
+  padding: 0 8px 0 7px;
+  color: #263638;
+  font-weight: 650;
+}
+.toc-block .toc-level-2 {
+  padding: 0 8px 0 25px;
+}
+.toc-block .toc-level-3 {
+  padding: 0 8px 0 43px;
+  color: #6d797b;
+  font-size: 10px;
+}
+.toc-block > p {
+  margin: 0;
+  padding: 15px 8px 10px;
+  color: #778587;
+  text-align: center;
+  font-size: 10px;
+}
+.toc-block > p code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #e8efee;
+  color: #176f65;
+  font: 9px var(--mono);
+}

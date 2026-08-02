@@ -10,9 +10,40 @@
     "dev:electron": "wait-on http://127.0.0.1:5173 && nodemon --watch electron --ext cjs --signal SIGTERM --exec \"electron .\"",
     "build": "vite build",
     "preview": "vite preview",
-    "desktop": "electron ."
+    "desktop": "electron .",
+    "mcp:ksnote": "node mcp/ksnote-server.mjs",
+    "test:mvp-target": "node --test tests/target-ref.test.mjs",
+    "test:mvp-diagrams": "node --test tests/diagram-validation.test.mjs",
+    "test:mvp": "node --test tests/target-ref.test.mjs tests/diagram-validation.test.mjs tests/drawio-preview.test.mjs tests/write-approval.test.mjs tests/note-html.test.mjs tests/package-config.test.mjs tests/atomic-write.test.mjs",
+    "verify:mcp-diagrams": "node scripts/verify-diagram-e2e.mjs",
+    "package:win": "npm run build && electron-builder --win --dir"
+  },
+  "build": {
+    "appId": "dev.ksnote.orbit42",
+    "productName": "KsNote",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "mcp/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build-resources/plantuml/plantuml.jar",
+        "to": "plantuml/plantuml.jar"
+      }
+    ],
+    "win": {
+      "target": [
+        "dir"
+      ]
+    }
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@tiptap/extension-code-block-lowlight": "^3.27.4",
     "@tiptap/extension-color": "^3.27.4",
     "@tiptap/extension-drag-handle-react": "^3.27.4",
@@ -33,6 +64,7 @@
     "@tiptap/starter-kit": "^3.27.4",
     "@vitejs/plugin-react": "latest",
     "docx": "^9.7.1",
+    "dompurify": "^3.4.12",
     "highlight.js": "latest",
     "lowlight": "^3.3.0",
     "lucide-react": "latest",
@@ -50,6 +82,7 @@
   "devDependencies": {
     "concurrently": "latest",
     "electron": "latest",
+    "electron-builder": "^26.15.3",
     "nodemon": "^3.1.14",
     "wait-on": "latest"
   }

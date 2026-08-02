@@ -1,5 +1,7 @@
 node_modules/
 dist/
 release/
+release*/
+build-resources/codex/
 *.log
 .DS_Store

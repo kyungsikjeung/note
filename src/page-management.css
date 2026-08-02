@@ -55,18 +55,21 @@
   opacity: 0;
 }
 .page-row:hover .page-more,
-.page-row.active .page-more {
+.page-row.active .page-more,
+.page-row.menu-open .page-more {
   opacity: 1;
+}
+.page-row.menu-open .page-more {
+  background: #fff;
+  color: #263638;
 }
 .page-more:hover {
   background: #dce4e4;
 }
 .page-popover {
-  position: absolute;
-  z-index: 55;
-  right: 0;
-  top: 43px;
-  width: 164px;
+  position: fixed;
+  z-index: 120;
+  width: 166px;
   padding: 5px;
   background: #fff;
   border: 1px solid #d9e1e1;
@@ -91,6 +94,9 @@
 }
 .page-popover .danger {
   color: #b84e3a;
+}
+.page-popover .danger:hover {
+  background: #fff0ed;
 }
 .trash-section {
   margin-top: 22px;

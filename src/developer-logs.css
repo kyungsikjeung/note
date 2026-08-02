@@ -1,0 +1,27 @@
+.developer-log-toolbar { display: flex; align-items: center; gap: 6px; margin: 18px 0 8px; }
+.developer-log-toolbar > span { display: flex; flex: 1; flex-direction: column; gap: 2px; }
+.developer-log-toolbar b { font-size: 11px; }
+.developer-log-toolbar small { color: #829092; font-size: 9px; }
+.developer-log-toolbar button { height: 28px; display: flex; align-items: center; gap: 4px; padding: 0 8px; border: 1px solid #dbe3e3; border-radius: 6px; background: #fff; font-size: 9px; }
+.developer-log-toolbar button:disabled { opacity: .4; }
+.developer-log-toolbar svg { width: 12px; }
+.developer-log-list { max-height: 420px; overflow: auto; border: 1px solid #e1e7e7; border-radius: 8px; background: #f9fbfb; }
+.developer-log-empty { padding: 30px 12px; color: #7c898b; text-align: center; font-size: 10px; }
+.developer-log-entry { border-bottom: 1px solid #e4eaea; background: #fff; }
+.developer-log-entry:last-child { border-bottom: 0; }
+.developer-log-entry summary { min-height: 48px; display: flex; align-items: center; gap: 8px; padding: 7px 10px; cursor: pointer; list-style: none; }
+.developer-log-entry summary::-webkit-details-marker { display: none; }
+.developer-log-entry summary > span { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.developer-log-entry summary b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.developer-log-entry summary small { color: #829092; font-size: 8px; }
+.developer-log-entry summary em { padding: 3px 6px; border-radius: 9px; background: #edf2f2; color: #677476; font: 8px var(--mono); }
+.debug-status { width: 7px; height: 7px; border-radius: 50%; background: #d5a93d; }
+.debug-status.responded, .debug-status.applied { background: #16917f; }
+.debug-status.error, .debug-status.cancelled { background: #bd5844; }
+.developer-log-flow { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-top: 1px solid #edf1f1; background: #f6f9f8; }
+.developer-log-flow span { padding: 3px 7px; border-radius: 10px; background: #e7ecec; color: #7b8789; font-size: 8px; }
+.developer-log-flow span.ok { background: #dff0eb; color: #117668; }
+.developer-log-flow i { color: #a2acad; font-size: 9px; }
+.developer-log-entry > label { display: block; padding: 7px 10px; color: #6d7a7c; font-size: 8px; }
+.developer-log-entry code { margin-left: 7px; color: #176f66; }
+.developer-log-entry pre { max-height: 150px; margin: 5px 0 0; padding: 8px; overflow: auto; border-radius: 5px; background: #172426; color: #dce7e5; white-space: pre-wrap; font: 8px/1.5 var(--mono); }

@@ -3,6 +3,11 @@ import { createRoot } from "react-dom/client";
 import { marked } from "marked";
 import mermaid from "mermaid";
 import hljs from "highlight.js";
+import { buildKsNoteTargetRef } from "../mcp/target-ref.mjs";
+import {
+  isApprovedMcpOperation,
+  requiresMcpUserApproval,
+} from "../mcp/write-approval.mjs";
 import {
   Search,
   Plus,
@@ -58,14 +63,19 @@ import {
   Bot,
   Terminal,
   History,
+  CalendarDays,
+  Mail,
+  Zap,
+  Hash,
 } from "lucide-react";
 import "highlight.js/styles/github.css";
 import "./styles.css";
 import "./slash.css";
 import "./settings.css";
 import "./settings-agent.css";
+import "./developer-logs.css";
 import "./table.css";
-import RichDocumentEditor from "./RichDocumentEditor";
+import RichDocumentEditor, { RichPreview } from "./RichDocumentEditor";
 import "./editor-migration.css";
 import "./project-manager.css";
 import "./workspace-menu.css";
@@ -80,6 +90,79 @@ mermaid.initialize({
   securityLevel: "strict",
   fontFamily: "Pretendard, sans-serif",
 });
+
+const AI_MODELS = [
+  { id: "", label: "Codex 기본 모델", provider: "codex" },
+  { id: "sonnet", label: "Claude Sonnet", provider: "claude" },
+  { id: "opus", label: "Claude Opus", provider: "claude" },
+  { id: "haiku", label: "Claude Haiku", provider: "claude" },
+];
+
+const DEFAULT_AI_MODEL = AI_MODELS[0].id;
+const getAiModel = (id) =>
+  AI_MODELS.find((model) => model.id === id) || AI_MODELS[0];
+
+const contentRevision = (value) => {
+  let hash = 2166136261;
+  const input = String(value || "");
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `r${(hash >>> 0).toString(16)}`;
+};
+
+const MANAGED_MCP_SERVERS = [
+  {
+    id: "ksnote",
+    name: "KsNote MCP",
+    description: "Codex가 현재 프로젝트, 페이지와 커서 위치에 다이어그램을 삽입",
+    command: "node",
+    args: "mcp/ksnote-server.mjs",
+    enabled: false,
+    status: "setup",
+    managed: true,
+    icon: "ksnote",
+    category: "local",
+  },
+  {
+    id: "google-calendar",
+    name: "Google Calendar",
+    description: "노트의 일정과 마감일을 캘린더 이벤트로 연결",
+    command: "",
+    enabled: false,
+    status: "setup",
+    managed: true,
+    icon: "calendar",
+  },
+  {
+    id: "gmail",
+    name: "Gmail",
+    description: "노트 내용을 바탕으로 메일 초안과 후속 작업 생성",
+    command: "",
+    enabled: false,
+    status: "setup",
+    managed: true,
+    icon: "mail",
+  },
+  {
+    id: "rovo",
+    name: "Atlassian Rovo",
+    description: "Jira와 Confluence 자료 조사 및 업무 문맥 연결",
+    command: "codex",
+    enabled: false,
+    status: "setup",
+    managed: true,
+    icon: "rovo",
+  },
+];
+
+const mergeManagedMcpServers = (servers = []) => [
+  ...servers,
+  ...MANAGED_MCP_SERVERS.filter(
+    (managed) => !servers.some((server) => server.id === managed.id),
+  ),
+];
 marked.setOptions({
   breaks: true,
   gfm: true,
@@ -139,6 +222,16 @@ const loadData = () => {
 const uid = (prefix) =>
   `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const escapeAttribute = (value) => String(value || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "&#10;");
+const mcpOperationPreviewHtml = (operation) => {
+  if (operation?.type !== "diagram_insert" || !operation.code) return "";
+  const type =
+    operation.format === "plantuml"
+      ? "plantuml"
+      : operation.format === "drawio"
+        ? "drawio"
+        : "mermaid";
+  return `<div data-type="${type}" data-code="${escapeAttribute(operation.code)}"></div>`;
+};
 const markdownToRich = (markdown) => {
   const diagrams = [];
   const prepared = String(markdown || "").replace(/```(mermaid|plantuml)\s*\n([\s\S]*?)```/gi, (_, type, code) => {
@@ -620,7 +713,10 @@ function App() {
   const [search, setSearch] = useState("");
   const [saved, setSaved] = useState(true);
   const [toast, setToast] = useState(null);
+  const [mcpApproval, setMcpApproval] = useState(null);
+  const [mcpApprovalBusy, setMcpApprovalBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [editorTarget, setEditorTarget] = useState(null);
   const [slash, setSlash] = useState(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -630,95 +726,150 @@ function App() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [tasksOverviewOpen, setTasksOverviewOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState("general");
+  const [mcpInfo, setMcpInfo] = useState(null);
+  const [mcpInstallStatus, setMcpInstallStatus] = useState(null);
   const [tableOpen, setTableOpen] = useState(false);
   const tableInsertPos = useRef(null);
   const [projectDialog, setProjectDialog] = useState(null);
   const [projectMenu, setProjectMenu] = useState(null);
   const [noteMenu, setNoteMenu] = useState(null);
+  const [entityMenuPosition, setEntityMenuPosition] = useState(null);
   const [prefs, setPrefs] = useState(() => {
+    const defaults = {
+      theme: "light",
+      fontSize: 14,
+      fontFamily: "sans",
+      spellcheck: false,
+      plantumlJar: "",
+      customSlashCommands: [],
+    };
     try {
-      return (
-        JSON.parse(localStorage.getItem("mori-prefs")) || {
-          theme: "light",
-          fontSize: 14,
-          fontFamily: "mono",
-          spellcheck: false,
-          plantumlJar: "",
-          customSlashCommands: [],
-        }
-      );
+      const saved = JSON.parse(localStorage.getItem("mori-prefs"));
+      if (!saved) return defaults;
+      if (
+        saved.fontFamily === "mono" &&
+        !localStorage.getItem("ksnote-font-default-v2")
+      ) {
+        localStorage.setItem("ksnote-font-default-v2", "sans");
+        return { ...defaults, ...saved, fontFamily: "sans" };
+      }
+      return { ...defaults, ...saved };
     } catch {
-      return {
-        theme: "light",
-        fontSize: 14,
-        fontFamily: "mono",
-        spellcheck: false,
-        plantumlJar: "",
-        customSlashCommands: [],
-      };
+      return defaults;
     }
   });
   const [agents, setAgents] = useState(() => {
+    const defaults = {
+      defaultModel: DEFAULT_AI_MODEL,
+      codex: { enabled: true, command: "codex" },
+      claude: { enabled: false, command: "claude" },
+    };
     try {
-      return (
-        JSON.parse(localStorage.getItem("ksnote-agents")) || {
-          defaultProvider: "codex",
-          codex: { enabled: true, command: "codex" },
-          claude: { enabled: false, command: "claude" },
-        }
-      );
-    } catch {
+      const saved = JSON.parse(localStorage.getItem("ksnote-agents"));
+      if (!saved) return defaults;
       return {
-        defaultProvider: "codex",
-        codex: { enabled: true, command: "codex" },
-        claude: { enabled: false, command: "claude" },
+        ...defaults,
+        ...saved,
+        defaultModel:
+          saved.defaultModel ||
+          (saved.defaultProvider === "claude" ? "sonnet" : DEFAULT_AI_MODEL),
+        codex: { ...defaults.codex, ...saved.codex },
+        claude: { ...defaults.claude, ...saved.claude },
       };
+    } catch {
+      return defaults;
     }
   });
   const [mcpServers, setMcpServers] = useState(() => {
+    const defaults = [
+      {
+        id: "filesystem",
+        name: "Filesystem",
+        command: "npx @modelcontextprotocol/server-filesystem",
+        enabled: true,
+        status: "ready",
+      },
+      {
+        id: "github",
+        name: "GitHub",
+        command: "npx @modelcontextprotocol/server-github",
+        enabled: false,
+        status: "offline",
+      },
+    ];
     try {
-      return (
-        JSON.parse(localStorage.getItem("mori-mcp")) || [
-          {
-            id: "filesystem",
-            name: "Filesystem",
-            command: "npx @modelcontextprotocol/server-filesystem",
-            enabled: true,
-            status: "ready",
-          },
-          {
-            id: "github",
-            name: "GitHub",
-            command: "npx @modelcontextprotocol/server-github",
-            enabled: false,
-            status: "offline",
-          },
-        ]
+      return mergeManagedMcpServers(
+        JSON.parse(localStorage.getItem("mori-mcp")) || defaults,
       );
     } catch {
-      return [];
+      return mergeManagedMcpServers(defaults);
     }
   });
+  const activeAutomationCount = mcpServers.filter(
+    (server) => server.managed && server.category !== "local" && server.enabled,
+  ).length;
   const textarea = useRef(null);
   const undoStack = useRef([]);
   const redoStack = useRef([]);
   const storageReady = useRef(false);
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  const mcpRoutedOperationIds = useRef(new Set());
   const dragItem = useRef(null);
+  const [dragOverProjectId, setDragOverProjectId] = useState(null);
   const [revisions, setRevisions] = useState([]);
   const [diagnostics, setDiagnostics] = useState({});
+  const [availableAiModels, setAvailableAiModels] = useState(AI_MODELS);
+  const [aiDebugLogs, setAiDebugLogs] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("ksnote-ai-debug-logs")) || []; }
+    catch { return []; }
+  });
+  const [editorDebugLogs, setEditorDebugLogs] = useState(() => {
+    try {
+      return (JSON.parse(localStorage.getItem("ksnote-editor-debug-logs")) || [])
+        .slice(0, 30)
+        .map(({ document, ...log }) => log);
+    }
+    catch { return []; }
+  });
   const activeNotes = data.notes.filter((n) => !n.trashed);
   const note =
     activeNotes.find((n) => n.id === noteId) ||
     activeNotes.find((n) => n.projectId === projectId) ||
     activeNotes[0];
-  const notes = data.notes
-    .filter(
-      (n) =>
-        !n.trashed &&
-        n.projectId === projectId &&
-        n.title.toLowerCase().includes(search.toLowerCase()),
-    )
+  const projectNotes = data.notes
+    .filter((n) => !n.trashed && n.projectId === projectId)
     .sort((a, b) => (a.order ?? -a.updatedAt) - (b.order ?? -b.updatedAt));
+  const notes = (() => {
+    if (search.trim())
+      return projectNotes
+        .filter((n) => n.title.toLowerCase().includes(search.toLowerCase()))
+        .map((n) => ({ ...n, depth: 0 }));
+    const noteByParent = new Map();
+    projectNotes.forEach((item) => {
+      const parentId = projectNotes.some((parent) => parent.id === item.parentId)
+        ? item.parentId
+        : null;
+      const children = noteByParent.get(parentId) || [];
+      children.push(item);
+      noteByParent.set(parentId, children);
+    });
+    const flattened = [];
+    const visited = new Set();
+    const appendBranch = (parentId, depth) => {
+      (noteByParent.get(parentId) || []).forEach((item) => {
+        if (visited.has(item.id)) return;
+        visited.add(item.id);
+        flattened.push({ ...item, depth });
+        appendBranch(item.id, depth + 1);
+      });
+    };
+    appendBranch(null, 0);
+    projectNotes.forEach((item) => {
+      if (!visited.has(item.id)) flattened.push({ ...item, depth: 0 });
+    });
+    return flattened;
+  })();
   const projectTasks = useMemo(() => data.notes.filter((item) => !item.trashed && item.projectId === projectId).flatMap((item) => {
     const documentNode = new DOMParser().parseFromString(item.content || "", "text/html");
     return Array.from(documentNode.querySelectorAll('li[data-type="taskItem"], li[data-checked]')).map((task, index) => ({
@@ -752,17 +903,257 @@ function App() {
     return () => clearTimeout(t);
   }, [data]);
   useEffect(() => {
+    if (!window.ksnoteMcp?.pending || !note?.id) return undefined;
+    let stopped = false;
+    const routePendingOperation = async () => {
+      const operations = await window.ksnoteMcp.pending({}).catch(() => []);
+      if (stopped) return;
+      const approvalOperation = operations.find(requiresMcpUserApproval);
+      if (approvalOperation) {
+        if (mcpApproval?.id !== approvalOperation.id)
+          setMcpApproval(approvalOperation);
+        return;
+      }
+      if (mcpApproval) setMcpApproval(null);
+      const createOperation = operations.find(
+        (item) =>
+          item?.id &&
+          item.type === "note_create" &&
+          isApprovedMcpOperation(item) &&
+          !mcpRoutedOperationIds.current.has(item.id),
+      );
+      if (createOperation) {
+        mcpRoutedOperationIds.current.add(createOperation.id);
+        const claimed = await window.ksnoteMcp.claim({ id: createOperation.id });
+        if (claimed?.status !== "applying") return;
+        const project = data.projects.find(
+          (item) => item.id === claimed.projectId,
+        );
+        if (!project) {
+          await window.ksnoteMcp.complete({
+            id: claimed.id,
+            status: "error",
+            code: "project_not_found",
+            message: "대상 프로젝트를 찾을 수 없습니다.",
+          });
+          return;
+        }
+        const createdAt = Date.now();
+        const createdNote = {
+          id: uid("n"),
+          projectId: project.id,
+          parentId: null,
+          title: claimed.title || "제목 없는 노트",
+          content:
+            claimed.content ||
+            `<h1>${escapeAttribute(claimed.title || "제목 없는 노트")}</h1><p></p>`,
+          updatedAt: createdAt,
+        };
+        const nextData = { ...data, notes: [createdNote, ...data.notes] };
+        await window.ksnoteStorage?.save?.(nextData);
+        setData(nextData);
+        setProjectId(project.id);
+        setNoteId(createdNote.id);
+        if (mode === "preview") setMode("edit");
+        await window.ksnoteMcp.complete({
+          id: claimed.id,
+          status: "completed",
+          noteId: createdNote.id,
+          projectId: project.id,
+          revision: contentRevision(createdNote.content),
+        });
+        showToast(`'${createdNote.title}' 페이지를 MCP로 생성했습니다.`, "diagram");
+        return;
+      }
+      const operation = operations.find(
+        (item) =>
+          item?.id &&
+          isApprovedMcpOperation(item) &&
+          item.noteId &&
+          item.noteId !== note.id &&
+          !mcpRoutedOperationIds.current.has(item.id),
+      );
+      if (!operation) return;
+      const targetNote = data.notes.find(
+        (item) => item.id === operation.noteId && !item.trashed,
+      );
+      if (!targetNote) {
+        const claimed = await window.ksnoteMcp.claim({
+          id: operation.id,
+          noteId: operation.noteId,
+        });
+        if (claimed?.status === "applying") {
+          await window.ksnoteMcp.complete({
+            id: operation.id,
+            status: "error",
+            code: "note_not_found",
+            message: "대상 페이지가 삭제되었거나 휴지통에 있습니다.",
+          });
+        }
+        return;
+      }
+      mcpRoutedOperationIds.current.add(operation.id);
+      setProjectId(targetNote.projectId);
+      setNoteId(targetNote.id);
+      if (mode === "preview") setMode("edit");
+      showToast(`Codex 다이어그램을 '${targetNote.title}' 페이지에 적용합니다.`, "diagram");
+    };
+    routePendingOperation();
+    const timer = window.setInterval(routePendingOperation, 1000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [data.notes, note?.id, mode, mcpApproval?.id]);
+  useEffect(() => {
     if (settingsOpen && settingsTab === "data" && note?.id) window.ksnoteStorage?.revisions(note.id).then(setRevisions).catch(() => setRevisions([]));
   }, [settingsOpen, settingsTab, note?.id, data]);
   useEffect(() => {
     localStorage.setItem("mori-prefs", JSON.stringify(prefs));
   }, [prefs]);
   useEffect(() => {
+    const updateLogs = (event) => setAiDebugLogs(event.detail || []);
+    window.addEventListener("ksnote-ai-debug-log", updateLogs);
+    return () => window.removeEventListener("ksnote-ai-debug-log", updateLogs);
+  }, []);
+  useEffect(() => {
+    const updateLogs = (event) => setEditorDebugLogs(event.detail || []);
+    window.addEventListener("ksnote-editor-debug-log", updateLogs);
+    return () => window.removeEventListener("ksnote-editor-debug-log", updateLogs);
+  }, []);
+  useEffect(() => {
+    localStorage.setItem("ksnote-editor-debug-logs", JSON.stringify(editorDebugLogs));
+  }, [editorDebugLogs]);
+  useEffect(() => {
     localStorage.setItem("ksnote-agents", JSON.stringify(agents));
   }, [agents]);
   useEffect(() => {
+    let live = true;
+    const refreshCodex = async () => {
+      try {
+        const [result, accountResult] = await Promise.all([
+          window.ksnoteAI?.models?.({ command: agents.codex.command }),
+          window.ksnoteAI?.account?.({ command: agents.codex.command }),
+        ]);
+        if (live) {
+          const account = accountResult?.account;
+          setDiagnostics((current) => ({
+            ...current,
+            "agent-codex": {
+              ...current["agent-codex"],
+              installed: true,
+              authenticated: Boolean(account),
+              ok: Boolean(account),
+              loading: false,
+              account,
+              message: account?.type === "chatgpt"
+                ? `${account.email || "ChatGPT 계정"} · ${account.planType || "구독"}`
+                : account?.type === "apiKey"
+                  ? "API 키로 로그인됨"
+                  : "ChatGPT 구독 로그인이 필요합니다.",
+            },
+          }));
+        }
+        if (!live || !result?.data?.length) return;
+        const codexModels = result.data.map((model) => ({
+          id: model.model || model.id,
+          label: model.displayName || model.model || model.id,
+          provider: "codex",
+          isDefault: Boolean(model.isDefault),
+          defaultReasoningEffort: model.defaultReasoningEffort,
+          supportedReasoningEfforts: model.supportedReasoningEfforts || [],
+        }));
+        const claudeModels = AI_MODELS.filter(
+          (model) => model.provider === "claude",
+        );
+        setAvailableAiModels([...codexModels, ...claudeModels]);
+        setAgents((current) => {
+          const selectedExists = codexModels.some(
+            (model) => model.id === current.defaultModel,
+          );
+          if (
+            selectedExists ||
+            claudeModels.some((model) => model.id === current.defaultModel)
+          ) return current;
+          return {
+            ...current,
+            defaultModel:
+              codexModels.find((model) => model.isDefault)?.id ||
+              codexModels[0].id,
+          };
+        });
+      } catch {
+        // 설정 화면의 연결 진단에서 구체적인 오류와 로그인 방법을 표시한다.
+      }
+    };
+    refreshCodex();
+    const removeAccountListener = window.ksnoteAI?.onAccount?.(refreshCodex);
+    return () => {
+      live = false;
+      removeAccountListener?.();
+    };
+  }, [agents.codex.command]);
+  useEffect(() => {
     localStorage.setItem("mori-mcp", JSON.stringify(mcpServers));
   }, [mcpServers]);
+  useEffect(() => {
+    if (!settingsOpen || settingsTab !== "mcp") return;
+    window.ksnoteMcp?.info?.().then(setMcpInfo).catch(() => setMcpInfo(null));
+  }, [settingsOpen, settingsTab]);
+  useEffect(() => {
+    if (!settingsOpen || settingsTab !== "agent") return;
+    ["codex", "claude"].forEach(async (provider) => {
+      const key = `agent-${provider}`;
+      setDiagnostics((current) => ({
+        ...current,
+        [key]: { loading: true, message: "설치 및 로그인 확인 중…" },
+      }));
+      try {
+        const result = await window.ksnoteAI?.diagnose?.({
+          provider,
+          command: agents[provider].command,
+        });
+        setDiagnostics((current) => ({
+          ...current,
+          [key]: {
+            ...result,
+            ok: Boolean(result?.installed) && result?.authenticated !== false,
+            loading: false,
+          },
+        }));
+      } catch (error) {
+        setDiagnostics((current) => ({
+          ...current,
+          [key]: { ok: false, loading: false, message: error.message },
+        }));
+      }
+    });
+  }, [settingsOpen, settingsTab]);
+  useEffect(() => {
+    if (!settingsOpen || !["automation", "mcp"].includes(settingsTab)) return;
+    const diagnoseRovo = async () => {
+      const key = "mcp-rovo";
+      setDiagnostics((current) => ({
+        ...current,
+        [key]: { loading: true, message: "Rovo 연결 확인 중…" },
+      }));
+      try {
+        const result = await window.ksnoteAI?.diagnoseRovo?.({
+          command: agents.codex.command,
+        });
+        setDiagnostics((current) => ({
+          ...current,
+          [key]: { ...result, loading: false },
+        }));
+      } catch (error) {
+        setDiagnostics((current) => ({
+          ...current,
+          [key]: { ok: false, loading: false, message: error.message },
+        }));
+      }
+    };
+    diagnoseRovo();
+  }, [settingsOpen, settingsTab]);
   useEffect(() => {
     if (!accountMenuOpen) return;
     const close = (event) => {
@@ -779,6 +1170,48 @@ function App() {
       document.removeEventListener("keydown", escape);
     };
   }, [accountMenuOpen]);
+  useEffect(() => {
+    if (!projectMenu && !noteMenu) return;
+    const close = (event) => {
+      if (event.target.closest?.(".entity-more, .entity-popover")) return;
+      setProjectMenu(null);
+      setNoteMenu(null);
+      setEntityMenuPosition(null);
+    };
+    const escape = (event) => {
+      if (event.key !== "Escape") return;
+      setProjectMenu(null);
+      setNoteMenu(null);
+      setEntityMenuPosition(null);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", escape);
+    document.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", escape);
+      document.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [projectMenu, noteMenu]);
+  const toggleEntityMenu = (type, id, event) => {
+    event.stopPropagation();
+    const isOpen = type === "project" ? projectMenu === id : noteMenu === id;
+    if (isOpen) {
+      setProjectMenu(null);
+      setNoteMenu(null);
+      setEntityMenuPosition(null);
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    setEntityMenuPosition({
+      top: Math.min(rect.bottom + 4, window.innerHeight - 116),
+      left: Math.max(8, Math.min(rect.right - 166, window.innerWidth - 174)),
+    });
+    setProjectMenu(type === "project" ? id : null);
+    setNoteMenu(type === "note" ? id : null);
+  };
   const openSettings = (tab) => {
     setSettingsTab(tab);
     setSettingsOpen(true);
@@ -802,6 +1235,28 @@ function App() {
         return { ...n, ...patch, updatedAt: Date.now() };
       }),
     }));
+  const persistNoteContent = async (targetNoteId, content) => {
+    const current = dataRef.current;
+    const target = current.notes.find((item) => item.id === targetNoteId);
+    if (!target) throw new Error("저장할 페이지를 찾을 수 없습니다.");
+    const next = {
+      ...current,
+      notes: current.notes.map((item) =>
+        item.id === targetNoteId
+          ? { ...item, content, updatedAt: Date.now() }
+          : item,
+      ),
+    };
+    dataRef.current = next;
+    setData(next);
+    setSaved(false);
+    localStorage.setItem("mori-data", JSON.stringify(next));
+    if (!storageReady.current || !window.ksnoteStorage?.save)
+      throw new Error("SQLite 저장소가 아직 준비되지 않았습니다.");
+    await window.ksnoteStorage.save(next);
+    setSaved(true);
+    return contentRevision(content);
+  };
   const addNote = (targetProjectId = projectId, parentId = null) => {
     if (!targetProjectId) return;
     const n = {
@@ -934,6 +1389,42 @@ function App() {
     const orderById = new Map(ordered.map((item, index) => [item.id, index]));
     setData((current) => ({ ...current, notes: current.notes.map((item) => orderById.has(item.id) ? { ...item, order: orderById.get(item.id) } : item) }));
   };
+  const moveNoteToProject = (sourceId, targetProjectId) => {
+    if (!sourceId || !targetProjectId) return;
+    const source = data.notes.find((item) => item.id === sourceId);
+    if (!source || source.projectId === targetProjectId) return;
+    const movedIds = new Set([sourceId]);
+    let foundChild = true;
+    while (foundChild) {
+      foundChild = false;
+      data.notes.forEach((item) => {
+        if (item.parentId && movedIds.has(item.parentId) && !movedIds.has(item.id)) {
+          movedIds.add(item.id);
+          foundChild = true;
+        }
+      });
+    }
+    const targetOrder = data.notes
+      .filter((item) => item.projectId === targetProjectId && !item.trashed)
+      .reduce((maximum, item) => Math.max(maximum, item.order ?? -1), -1) + 1;
+    const movedAt = Date.now();
+    setData((current) => ({
+      ...current,
+      notes: current.notes.map((item) => {
+        if (!movedIds.has(item.id)) return item;
+        return {
+          ...item,
+          projectId: targetProjectId,
+          parentId: item.id === sourceId ? null : item.parentId,
+          order: item.id === sourceId ? targetOrder : item.order,
+          updatedAt: movedAt,
+        };
+      }),
+    }));
+    setProjectId(targetProjectId);
+    setNoteId(sourceId);
+    showToast(`페이지를 ${data.projects.find((item) => item.id === targetProjectId)?.name || "프로젝트"}로 이동했습니다`, "note");
+  };
   const doUndo = () => {
     if (!undoStack.current.length) return;
     const prev = undoStack.current.pop();
@@ -946,9 +1437,135 @@ function App() {
     undoStack.current.push(note.content);
     updateNote({ content: next }, false);
   };
-  const showToast = (message, icon) => {
-    setToast({ message, icon });
+  const showToast = (message, icon, options = {}) => {
+    setToast({ message, icon, ...options });
     setTimeout(() => setToast(null), 2600);
+  };
+  const approveMcpReview = async () => {
+    if (!mcpApproval || mcpApprovalBusy) return;
+    setMcpApprovalBusy(true);
+    try {
+      const approved = await window.ksnoteMcp?.approve?.({
+        id: mcpApproval.id,
+        noteId: mcpApproval.noteId,
+      });
+      if (approved?.status !== "approved")
+        throw new Error(
+          approved?.message || "MCP 작업을 승인 상태로 전환하지 못했습니다.",
+        );
+      setMcpApproval(null);
+      showToast("MCP 변경을 승인했습니다. 정확한 대상에 적용합니다.", "diagram");
+    } catch (error) {
+      showToast(error.message || "MCP 변경 승인에 실패했습니다.", "warning");
+    } finally {
+      setMcpApprovalBusy(false);
+    }
+  };
+  const rejectMcpReview = async () => {
+    if (!mcpApproval || mcpApprovalBusy) return;
+    setMcpApprovalBusy(true);
+    try {
+      await window.ksnoteMcp?.reject?.({
+        id: mcpApproval.id,
+        noteId: mcpApproval.noteId,
+      });
+      setMcpApproval(null);
+      showToast("MCP 변경을 적용하지 않았습니다.", "warning");
+    } catch (error) {
+      showToast(error.message || "MCP 변경 거절 처리에 실패했습니다.", "warning");
+    } finally {
+      setMcpApprovalBusy(false);
+    }
+  };
+  const pageRefFor = (targetNote = note) =>
+    buildKsNoteTargetRef({ pageId: targetNote.id });
+  const selectionRefFor = (target = editorTarget, targetNote = note) => {
+    const from = Number.isFinite(target?.from) ? target.from : 0;
+    const to = Number.isFinite(target?.to) ? target.to : from;
+    return buildKsNoteTargetRef({
+      pageId: targetNote.id,
+      blockId: target?.blockId,
+      offset: target?.offset,
+      toBlockId: target?.toBlockId,
+      toOffset: target?.toOffset,
+      from,
+      to,
+      revision: contentRevision(targetNote.content),
+      operation: from === to ? "insert" : "replace-selection",
+    });
+  };
+  const handleEditorTargetChange = (target) => {
+    setEditorTarget(target);
+    if (!note?.id || target?.noteId !== note.id) return;
+    const from = Number.isFinite(target.from) ? target.from : 0;
+    const to = Number.isFinite(target.to) ? target.to : from;
+    const enriched = {
+      ...target,
+      from,
+      to,
+      pageId: note.id,
+      noteId: note.id,
+      pageTitle: note.title,
+      projectId: note.projectId,
+      projectName: data.projects.find((project) => project.id === note.projectId)?.name || note.projectId,
+      targetRef: buildKsNoteTargetRef({
+        pageId: note.id,
+        blockId: target.blockId,
+        offset: target.offset,
+        toBlockId: target.toBlockId,
+        toOffset: target.toOffset,
+        from,
+        to,
+        revision: contentRevision(note.content),
+        operation: from === to ? "insert" : "replace-selection",
+      }),
+      operation: from === to ? "insert" : "replace-selection",
+      revision: contentRevision(note.content),
+    };
+    window.ksnoteMcp?.saveTarget?.(enriched).catch(() => {});
+  };
+  const copyText = async (value, message = "복사했습니다") => {
+    await navigator.clipboard.writeText(value);
+    showToast(message, "code");
+  };
+  const copyPageReference = (targetNote = note) =>
+    copyText(pageRefFor(targetNote), "페이지 ID를 복사했습니다");
+  const copyCodexTarget = (targetNote = note, target = editorTarget) => {
+    const ref = targetNote.id === note.id ? selectionRefFor(target, targetNote) : pageRefFor(targetNote);
+    const mode = targetNote.id === note.id
+      ? target?.from !== target?.to
+        ? "replace-selection"
+        : "insert"
+      : "append";
+    return copyText(
+      [
+        `KsNote target: ${ref}`,
+        `Project: ${data.projects.find((p) => p.id === targetNote.projectId)?.name || targetNote.projectId}`,
+        `Page: ${targetNote.title}`,
+        `Operation: ${mode}`,
+        "Use KsNote MCP to insert the generated content into this target.",
+      ].join("\n"),
+      "Codex 타깃을 복사했습니다",
+    );
+  };
+  const registerKsNoteMcpForCodex = async () => {
+    setMcpInstallStatus({ loading: true, message: "Codex MCP 등록 중..." });
+    try {
+      const result = await window.ksnoteMcp?.registerCodex?.({
+        command: agents.codex.command || "codex",
+      });
+      setMcpInstallStatus({
+        ok: Boolean(result?.ok),
+        message: result?.message || "성공했습니다. 새 Codex 세션에서 KsNote MCP를 사용할 수 있습니다.",
+        detail: result?.detail || "",
+      });
+      window.ksnoteMcp?.info?.().then(setMcpInfo).catch(() => {});
+    } catch (error) {
+      setMcpInstallStatus({
+        ok: false,
+        message: error.message || "Codex MCP 등록에 실패했습니다.",
+      });
+    }
   };
   const onPaste = (e) => {
     const files = e.clipboardData.files;
@@ -1250,12 +1867,34 @@ function App() {
           <nav className="projects">
             {data.projects.map((p) => (
               <div
-                className={`project-row ${p.id === projectId ? "active" : ""}`}
+                className={`project-row ${p.id === projectId ? "active" : ""} ${projectMenu === p.id ? "menu-open" : ""} ${dragOverProjectId === p.id ? "note-drop-target" : ""}`}
                 key={p.id}
                 draggable
-                onDragStart={() => { dragItem.current = { type: "project", id: p.id }; }}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={() => { if (dragItem.current?.type === "project") reorderProjects(dragItem.current.id, p.id); dragItem.current = null; }}
+                onDragStart={(event) => {
+                  dragItem.current = { type: "project", id: p.id };
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("application/x-ksnote-project", p.id);
+                }}
+                onDragEnd={() => { dragItem.current = null; setDragOverProjectId(null); }}
+                onDragEnter={() => {
+                  if (dragItem.current?.type === "note") setDragOverProjectId(p.id);
+                }}
+                onDragLeave={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget)) setDragOverProjectId((current) => current === p.id ? null : current);
+                }}
+                onDragOver={(event) => {
+                  if (!["project", "note"].includes(dragItem.current?.type)) return;
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (dragItem.current?.type === "project") reorderProjects(dragItem.current.id, p.id);
+                  if (dragItem.current?.type === "note") moveNoteToProject(dragItem.current.id, p.id);
+                  dragItem.current = null;
+                  setDragOverProjectId(null);
+                }}
               >
                 <button
                   className="project-main"
@@ -1275,17 +1914,18 @@ function App() {
                   </span>
                 </button>
                 <button
-                  className="project-more"
+                  className="project-more entity-more"
                   aria-label={`${p.name} 프로젝트 메뉴`}
-                  onClick={() =>
-                    setProjectMenu(projectMenu === p.id ? null : p.id)
-                  }
+                  aria-haspopup="menu"
+                  aria-expanded={projectMenu === p.id}
+                  onClick={(event) => toggleEntityMenu("project", p.id, event)}
                 >
                   <MoreHorizontal size={14} />
                 </button>
                 {projectMenu === p.id && (
-                  <div className="project-popover">
+                  <div className="project-popover entity-popover" role="menu" style={entityMenuPosition}>
                     <button
+                      role="menuitem"
                       onClick={() => {
                         addNote(p.id);
                         setProjectMenu(null);
@@ -1294,6 +1934,7 @@ function App() {
                       <Plus /> 페이지 추가
                     </button>
                     <button
+                      role="menuitem"
                       onClick={() => {
                         setProjectDialog({
                           type: "rename",
@@ -1306,6 +1947,7 @@ function App() {
                       <Pencil /> 이름 변경
                     </button>
                     <button
+                      role="menuitem"
                       className="danger"
                       onClick={() => {
                         setProjectDialog({
@@ -1340,10 +1982,16 @@ function App() {
           <nav className="notes">
             {notes.map((n) => (
               <div
-                className={`page-row ${n.id === noteId ? "active" : ""} ${n.parentId ? "child-page" : ""}`}
+                className={`page-row ${n.id === noteId ? "active" : ""} ${noteMenu === n.id ? "menu-open" : ""} ${n.parentId ? "child-page" : ""}`}
+                style={{ "--page-depth": n.depth || 0 }}
                 key={n.id}
                 draggable
-                onDragStart={() => { dragItem.current = { type: "note", id: n.id }; }}
+                onDragStart={(event) => {
+                  dragItem.current = { type: "note", id: n.id };
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("application/x-ksnote-note", n.id);
+                }}
+                onDragEnd={() => { dragItem.current = null; setDragOverProjectId(null); }}
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={() => { if (dragItem.current?.type === "note") reorderNotes(dragItem.current.id, n.id); dragItem.current = null; }}
               >
@@ -1360,15 +2008,18 @@ function App() {
                   </span>
                 </button>
                 <button
-                  className="page-more"
+                  className="page-more entity-more"
                   aria-label={`${n.title} 페이지 메뉴`}
-                  onClick={() => setNoteMenu(noteMenu === n.id ? null : n.id)}
+                  aria-haspopup="menu"
+                  aria-expanded={noteMenu === n.id}
+                  onClick={(event) => toggleEntityMenu("note", n.id, event)}
                 >
                   <MoreHorizontal size={14} />
                 </button>
                 {noteMenu === n.id && (
-                  <div className="page-popover">
+                  <div className="page-popover entity-popover" role="menu" style={entityMenuPosition}>
                     <button
+                      role="menuitem"
                       onClick={() => {
                         addNote(n.projectId, n.id);
                         setNoteMenu(null);
@@ -1377,6 +2028,7 @@ function App() {
                       <Plus /> 하위 페이지 추가
                     </button>
                     <button
+                      role="menuitem"
                       onClick={() => {
                         setNoteId(n.id);
                         setNoteMenu(null);
@@ -1387,7 +2039,25 @@ function App() {
                     >
                       <Pencil /> 이름 변경
                     </button>
-                    <button className="danger" onClick={() => trashNote(n.id)}>
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        copyPageReference(n);
+                        setNoteMenu(null);
+                      }}
+                    >
+                      <Hash /> 페이지 ID 복사
+                    </button>
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        copyCodexTarget(n, n.id === note.id ? editorTarget : null);
+                        setNoteMenu(null);
+                      }}
+                    >
+                      <Copy /> Codex 타깃 복사
+                    </button>
+                    <button role="menuitem" className="danger" onClick={() => trashNote(n.id)}>
                       <Trash2 /> 휴지통으로 이동
                     </button>
                   </div>
@@ -1431,10 +2101,7 @@ function App() {
                     <span>
                       <b>AI Agent</b>
                       <small>
-                        {agents.defaultProvider === "codex"
-                          ? "Codex"
-                          : "Claude"}
-                        를 기본으로 사용
+                        {getAiModel(agents.defaultModel).label} 기본 사용
                       </small>
                     </span>
                   </button>
@@ -1445,6 +2112,15 @@ function App() {
                       <small>
                         {mcpServers.filter((server) => server.enabled).length}개
                         서버 활성
+                      </small>
+                    </span>
+                  </button>
+                  <button onClick={() => openSettings("automation")}>
+                    <Zap />
+                    <span>
+                      <b>자동화</b>
+                      <small>
+                        {activeAutomationCount}개 연결 활성
                       </small>
                     </span>
                   </button>
@@ -1484,6 +2160,20 @@ function App() {
             <span>{data.projects.find((p) => p.id === projectId)?.name}</span>
             <ChevronRight size={14} />
             <strong>{note.title}</strong>
+            <button
+              className="page-ref-chip"
+              title={`페이지 ID 복사: ${note.id}`}
+              onClick={() => copyPageReference(note)}
+            >
+              <Hash size={12} /> {note.id.split("-").slice(0, 2).join("-")}
+            </button>
+            <button
+              className="page-ref-chip"
+              title="현재 커서 또는 선택 영역을 Codex 타깃으로 복사"
+              onClick={() => copyCodexTarget(note, editorTarget)}
+            >
+              <Copy size={12} /> 타깃
+            </button>
           </div>
           <div className="top-actions">
             <span className={`save-state ${saved ? "saved" : ""}`}>
@@ -1562,10 +2252,7 @@ function App() {
                     <span>
                       <b>AI Agent</b>
                       <small>
-                        {agents.defaultProvider === "codex"
-                          ? "Codex"
-                          : "Claude"}{" "}
-                        기본 사용
+                        {getAiModel(agents.defaultModel).label} 기본 사용
                       </small>
                     </span>
                   </button>
@@ -1582,6 +2269,19 @@ function App() {
                       <small>
                         {mcpServers.filter((s) => s.enabled).length}개 활성
                       </small>
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setSettingsOpen(true);
+                      setSettingsTab("automation");
+                      setMoreOpen(false);
+                    }}
+                  >
+                    <Zap />
+                    <span>
+                      <b>자동화</b>
+                      <small>캘린더, 메일 및 Rovo 연결</small>
                     </span>
                   </button>
                   <div />
@@ -1806,15 +2506,30 @@ function App() {
         )}
         <RichDocumentEditor
           noteId={note.id}
+          projectId={projectId}
           content={note.content}
           mode={mode}
-          preferredProvider={agents.defaultProvider}
+          preferredModel={agents.defaultModel}
+          availableModels={availableAiModels}
           agentCommands={{
             codex: agents.codex.command,
             claude: agents.claude.command,
           }}
           preferences={prefs}
           onChange={(html) => updateNote({ content: html })}
+          onCreateChildPage={() => addNote(note.projectId, note.id)}
+          onTargetChange={handleEditorTargetChange}
+          onPersistContent={(html) => persistNoteContent(note.id, html)}
+          onExternalOperation={(event) =>
+            showToast(
+              event.message,
+              event.status === "completed" ? "diagram" : "warning",
+              {
+                undoable: Boolean(event.undoable),
+                onUndo: event.undo,
+              },
+            )
+          }
         />
         <div className={`editor-shell legacy-editor mode-${mode}`}>
           {mode !== "preview" && (
@@ -1946,6 +2661,65 @@ function App() {
           </div>
         </footer>
       </main>
+      {mcpApproval && (
+        <div className="mcp-review-backdrop" role="presentation">
+          <section
+            className="mcp-review-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mcp-review-title"
+          >
+            <header>
+              <span>
+                <Workflow />
+                <b id="mcp-review-title">Codex 변경 검토</b>
+              </span>
+              <small>승인 전에는 노트와 SQLite에 반영되지 않습니다.</small>
+            </header>
+            <div className="mcp-review-meta">
+              <span><b>작업</b> {mcpApproval.type}</span>
+              <span><b>대상 페이지</b> {mcpApproval.noteId || "새 페이지"}</span>
+              <span><b>적용 방식</b> {mcpApproval.operation || "create"}</span>
+              {mcpApproval.target?.blockId && (
+                <span><b>Block ID</b> {mcpApproval.target.blockId}</span>
+              )}
+            </div>
+            {mcpApproval.type === "diagram_insert" && (
+              <div className="mcp-review-diagram">
+                <RichPreview html={mcpOperationPreviewHtml(mcpApproval)} />
+              </div>
+            )}
+            <details open>
+              <summary>적용할 원본 내용</summary>
+              <pre>{
+                mcpApproval.code ||
+                mcpApproval.text ||
+                mcpApproval.content ||
+                (mcpApproval.type === "diagram_delete"
+                  ? `다이어그램 블록 삭제: ${mcpApproval.target?.blockId || "대상 없음"}`
+                  : mcpApproval.title || "내용 없음")
+              }</pre>
+            </details>
+            <footer>
+              <button
+                type="button"
+                onClick={rejectMcpReview}
+                disabled={mcpApprovalBusy}
+              >
+                <X /> 거절
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={approveMcpReview}
+                disabled={mcpApprovalBusy}
+              >
+                <Check /> {mcpApprovalBusy ? "처리 중…" : "승인하고 적용"}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
       {toast && (
         <div className="toast">
           {toast.icon === "code" ? (
@@ -1959,9 +2733,21 @@ function App() {
           )}
           <span>
             <b>{toast.message}</b>
-            <small>실행 취소는 Ctrl+Z</small>
+            <small>{toast.undoable ? "실행 취소할 수 있습니다." : "KsNote 작업 알림"}</small>
           </span>
-          <button onClick={() => setToast(null)}>
+          {toast.undoable && (
+            <button
+              className="toast-undo"
+              onClick={() => {
+                if (typeof toast.onUndo === "function") toast.onUndo();
+                else doUndo();
+                setToast(null);
+              }}
+            >
+              <Undo2 /> 실행 취소
+            </button>
+          )}
+          <button className="toast-close" onClick={() => setToast(null)}>
             <X size={15} />
           </button>
         </div>
@@ -2143,6 +2929,14 @@ function App() {
                   MCP 연결 <em>{mcpServers.filter((s) => s.enabled).length}</em>
                 </button>
                 <button
+                  className={settingsTab === "automation" ? "active" : ""}
+                  onClick={() => setSettingsTab("automation")}
+                >
+                  <Zap />
+                  자동화
+                  <em>{activeAutomationCount}</em>
+                </button>
+                <button
                   className={settingsTab === "data" ? "active" : ""}
                   onClick={() => setSettingsTab("data")}
                 >
@@ -2155,6 +2949,11 @@ function App() {
                 >
                   <Shield />
                   보안
+                </button>
+                <button className={settingsTab === "developer" ? "active" : ""} onClick={() => setSettingsTab("developer")}>
+                  <Terminal />
+                  개발자
+                  {prefs.developerMode && <em>{aiDebugLogs.length}</em>}
                 </button>
               </nav>
               <div className="settings-content">
@@ -2250,8 +3049,8 @@ function App() {
                           setPrefs({ ...prefs, fontFamily: e.target.value })
                         }
                       >
-                        <option value="mono">DM Mono</option>
-                        <option value="sans">Noto Sans KR</option>
+                        <option value="sans">기본 한글 글꼴</option>
+                        <option value="mono">DM Mono (코드형)</option>
                         <option value="system">시스템 글꼴</option>
                       </select>
                     </div>
@@ -2301,20 +3100,28 @@ function App() {
                     </div>
                     <div className="setting-row">
                       <span>
-                        <b>기본 Agent</b>
-                        <small>AI 푸터에서 먼저 선택되는 실행 도구</small>
+                        <b>기본 모델</b>
+                        <small>AI 푸터에서 먼저 선택되는 모델</small>
                       </span>
                       <select
-                        value={agents.defaultProvider}
+                        value={agents.defaultModel}
                         onChange={(e) =>
                           setAgents({
                             ...agents,
-                            defaultProvider: e.target.value,
+                            defaultModel: e.target.value,
                           })
                         }
                       >
-                        <option value="codex">Codex</option>
-                        <option value="claude">Claude</option>
+                        <optgroup label="OpenAI">
+                          {availableAiModels.filter((model) => model.provider === "codex").map((model) => (
+                            <option key={model.id} value={model.id}>{model.label}</option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="Anthropic">
+                          {availableAiModels.filter((model) => model.provider === "claude").map((model) => (
+                            <option key={model.id} value={model.id}>{model.label}</option>
+                          ))}
+                        </optgroup>
                       </select>
                     </div>
                     {[
@@ -2364,11 +3171,60 @@ function App() {
                         </label>
                         <button
                           className="diagnostic-button"
-                          disabled={diagnostics[id]?.loading}
-                          onClick={() => testCommand(`agent-${id}`, agents[id].command, "cli")}
+                          disabled={diagnostics[`agent-${id}`]?.loading}
+                          onClick={async () => {
+                            const key = `agent-${id}`;
+                            setDiagnostics((current) => ({ ...current, [key]: { loading: true, message: "확인 중…" } }));
+                            try {
+                              const result = await window.ksnoteAI?.diagnose?.({ provider: id, command: agents[id].command });
+                              setDiagnostics((current) => ({ ...current, [key]: { ...result, ok: Boolean(result?.installed) && result?.authenticated !== false, loading: false } }));
+                            } catch (error) {
+                              setDiagnostics((current) => ({ ...current, [key]: { ok: false, loading: false, message: error.message } }));
+                            }
+                          }}
                         >
-                          연결 테스트
+                          다시 확인
                         </button>
+                        {id === "codex" && diagnostics[`agent-${id}`]?.authenticated === false && (
+                          <button
+                            className="diagnostic-button"
+                            onClick={async () => {
+                              const key = "agent-codex";
+                              setDiagnostics((current) => ({
+                                ...current,
+                                [key]: {
+                                  loading: true,
+                                  message: "브라우저에서 ChatGPT 로그인을 완료해 주세요.",
+                                },
+                              }));
+                              try {
+                                await window.ksnoteAI?.loginChatgpt?.({
+                                  command: agents.codex.command,
+                                });
+                                setDiagnostics((current) => ({
+                                  ...current,
+                                  [key]: {
+                                    loading: true,
+                                    ok: false,
+                                    authenticated: false,
+                                    message: "로그인 창을 열었습니다. 완료하면 상태가 자동 갱신됩니다.",
+                                  },
+                                }));
+                              } catch (error) {
+                                setDiagnostics((current) => ({
+                                  ...current,
+                                  [key]: {
+                                    loading: false,
+                                    ok: false,
+                                    message: error.message,
+                                  },
+                                }));
+                              }
+                            }}
+                          >
+                            ChatGPT로 로그인
+                          </button>
+                        )}
                         {diagnostics[`agent-${id}`] && (
                           <small className={`diagnostic-result ${diagnostics[`agent-${id}`].ok ? "ok" : "fail"}`}>
                             {diagnostics[`agent-${id}`].message}
@@ -2409,15 +3265,83 @@ function App() {
                       </span>
                       <ExternalLink />
                     </div>
+                    <section className="ksnote-mcp-guide">
+                      <header>
+                        <Workflow />
+                        <span>
+                          <b>Codex에서 현재 페이지에 다이어그램 저장</b>
+                          <small>
+                            페이지 상단의 <code>#</code>는 페이지 ID를, <code>타깃</code>은 현재 커서/선택 위치를 복사합니다.
+                          </small>
+                        </span>
+                      </header>
+                      <ol>
+                        <li>아래 설정은 현재 실행 중인 KsNote 위치와 데이터 경로를 기준으로 생성됩니다.</li>
+                        <li>노트에서 삽입할 위치를 클릭하고 <code>타깃</code>을 복사합니다.</li>
+                        <li>Codex에 <code>@KsNote 현재 폴더 코드 구조 확인 후 이 타깃에 Mermaid 다이어그램 저장해줘</code>처럼 요청합니다.</li>
+                      </ol>
+                      <div className="ksnote-mcp-actions">
+                        <button
+                          onClick={registerKsNoteMcpForCodex}
+                          disabled={mcpInstallStatus?.loading || !window.ksnoteMcp?.registerCodex}
+                        >
+                          <Terminal /> Codex 등록/업데이트
+                        </button>
+                        <button
+                          onClick={() =>
+                            copyText(
+                              mcpInfo?.codexConfigToml || "",
+                              "Codex MCP 설정을 복사했습니다",
+                            )
+                          }
+                          disabled={!mcpInfo?.codexConfigToml}
+                        >
+                          <Copy /> Codex TOML 복사
+                        </button>
+                        <button
+                          onClick={() =>
+                            copyText(
+                              mcpInfo?.claudeConfigJson || "",
+                              "Claude MCP 설정을 복사했습니다",
+                            )
+                          }
+                          disabled={!mcpInfo?.claudeConfigJson}
+                        >
+                          <Copy /> Claude JSON 복사
+                        </button>
+                      </div>
+                      <div className="ksnote-mcp-actions secondary">
+                        <small>
+                          {mcpInfo?.isPackaged
+                            ? "설치본은 앱 실행 파일을 Node 모드로 실행해 MCP 서버를 띄웁니다. 포터블 폴더를 옮기면 이 설정을 다시 복사하세요."
+                            : "개발 모드는 현재 checkout의 MCP 스크립트를 직접 실행합니다."}
+                        </small>
+                      </div>
+                      {mcpInstallStatus && (
+                        <small
+                          className={`diagnostic-result ${mcpInstallStatus.ok ? "ok" : mcpInstallStatus.loading ? "" : "fail"}`}
+                          title={mcpInstallStatus.detail || mcpInstallStatus.message}
+                        >
+                          {mcpInstallStatus.message}
+                        </small>
+                      )}
+                      <pre>{mcpInfo?.codexConfigToml || "KsNote 실행 위치를 확인하는 중..."}</pre>
+                      {mcpInfo?.executablePath && (
+                        <small className="ksnote-mcp-path">
+                          앱: <code>{mcpInfo.executablePath}</code>
+                        </small>
+                      )}
+                    </section>
                     <div className="mcp-list">
                       {mcpServers.map((server) => (
                         <div className="mcp-card" key={server.id}>
                           <span className="server-icon">
-                            <Server />
+                            {server.icon === "calendar" ? <CalendarDays /> : server.icon === "mail" ? <Mail /> : server.icon === "rovo" ? <Zap /> : server.icon === "ksnote" ? <Workflow /> : <Server />}
                           </span>
                           <span className="server-info">
                             <input
                               value={server.name}
+                              readOnly={server.managed}
                               onChange={(e) =>
                                 setMcpServers((s) =>
                                   s.map((x) =>
@@ -2428,7 +3352,9 @@ function App() {
                                 )
                               }
                             />
-                            <label>
+                            {server.managed ? (
+                              <small className="managed-mcp-description">{server.description}</small>
+                            ) : <label>
                               명령
                               <input
                                 value={server.command}
@@ -2442,8 +3368,8 @@ function App() {
                                   )
                                 }
                               />
-                            </label>
-                            <label>
+                            </label>}
+                            {!server.managed && <label>
                               인자
                               <input
                                 value={server.args || ""}
@@ -2458,7 +3384,7 @@ function App() {
                                   )
                                 }
                               />
-                            </label>
+                            </label>}
                           </span>
                           <span
                             className={`server-status ${server.enabled ? "ready" : ""}`}
@@ -2482,19 +3408,19 @@ function App() {
                             />
                             <i />
                           </label>
-                          <button
+                          {!server.managed && <button
                             className="diagnostic-button"
                             disabled={diagnostics[`mcp-${server.id}`]?.loading}
                             onClick={() => testCommand(`mcp-${server.id}`, `${server.command} ${server.args || ""}`, "mcp")}
                           >
                             테스트
-                          </button>
+                          </button>}
                           {diagnostics[`mcp-${server.id}`] && (
                             <small className={`diagnostic-result ${diagnostics[`mcp-${server.id}`].ok ? "ok" : "fail"}`} title={diagnostics[`mcp-${server.id}`].message}>
                               {diagnostics[`mcp-${server.id}`].ok ? "연결됨" : "실패"}
                             </small>
                           )}
-                          <button
+                          {!server.managed && <button
                             className="delete-server"
                             onClick={() =>
                               setMcpServers((s) =>
@@ -2503,9 +3429,74 @@ function App() {
                             }
                           >
                             <Trash2 />
-                          </button>
+                          </button>}
                         </div>
                       ))}
+                    </div>
+                  </>
+                )}
+                {settingsTab === "automation" && (
+                  <>
+                    <div className="setting-title">
+                      <h3>자동화</h3>
+                      <p>노트에서 발견한 일정, 메일과 업무 문맥을 연결합니다.</p>
+                    </div>
+                    <div className="automation-summary">
+                      <span><Zap /></span>
+                      <div>
+                        <b>{activeAutomationCount}개 서비스 활성</b>
+                        <small>연결을 켜도 외부 변경은 실행 전 확인을 거칩니다.</small>
+                      </div>
+                    </div>
+                    <div className="automation-grid">
+                      {MANAGED_MCP_SERVERS.filter((definition) => definition.category !== "local").map((definition) => {
+                        const server = mcpServers.find((item) => item.id === definition.id) || definition;
+                        const Icon = definition.icon === "calendar" ? CalendarDays : definition.icon === "mail" ? Mail : Zap;
+                        return (
+                          <article className={`automation-card ${server.enabled ? "enabled" : ""}`} key={definition.id}>
+                            <header>
+                              <span className={`automation-icon ${definition.icon}`}><Icon /></span>
+                              <span className={`automation-state ${server.enabled ? "on" : ""}`}>
+                                <i /> {server.enabled ? "활성" : "꺼짐"}
+                              </span>
+                            </header>
+                            <div>
+                              <b>{definition.name}</b>
+                              <p>{definition.description}</p>
+                            </div>
+                            <footer>
+                              <small>
+                                {definition.id === "rovo" && diagnostics["mcp-rovo"]
+                                  ? diagnostics["mcp-rovo"].message
+                                  : server.enabled ? "MCP 사용 허용됨" : "연결하지 않음"}
+                              </small>
+                              <label className="switch">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(server.enabled)}
+                                  onChange={(event) =>
+                                    setMcpServers((servers) =>
+                                      mergeManagedMcpServers(servers).map((item) =>
+                                        item.id === definition.id
+                                          ? { ...item, enabled: event.target.checked }
+                                          : item,
+                                      ),
+                                    )
+                                  }
+                                />
+                                <i />
+                              </label>
+                            </footer>
+                          </article>
+                        );
+                      })}
+                    </div>
+                    <div className="automation-note">
+                      <Shield />
+                      <span>
+                        <b>활성화는 접근 허용 상태만 저장합니다.</b>
+                        <small>Google 계정 및 Atlassian 인증 연결은 후속 MCP 인증 단계에서 진행합니다.</small>
+                      </span>
                     </div>
                   </>
                 )}
@@ -2604,6 +3595,49 @@ function App() {
                         <input type="checkbox" defaultChecked />
                         <i />
                       </label>
+                    </div>
+                  </>
+                )}
+                {settingsTab === "developer" && (
+                  <>
+                    <div className="setting-title">
+                      <h3>개발자 모드</h3>
+                      <p>Ralph 검증을 위해 AI 질문부터 페이지 반영까지 한 실행 ID로 추적합니다.</p>
+                    </div>
+                    <div className="setting-row">
+                      <span><b>AI 검증 로그</b><small>질문, 응답, 적용 전·후 페이지 HTML을 이 기기에만 최대 50건 저장</small></span>
+                      <label className="switch"><input type="checkbox" checked={Boolean(prefs.developerMode)} onChange={(event) => setPrefs({ ...prefs, developerMode: event.target.checked })} /><i /></label>
+                    </div>
+                    <div className="developer-log-toolbar">
+                      <span><b>Ralph 검증 로그</b><small>{aiDebugLogs.length}개 실행</small></span>
+                      <button disabled={!aiDebugLogs.length} onClick={() => navigator.clipboard.writeText(JSON.stringify(aiDebugLogs, null, 2))}><Copy /> JSON 복사</button>
+                      <button disabled={!aiDebugLogs.length} onClick={() => { localStorage.removeItem("ksnote-ai-debug-logs"); setAiDebugLogs([]); }}><Trash2 /> 초기화</button>
+                    </div>
+                    <div className="developer-log-list">
+                      {!prefs.developerMode ? <p className="developer-log-empty">AI 검증 로그를 켜면 다음 요청부터 기록합니다.</p> : aiDebugLogs.length === 0 ? <p className="developer-log-empty">기록된 AI 실행이 없습니다.</p> : aiDebugLogs.map((log) => (
+                        <details className="developer-log-entry" key={log.requestId}>
+                          <summary><i className={`debug-status ${log.status}`} /><span><b>{log.prompt || "프롬프트 없음"}</b><small>{log.mode} · {log.provider} · {new Date(log.createdAt).toLocaleString("ko-KR")}</small></span><em>{log.status}</em></summary>
+                          <div className="developer-log-flow"><span className={log.prompt ? "ok" : ""}>질문</span><i>→</i><span className={log.response ? "ok" : ""}>응답</span><i>→</i><span className={log.pageAfter ? "ok" : ""}>페이지 반영</span></div>
+                          <label>Request ID<code>{log.requestId}</code></label>
+                          <label>질문<pre>{log.prompt}</pre></label>
+                          <label>AI 응답<pre>{log.response || log.error || "응답 대기 중"}</pre></label>
+                          <label>적용 전 페이지<pre>{log.pageBefore || "캡처 없음"}</pre></label>
+                          <label>적용 후 페이지<pre>{log.pageAfter || "아직 적용되지 않음"}</pre></label>
+                        </details>
+                      ))}
+                    </div>
+                    <div className="developer-log-toolbar">
+                      <span><b>에디터 Enter 진단 로그</b><small>{editorDebugLogs.length}개 이벤트</small></span>
+                      <button disabled={!editorDebugLogs.length} onClick={() => navigator.clipboard.writeText(JSON.stringify(editorDebugLogs, null, 2))}><Copy /> JSON 복사</button>
+                      <button disabled={!editorDebugLogs.length} onClick={() => { localStorage.removeItem("ksnote-editor-debug-logs"); setEditorDebugLogs([]); }}><Trash2 /> 초기화</button>
+                    </div>
+                    <div className="developer-log-list">
+                      {!prefs.developerMode ? <p className="developer-log-empty">개발자 모드를 켜면 Enter 입력을 기록합니다.</p> : editorDebugLogs.length === 0 ? <p className="developer-log-empty">기록된 Enter 이벤트가 없습니다.</p> : editorDebugLogs.map((log) => (
+                        <details className="developer-log-entry" key={log.id}>
+                          <summary><i className={`debug-status ${log.nodeTypeAfter === "heading" ? "error" : "complete"}`} /><span><b>{log.nodeTypeBefore} → {log.nodeTypeAfter}</b><small>{new Date(log.createdAt).toLocaleString("ko-KR")} · Shift {String(log.shiftKey)} · IME {String(log.isComposing || log.editorComposing)}</small></span><em>{log.atEndBefore ? "at end" : "not at end"}</em></summary>
+                          <label>Enter 이벤트<pre>{JSON.stringify(log, null, 2)}</pre></label>
+                        </details>
+                      ))}
                     </div>
                   </>
                 )}
