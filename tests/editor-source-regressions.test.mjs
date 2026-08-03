@@ -10,6 +10,10 @@ const calloutStyles = await readFile(
   new URL("../src/callout-block.css", import.meta.url),
   "utf8",
 );
+const mermaidCacheSource = await readFile(
+  new URL("../src/mermaid-render-cache.mjs", import.meta.url),
+  "utf8",
+);
 
 test("Info and Warning macros serialize as editable callout blocks", () => {
   assert.match(editorSource, /name: "calloutBlock"/);
@@ -44,16 +48,22 @@ test("palette commands have a defined table-state guard", () => {
   assert.match(editorSource, /restoreSelection\(editor\.chain\(\)\.focus\(\)\)\s*\.toggleHighlight/);
 });
 
-test("Mermaid paste inserts a trailing editable paragraph", () => {
+test("Mermaid paste inserts an explicit trailing editable paragraph", () => {
   assert.match(
     editorSource,
-    /editableDiagramBlock\("mermaidBlock",\s*\{\s*code: mermaidPaste\.code/,
+    /editableDiagramWithTrailingParagraph\("mermaidBlock",\s*\{\s*code: mermaidPaste\.code/,
   );
-  assert.match(editorSource, /\.createParagraphNear\(\)/);
+  assert.match(
+    mermaidCacheSource,
+    /export const MERMAID_RENDER_DEBOUNCE_MS = 2\d\d;/,
+  );
 });
 
-test("Mermaid rendering coalesces rapid preview updates", () => {
-  assert.match(editorSource, /const MERMAID_RENDER_DEBOUNCE_MS = \d+;/);
-  assert.match(editorSource, /const mermaidCache = useRef\(new Map\(\)\);/);
-  assert.match(editorSource, /const mermaidPending = useRef\(new Map\(\)\);/);
+test("editor and preview share the code-keyed Mermaid render cache", () => {
+  assert.match(editorSource, /const sharedMermaidRenders =/);
+  assert.match(editorSource, /sharedMermaidRenders\.peek\(code\)/);
+  assert.match(editorSource, /sharedMermaidRenders\.pending\(code\)/);
+  assert.match(editorSource, /sharedMermaidRenders\.render\(code\)/);
+  assert.doesNotMatch(editorSource, /const mermaidCache = useRef/);
+  assert.doesNotMatch(editorSource, /const mermaidPending = useRef/);
 });

@@ -29,3 +29,8 @@ export const editableDiagramBlock = (type, attrs) => {
     ...(attrs && Object.keys(attrs).length ? { attrs: { ...attrs } } : {}),
   };
 };
+
+export const editableDiagramWithTrailingParagraph = (type, attrs) => [
+  editableDiagramBlock(type, attrs),
+  { type: "paragraph" },
+];

@@ -35,8 +35,14 @@ import { normalizeMarkdownTablePaste } from "./markdown-table-paste.mjs";
 import {
   calloutBlock,
   editableDiagramBlock,
+  editableDiagramWithTrailingParagraph,
   normalizeCalloutVariant,
 } from "./editor-content.mjs";
+import {
+  createMermaidRenderCache,
+  MERMAID_RENDER_DEBOUNCE_MS,
+  scopeMermaidSvg,
+} from "./mermaid-render-cache.mjs";
 import {
   clampDrawioZoom,
   isDrawioSvgDataUrl,
@@ -991,48 +997,16 @@ mermaid.initialize({
   securityLevel: "strict",
 });
 
-const MERMAID_RENDER_DEBOUNCE_MS = 180;
-const MERMAID_PREVIEW_CACHE_LIMIT = 80;
-let mermaidPreviewRenderId = 0;
+const sharedMermaidRenders = createMermaidRenderCache(
+  async (code, renderId) => {
+    const { svg } = await mermaid.render(`ks-shared-${renderId}`, code);
+    return svg;
+  },
+);
 
-const rememberMermaidPreview = (cache, key, result) => {
-  if (cache.has(key)) cache.delete(key);
-  cache.set(key, result);
-  while (cache.size > MERMAID_PREVIEW_CACHE_LIMIT) {
-    cache.delete(cache.keys().next().value);
-  }
-};
-
-const renderMermaidPreview = (cache, pendingByKey, key, code, instanceId) => {
-  const cached = cache.get(key);
-  if (cached) return Promise.resolve(cached);
-  const pending = pendingByKey.get(key);
-  if (pending) return pending;
-
-  mermaidPreviewRenderId += 1;
-  const render = mermaid
-    .render(
-      `ks-preview-${instanceId}-${mermaidPreviewRenderId}`,
-      code,
-    )
-    .then(({ svg }) => {
-      const result = { ok: true, svg };
-      rememberMermaidPreview(cache, key, result);
-      return result;
-    })
-    .catch(() => {
-      const result = { ok: false, svg: "" };
-      rememberMermaidPreview(cache, key, result);
-      return result;
-    })
-    .finally(() => pendingByKey.delete(key));
-  pendingByKey.set(key, render);
-  return render;
-};
-
-const applyMermaidPreviewResult = (element, result) => {
+const applyMermaidPreviewResult = (element, result, scope) => {
   element.innerHTML = result.ok
-    ? result.svg
+    ? scopeMermaidSvg(result.svg, scope)
     : '<p class="preview-mermaid-error">Mermaid 문법을 확인해 주세요.</p>';
 };
 
@@ -1042,7 +1016,7 @@ const assertSvg = (value, label) => {
   return svg;
 };
 
-const verifyDiagramBeforeInsert = async (format, code, operationId, preferences) => {
+const verifyDiagramBeforeInsert = async (format, code, _operationId, preferences) => {
   const source = validateDiagramSource(format, code);
   if (!source.ok) {
     const error = new Error(source.message);
@@ -1050,9 +1024,9 @@ const verifyDiagramBeforeInsert = async (format, code, operationId, preferences)
     throw error;
   }
   if (format === "mermaid") {
-    const safeId = String(operationId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, "");
-    const { svg } = await mermaid.render(`ks-mcp-verify-${safeId}`, source.code);
-    const output = assertSvg(svg, "Mermaid");
+    const result = await sharedMermaidRenders.render(source.code);
+    if (!result.ok) throw new Error(result.error || "Mermaid 렌더링 실패");
+    const output = assertSvg(result.svg, "Mermaid");
     return {
       renderVerified: true,
       renderFormat: "mermaid",
@@ -1099,25 +1073,38 @@ function MermaidView({ node, selected, updateAttributes, deleteNode, editor, get
     renderSeq.current = currentSeq;
     let live = true;
     let timer;
-    setError("");
-    setSvgOutput("");
-    if (!String(node.attrs.code || "").trim()) return undefined;
-    timer = window.setTimeout(() => {
-      mermaid
-        .render(`ks-mermaid-${id}-${currentSeq}`, node.attrs.code)
-        .then(({ svg }) => {
-          if (live && renderSeq.current === currentSeq) {
-            setSvgOutput(svg);
-            setError("");
-          }
-        })
-        .catch((err) => {
-          if (live && renderSeq.current === currentSeq) {
-            setSvgOutput("");
-            setError(err.message?.split("\n")[0] || "Mermaid 문법을 확인하세요");
-          }
-        });
-    }, MERMAID_RENDER_DEBOUNCE_MS);
+    const code = String(node.attrs.code || "");
+    const applyResult = (result) => {
+      if (!live || renderSeq.current !== currentSeq) return;
+      if (result.ok) {
+        setSvgOutput(scopeMermaidSvg(result.svg, `editor-${id}`));
+        setError("");
+      } else {
+        setSvgOutput("");
+        setError(
+          result.error?.split("\n")[0] || "Mermaid 문법을 확인하세요",
+        );
+      }
+    };
+    if (!code.trim()) {
+      setError("");
+      setSvgOutput("");
+      return undefined;
+    }
+
+    const cached = sharedMermaidRenders.peek(code);
+    if (cached) applyResult(cached);
+    else {
+      setError("");
+      setSvgOutput("");
+      const pending = sharedMermaidRenders.pending(code);
+      if (pending) pending.then(applyResult);
+      else
+        timer = window.setTimeout(
+          () => sharedMermaidRenders.render(code).then(applyResult),
+          MERMAID_RENDER_DEBOUNCE_MS,
+        );
+    }
     return () => {
       live = false;
       window.clearTimeout(timer);
@@ -1954,8 +1941,6 @@ const asHtml = (value) =>
 
 export function RichPreview({ html, className = "" }) {
   const root = useRef(null);
-  const mermaidCache = useRef(new Map());
-  const mermaidPending = useRef(new Map());
   const mermaidInstanceId = useId().replace(/:/g, "");
   useEffect(() => {
     const host = root.current;
@@ -1968,39 +1953,33 @@ export function RichPreview({ html, className = "" }) {
       const code = element.getAttribute("data-code") || "";
       const blockKey =
         element.getAttribute("data-block-id") || `preview-index-${index}`;
-      const cacheKey = `${blockKey}\u0000${code}`;
+      const renderScope = `${mermaidInstanceId}-${index}-${blockKey}`;
       element.classList.add("preview-mermaid");
       element.setAttribute("aria-label", "Mermaid 다이어그램");
       if (!code.trim()) {
         element.innerHTML = '<p class="preview-mermaid-error">Mermaid 소스가 비어 있습니다.</p>';
         return;
       }
-      const cached = mermaidCache.current.get(cacheKey);
+      const cached = sharedMermaidRenders.peek(code);
       if (cached) {
-        applyMermaidPreviewResult(element, cached);
+        applyMermaidPreviewResult(element, cached, renderScope);
         return;
       }
-      const pending = mermaidPending.current.get(cacheKey);
+      const pending = sharedMermaidRenders.pending(code);
       if (pending) {
         pending.then((result) => {
           if (live && element.isConnected)
-            applyMermaidPreviewResult(element, result);
+            applyMermaidPreviewResult(element, result, renderScope);
         });
         return;
       }
-      queuedMermaid.push({ element, code, cacheKey });
+      queuedMermaid.push({ element, code, renderScope });
     });
     const mermaidTimer = window.setTimeout(() => {
-      queuedMermaid.forEach(({ element, code, cacheKey }) => {
-        renderMermaidPreview(
-          mermaidCache.current,
-          mermaidPending.current,
-          cacheKey,
-          code,
-          mermaidInstanceId,
-        ).then((result) => {
+      queuedMermaid.forEach(({ element, code, renderScope }) => {
+        sharedMermaidRenders.render(code).then((result) => {
           if (live && element.isConnected)
-            applyMermaidPreviewResult(element, result);
+            applyMermaidPreviewResult(element, result, renderScope);
         });
       });
     }, MERMAID_RENDER_DEBOUNCE_MS);
@@ -2744,8 +2723,9 @@ export default function RichDocumentEditor({
     else if (item.id === "code") chain.setCodeBlock();
     else if (item.id === "mermaid")
       chain
-        .insertContent(editableDiagramBlock("mermaidBlock"))
-        .createParagraphNear()
+        .insertContent(
+          editableDiagramWithTrailingParagraph("mermaidBlock"),
+        )
         .scrollIntoView();
     else if (item.id === "plantuml")
       chain
@@ -2764,8 +2744,9 @@ export default function RichDocumentEditor({
         .scrollIntoView();
     else if (item.id === "draw_mermaid")
       chain
-        .insertContent(editableDiagramBlock("mermaidBlock"))
-        .createParagraphNear()
+        .insertContent(
+          editableDiagramWithTrailingParagraph("mermaidBlock"),
+        )
         .scrollIntoView();
     else if (item.id === "imggen")
       chain.insertContent([
@@ -2879,11 +2860,10 @@ export default function RichDocumentEditor({
             ?.chain()
             .focus()
             .insertContent(
-              editableDiagramBlock("mermaidBlock", {
+              editableDiagramWithTrailingParagraph("mermaidBlock", {
                 code: mermaidPaste.code,
               }),
             )
-            .createParagraphNear()
             .scrollIntoView()
             .run();
           return true;
@@ -3517,16 +3497,19 @@ export default function RichDocumentEditor({
       editor
         .chain()
         .focus()
-        .insertContentAt(pos, editableDiagramBlock("mermaidBlock"))
-        .createParagraphNear()
+        .insertContentAt(
+          pos,
+          editableDiagramWithTrailingParagraph("mermaidBlock"),
+        )
         .scrollIntoView()
         .run();
     else
       editor
         .chain()
         .focus()
-        .insertContent(editableDiagramBlock("mermaidBlock"))
-        .createParagraphNear()
+        .insertContent(
+          editableDiagramWithTrailingParagraph("mermaidBlock"),
+        )
         .scrollIntoView()
         .run();
     pendingDiagramPos.current = null;

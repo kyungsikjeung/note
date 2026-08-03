@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Schema } from "@tiptap/pm/model";
-import { TextSelection } from "@tiptap/pm/state";
+import { Selection, TextSelection } from "@tiptap/pm/state";
 
 import {
   calloutBlock,
   editableDiagramBlock,
+  editableDiagramWithTrailingParagraph,
   normalizeCalloutVariant,
 } from "../src/editor-content.mjs";
 
@@ -72,6 +73,46 @@ test("builds every editable diagram atom", () => {
     editableDiagramBlock("drawIoBlock", { view: "edit" }),
     { type: "drawIoBlock", attrs: { view: "edit" } },
   );
+});
+
+test("builds a Mermaid block followed by an editable paragraph", () => {
+  assert.deepEqual(
+    editableDiagramWithTrailingParagraph("mermaidBlock", {
+      code: "flowchart LR\nA-->B",
+    }),
+    [
+      {
+        type: "mermaidBlock",
+        attrs: { code: "flowchart LR\nA-->B" },
+      },
+      { type: "paragraph" },
+    ],
+  );
+});
+
+test("Mermaid insertion end resolves inside the trailing paragraph", () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: "block+" },
+      paragraph: { group: "block", content: "text*" },
+      mermaidBlock: {
+        group: "block",
+        atom: true,
+        attrs: { code: { default: "" } },
+      },
+      text: { group: "inline" },
+    },
+  });
+  const doc = schema.nodeFromJSON({
+    type: "doc",
+    content: editableDiagramWithTrailingParagraph("mermaidBlock", {
+      code: "flowchart LR\nA-->B",
+    }),
+  });
+  const selection = Selection.near(doc.resolve(doc.content.size), -1);
+
+  assert.ok(selection instanceof TextSelection);
+  assert.equal(selection.$from.parent.type.name, "paragraph");
 });
 
 test("diagram insertion rejects non-diagram node types", () => {
