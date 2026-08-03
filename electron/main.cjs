@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
+const fsSync = require("fs");
 const fs = require("fs/promises");
 const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
@@ -15,9 +16,45 @@ const isMcpMode = process.argv.includes("--ksnote-mcp");
 const MCP_OPERATION_TTL_MS = 5 * 60 * 1000;
 let noteDb;
 let noteDbPath;
+let mainWindow;
 const writeDatabaseSnapshot = createSerializedFileWriter();
 const aiProcesses = new Map();
 let codexAppServer;
+
+function writeRuntimeLog(event, details = {}) {
+  try {
+    const logDirectory = path.join(app.getPath("userData"), "logs");
+    fsSync.mkdirSync(logDirectory, { recursive: true });
+    fsSync.appendFileSync(
+      path.join(logDirectory, "runtime.jsonl"),
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        event,
+        pid: process.pid,
+        version: app.getVersion(),
+        packaged: app.isPackaged,
+        ...details,
+      })}\n`,
+      "utf8",
+    );
+  } catch {}
+}
+
+process.on("uncaughtExceptionMonitor", (error, origin) => {
+  writeRuntimeLog("uncaught-exception", {
+    origin,
+    message: error?.message || String(error),
+    stack: error?.stack || "",
+  });
+});
+
+process.on("unhandledRejection", (reason) => {
+  const error = reason instanceof Error ? reason : null;
+  writeRuntimeLog("unhandled-rejection", {
+    message: error?.message || String(reason),
+    stack: error?.stack || "",
+  });
+});
 
 function broadcast(channel, payload) {
   BrowserWindow.getAllWindows().forEach((window) =>
@@ -891,8 +928,37 @@ function createWindow() {
       backgroundThrottling: false,
     },
   });
+  mainWindow = win;
+  win.on("closed", () => {
+    writeRuntimeLog("window-closed");
+    if (mainWindow === win) mainWindow = null;
+  });
+  win.webContents.on("render-process-gone", (_event, details) => {
+    writeRuntimeLog("render-process-gone", {
+      reason: details.reason,
+      exitCode: details.exitCode,
+    });
+  });
+  win.webContents.on("unresponsive", () => {
+    writeRuntimeLog("renderer-unresponsive");
+  });
+  win.webContents.on("responsive", () => {
+    writeRuntimeLog("renderer-responsive");
+  });
+  win.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return;
+      writeRuntimeLog("renderer-load-failed", {
+        errorCode,
+        errorDescription,
+        validatedURL,
+      });
+    },
+  );
   if (isDev) win.loadURL("http://127.0.0.1:5173");
   else win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+  return win;
 }
 
 ipcMain.handle(
@@ -1179,7 +1245,13 @@ ipcMain.handle("ai-cancel", async (_, requestId) => {
   return codexAppServer?.interrupt(requestId) || false;
 });
 
-if (isMcpMode) {
+const hasSingleInstanceLock =
+  isMcpMode || app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  writeRuntimeLog("second-instance-exit");
+  app.quit();
+} else if (isMcpMode) {
   app.whenReady().then(async () => {
     process.env.KSNOTE_DB_PATH ||= path.join(app.getPath("userData"), "ksnote.db");
     await ensureMcpDirectories();
@@ -1189,13 +1261,44 @@ if (isMcpMode) {
     app.exit(1);
   });
 } else {
+  app.on("second-instance", () => {
+    writeRuntimeLog("second-instance-focus");
+    const win = mainWindow || BrowserWindow.getAllWindows()[0];
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
   app.whenReady().then(async () => {
     await initializeStorage();
     createWindow();
+    writeRuntimeLog("app-ready");
     getCodexAppServer().start().catch(() => {});
+  }).catch((error) => {
+    writeRuntimeLog("startup-failed", {
+      message: error?.message || String(error),
+      stack: error?.stack || "",
+    });
+    dialog.showErrorBox(
+      "KsNote 시작 실패",
+      `앱을 시작하지 못했습니다.\n\n${error?.message || String(error)}\n\n로그: ${path.join(app.getPath("userData"), "logs", "runtime.jsonl")}`,
+    );
+    app.exit(1);
   });
 }
-app.on("before-quit", () => codexAppServer?.stop());
+app.on("child-process-gone", (_event, details) => {
+  writeRuntimeLog("child-process-gone", {
+    type: details.type,
+    reason: details.reason,
+    exitCode: details.exitCode,
+    serviceName: details.serviceName || "",
+    name: details.name || "",
+  });
+});
+app.on("before-quit", () => {
+  writeRuntimeLog("before-quit");
+  codexAppServer?.stop();
+});
 app.on("window-all-closed", () => {
   if (isMcpMode) return;
   if (process.platform !== "darwin") app.quit();
