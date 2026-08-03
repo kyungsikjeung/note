@@ -27,7 +27,11 @@ import { common, createLowlight } from "lowlight";
 import mermaid from "mermaid";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import { validateDiagramSource } from "../mcp/diagram-validation.mjs";
+import {
+  normalizeMermaidPaste,
+  validateDiagramSource,
+} from "../mcp/diagram-validation.mjs";
+import { normalizeMarkdownTablePaste } from "./markdown-table-paste.mjs";
 import {
   clampDrawioZoom,
   isDrawioSvgDataUrl,
@@ -2692,18 +2696,22 @@ export default function RichDocumentEditor({
           editor?.chain().focus().insertContent({ type: "plantUmlBlock", attrs: { code: text } }).run();
           return true;
         }
-        if (
-          !files.length &&
-          /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie)\b/m.test(
-            text,
-          )
-        ) {
-          if (!window.confirm("Mermaid 다이어그램 블록으로 변환할까요?\n취소하면 일반 텍스트로 붙여 넣습니다.")) return false;
+        const mermaidPaste = !files.length
+          ? normalizeMermaidPaste(text)
+          : null;
+        if (mermaidPaste) {
+          const prompt = mermaidPaste.fenceRemoved
+            ? "복사된 Mermaid 코드 펜스를 제거하고 다이어그램 블록으로 변환할까요?"
+            : "Mermaid 다이어그램 블록으로 변환할까요?";
+          if (!window.confirm(`${prompt}\n취소하면 일반 텍스트로 붙여 넣습니다.`)) return false;
           event.preventDefault();
           editor
             ?.chain()
             .focus()
-            .insertContent({ type: "mermaidBlock", attrs: { code: text } })
+            .insertContent({
+              type: "mermaidBlock",
+              attrs: { code: mermaidPaste.code },
+            })
             .run();
           return true;
         }
@@ -2723,6 +2731,19 @@ export default function RichDocumentEditor({
               .run();
             return true;
           } catch {}
+        }
+        const markdownTablePaste = !files.length
+          ? normalizeMarkdownTablePaste(text)
+          : null;
+        if (markdownTablePaste) {
+          if (!window.confirm("Markdown 표를 편집 가능한 표로 변환할까요?\n취소하면 원문을 붙여 넣습니다.")) return false;
+          event.preventDefault();
+          editor
+            ?.chain()
+            .focus()
+            .insertContent(marked.parse(markdownTablePaste.markdown))
+            .run();
+          return true;
         }
         const lines = text.split(/\r?\n/).filter((line) => line.length);
         const delimiter =
