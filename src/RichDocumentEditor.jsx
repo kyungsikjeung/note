@@ -32,7 +32,11 @@ import {
   validateDiagramSource,
 } from "../mcp/diagram-validation.mjs";
 import { normalizeMarkdownTablePaste } from "./markdown-table-paste.mjs";
-import { editableDiagramBlock } from "./editor-content.mjs";
+import {
+  calloutBlock,
+  editableDiagramBlock,
+  normalizeCalloutVariant,
+} from "./editor-content.mjs";
 import {
   clampDrawioZoom,
   isDrawioSvgDataUrl,
@@ -100,6 +104,8 @@ import {
   FilePlus2,
   Command,
   Maximize2,
+  Info,
+  TriangleAlert,
 } from "lucide-react";
 import "./rich-editor.css";
 import "./palette-fix.css";
@@ -118,6 +124,7 @@ import "./outline.css";
 import "./toc-block.css";
 import "./diagram-picker.css";
 import "./image-gen-block.css";
+import "./callout-block.css";
 
 const lowlight = createLowlight(common);
 
@@ -140,6 +147,7 @@ const BLOCK_ID_TYPES = [
   "mermaidBlock",
   "plantUmlBlock",
   "drawIoBlock",
+  "calloutBlock",
   "table",
   "tableOfContents",
 ];
@@ -490,6 +498,7 @@ const normalizeRichHtml = (
   });
   if (!preserveEmptyParagraphs)
     documentNode.querySelectorAll("p").forEach((paragraph) => {
+      if (paragraph.closest('aside[data-type="callout"]')) return;
       if (
         !paragraph.textContent.replace(/\u00a0/g, " ").trim() &&
         !paragraph.querySelector("img,br,[data-type]")
@@ -1831,6 +1840,44 @@ const DrawIoBlock = Node.create({
   },
 });
 
+const CalloutBlock = Node.create({
+  name: "calloutBlock",
+  group: "block",
+  content: "block+",
+  defining: true,
+  isolating: true,
+  selectable: true,
+  addAttributes() {
+    return {
+      variant: {
+        default: "info",
+        parseHTML: (element) =>
+          normalizeCalloutVariant(element.getAttribute("data-variant")),
+        renderHTML: (attributes) => ({
+          "data-variant": normalizeCalloutVariant(attributes.variant),
+        }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'aside[data-type="callout"]' }];
+  },
+  renderHTML({ node, HTMLAttributes }) {
+    const variant = normalizeCalloutVariant(node.attrs.variant);
+    return [
+      "aside",
+      {
+        ...HTMLAttributes,
+        "data-type": "callout",
+        "data-variant": variant,
+        role: "note",
+        "aria-label": variant === "warning" ? "경고 패널" : "정보 패널",
+      },
+      0,
+    ];
+  },
+});
+
 function TableOfContentsView({ editor, selected }) {
   const [items, setItems] = useState([]);
   useEffect(() => {
@@ -2559,6 +2606,22 @@ export default function RichDocumentEditor({
       keywords: "quote 인용",
     },
     {
+      id: "info",
+      label: "Info 패널",
+      command: "/info",
+      description: "참고할 내용을 강조하는 안내 상자",
+      icon: Info,
+      keywords: "info note panel macro 정보 안내 패널 매크로 confluence",
+    },
+    {
+      id: "warn",
+      label: "Warning 패널",
+      command: "/warn",
+      description: "주의가 필요한 내용을 강조하는 경고 상자",
+      icon: TriangleAlert,
+      keywords: "warn warning caution panel macro 경고 주의 패널 매크로 confluence",
+    },
+    {
       id: "divider",
       label: "구분선",
       command: "/divider",
@@ -2709,6 +2772,16 @@ export default function RichDocumentEditor({
         { type: "imageGenerationBlock" },
         { type: "paragraph" },
       ]);
+    else if (item.id === "info" || item.id === "warn") {
+      const variant = normalizeCalloutVariant(item.id);
+      if (editor.isActive("calloutBlock"))
+        chain.updateAttributes("calloutBlock", { variant });
+      else
+        chain
+          .insertContent([calloutBlock(item.id), { type: "paragraph" }])
+          .setTextSelection(current.from + 1)
+          .scrollIntoView();
+    }
     else if (item.id === "toc")
       chain.insertContent({ type: "tableOfContents" });
     else if (item.id === "check") chain.toggleTaskList();
@@ -2745,6 +2818,7 @@ export default function RichDocumentEditor({
       MermaidBlock,
       PlantUmlBlock,
       DrawIoBlock,
+      CalloutBlock,
       TableOfContentsBlock,
       TaskList,
       SmartTaskItem.configure({ nested: true }),

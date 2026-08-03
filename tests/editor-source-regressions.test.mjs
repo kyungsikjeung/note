@@ -6,6 +6,29 @@ const editorSource = await readFile(
   new URL("../src/RichDocumentEditor.jsx", import.meta.url),
   "utf8",
 );
+const calloutStyles = await readFile(
+  new URL("../src/callout-block.css", import.meta.url),
+  "utf8",
+);
+
+test("Info and Warning macros serialize as editable callout blocks", () => {
+  assert.match(editorSource, /name: "calloutBlock"/);
+  assert.match(editorSource, /content: "block\+"/);
+  assert.match(editorSource, /command: "\/info"/);
+  assert.match(editorSource, /command: "\/warn"/);
+  assert.match(editorSource, /insertContent\(\[calloutBlock\(item\.id\)/);
+  assert.match(editorSource, /setTextSelection\(current\.from \+ 1\)/);
+  assert.match(
+    editorSource,
+    /updateAttributes\("calloutBlock", \{ variant \}\)/,
+  );
+  assert.match(calloutStyles, /data-type="callout"/);
+  assert.match(calloutStyles, /data-variant="warning"/);
+  assert.match(
+    editorSource,
+    /paragraph\.closest\('aside\[data-type="callout"\]'\)/,
+  );
+});
 
 test("palette commands have a defined table-state guard", () => {
   assert.match(
