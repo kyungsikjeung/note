@@ -75,6 +75,7 @@ import {
 } from "lucide-react";
 import "highlight.js/styles/github.css";
 import "./styles.css";
+import "./large-screen.css";
 import "./slash.css";
 import "./settings.css";
 import "./settings-agent.css";

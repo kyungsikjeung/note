@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, screen } = require("electron");
 const path = require("path");
 const fsSync = require("fs");
 const fs = require("fs/promises");
@@ -929,6 +929,12 @@ function createWindow() {
     },
   });
   mainWindow = win;
+  const display = screen.getPrimaryDisplay();
+  if (
+    display.workAreaSize.width >= 1800 &&
+    display.workAreaSize.height >= 900
+  )
+    win.maximize();
   win.on("closed", () => {
     writeRuntimeLog("window-closed");
     if (mainWindow === win) mainWindow = null;
