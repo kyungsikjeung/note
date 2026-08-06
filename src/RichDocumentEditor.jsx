@@ -8,7 +8,7 @@ import {
 import { DragHandle } from "@tiptap/extension-drag-handle-react";
 import { createPortal } from "react-dom";
 import { Extension, Node } from "@tiptap/core";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import StarterKit from "@tiptap/starter-kit";
 import { Table } from "@tiptap/extension-table";
 import TableRow from "@tiptap/extension-table-row";
@@ -27,7 +27,22 @@ import { common, createLowlight } from "lowlight";
 import mermaid from "mermaid";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import { validateDiagramSource } from "../mcp/diagram-validation.mjs";
+import {
+  normalizeMermaidPaste,
+  validateDiagramSource,
+} from "../mcp/diagram-validation.mjs";
+import { normalizeMarkdownTablePaste } from "./markdown-table-paste.mjs";
+import {
+  calloutBlock,
+  editableDiagramBlock,
+  editableDiagramWithTrailingParagraph,
+  normalizeCalloutVariant,
+} from "./editor-content.mjs";
+import {
+  createMermaidRenderCache,
+  MERMAID_RENDER_DEBOUNCE_MS,
+  scopeMermaidSvg,
+} from "./mermaid-render-cache.mjs";
 import {
   clampDrawioZoom,
   isDrawioSvgDataUrl,
@@ -95,6 +110,8 @@ import {
   FilePlus2,
   Command,
   Maximize2,
+  Info,
+  TriangleAlert,
 } from "lucide-react";
 import "./rich-editor.css";
 import "./palette-fix.css";
@@ -113,6 +130,7 @@ import "./outline.css";
 import "./toc-block.css";
 import "./diagram-picker.css";
 import "./image-gen-block.css";
+import "./callout-block.css";
 
 const lowlight = createLowlight(common);
 
@@ -135,6 +153,7 @@ const BLOCK_ID_TYPES = [
   "mermaidBlock",
   "plantUmlBlock",
   "drawIoBlock",
+  "calloutBlock",
   "table",
   "tableOfContents",
 ];
@@ -485,6 +504,7 @@ const normalizeRichHtml = (
   });
   if (!preserveEmptyParagraphs)
     documentNode.querySelectorAll("p").forEach((paragraph) => {
+      if (paragraph.closest('aside[data-type="callout"]')) return;
       if (
         !paragraph.textContent.replace(/\u00a0/g, " ").trim() &&
         !paragraph.querySelector("img,br,[data-type]")
@@ -977,13 +997,26 @@ mermaid.initialize({
   securityLevel: "strict",
 });
 
+const sharedMermaidRenders = createMermaidRenderCache(
+  async (code, renderId) => {
+    const { svg } = await mermaid.render(`ks-shared-${renderId}`, code);
+    return svg;
+  },
+);
+
+const applyMermaidPreviewResult = (element, result, scope) => {
+  element.innerHTML = result.ok
+    ? scopeMermaidSvg(result.svg, scope)
+    : '<p class="preview-mermaid-error">Mermaid 문법을 확인해 주세요.</p>';
+};
+
 const assertSvg = (value, label) => {
   const svg = String(value || "");
   if (!/<svg\b/i.test(svg)) throw new Error(`${label} SVG 출력이 생성되지 않았습니다.`);
   return svg;
 };
 
-const verifyDiagramBeforeInsert = async (format, code, operationId, preferences) => {
+const verifyDiagramBeforeInsert = async (format, code, _operationId, preferences) => {
   const source = validateDiagramSource(format, code);
   if (!source.ok) {
     const error = new Error(source.message);
@@ -991,9 +1024,9 @@ const verifyDiagramBeforeInsert = async (format, code, operationId, preferences)
     throw error;
   }
   if (format === "mermaid") {
-    const safeId = String(operationId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, "");
-    const { svg } = await mermaid.render(`ks-mcp-verify-${safeId}`, source.code);
-    const output = assertSvg(svg, "Mermaid");
+    const result = await sharedMermaidRenders.render(source.code);
+    if (!result.ok) throw new Error(result.error || "Mermaid 렌더링 실패");
+    const output = assertSvg(result.svg, "Mermaid");
     return {
       renderVerified: true,
       renderFormat: "mermaid",
@@ -1039,25 +1072,42 @@ function MermaidView({ node, selected, updateAttributes, deleteNode, editor, get
     const currentSeq = renderSeq.current + 1;
     renderSeq.current = currentSeq;
     let live = true;
-    setError("");
-    setSvgOutput("");
-    if (!String(node.attrs.code || "").trim()) return undefined;
-    mermaid
-      .render(`ks-mermaid-${id}-${currentSeq}`, node.attrs.code)
-      .then(({ svg }) => {
-        if (live && renderSeq.current === currentSeq) {
-          setSvgOutput(svg);
-          setError("");
-        }
-      })
-      .catch((err) => {
-        if (live && renderSeq.current === currentSeq) {
-          setSvgOutput("");
-          setError(err.message?.split("\n")[0] || "Mermaid 문법을 확인하세요");
-        }
-      });
+    let timer;
+    const code = String(node.attrs.code || "");
+    const applyResult = (result) => {
+      if (!live || renderSeq.current !== currentSeq) return;
+      if (result.ok) {
+        setSvgOutput(scopeMermaidSvg(result.svg, `editor-${id}`));
+        setError("");
+      } else {
+        setSvgOutput("");
+        setError(
+          result.error?.split("\n")[0] || "Mermaid 문법을 확인하세요",
+        );
+      }
+    };
+    if (!code.trim()) {
+      setError("");
+      setSvgOutput("");
+      return undefined;
+    }
+
+    const cached = sharedMermaidRenders.peek(code);
+    if (cached) applyResult(cached);
+    else {
+      setError("");
+      setSvgOutput("");
+      const pending = sharedMermaidRenders.pending(code);
+      if (pending) pending.then(applyResult);
+      else
+        timer = window.setTimeout(
+          () => sharedMermaidRenders.render(code).then(applyResult),
+          MERMAID_RENDER_DEBOUNCE_MS,
+        );
+    }
     return () => {
       live = false;
+      window.clearTimeout(timer);
     };
   }, [node.attrs.code, id]);
   return (
@@ -1777,6 +1827,65 @@ const DrawIoBlock = Node.create({
   },
 });
 
+const FontSize = Extension.create({
+  name: "fontSize",
+  addGlobalAttributes() {
+    return [
+      {
+        types: ["textStyle"],
+        attributes: {
+          fontSize: {
+            default: null,
+            parseHTML: (element) => element.style.fontSize || null,
+            renderHTML: (attributes) =>
+              attributes.fontSize
+                ? { style: `font-size:${attributes.fontSize}` }
+                : {},
+          },
+        },
+      },
+    ];
+  },
+});
+
+const CalloutBlock = Node.create({
+  name: "calloutBlock",
+  group: "block",
+  content: "block+",
+  defining: true,
+  isolating: true,
+  selectable: true,
+  addAttributes() {
+    return {
+      variant: {
+        default: "info",
+        parseHTML: (element) =>
+          normalizeCalloutVariant(element.getAttribute("data-variant")),
+        renderHTML: (attributes) => ({
+          "data-variant": normalizeCalloutVariant(attributes.variant),
+        }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'aside[data-type="callout"]' }];
+  },
+  renderHTML({ node, HTMLAttributes }) {
+    const variant = normalizeCalloutVariant(node.attrs.variant);
+    return [
+      "aside",
+      {
+        ...HTMLAttributes,
+        "data-type": "callout",
+        "data-variant": variant,
+        role: "note",
+        "aria-label": variant === "warning" ? "경고 패널" : "정보 패널",
+      },
+      0,
+    ];
+  },
+});
+
 function TableOfContentsView({ editor, selected }) {
   const [items, setItems] = useState([]);
   useEffect(() => {
@@ -1853,34 +1962,48 @@ const asHtml = (value) =>
 
 export function RichPreview({ html, className = "" }) {
   const root = useRef(null);
+  const mermaidInstanceId = useId().replace(/:/g, "");
   useEffect(() => {
     const host = root.current;
     if (!host) return;
     let live = true;
     host.innerHTML = html;
     const diagrams = Array.from(host.querySelectorAll('[data-type="mermaid"]'));
+    const queuedMermaid = [];
     diagrams.forEach((element, index) => {
       const code = element.getAttribute("data-code") || "";
+      const blockKey =
+        element.getAttribute("data-block-id") || `preview-index-${index}`;
+      const renderScope = `${mermaidInstanceId}-${index}-${blockKey}`;
       element.classList.add("preview-mermaid");
       element.setAttribute("aria-label", "Mermaid 다이어그램");
       if (!code.trim()) {
         element.innerHTML = '<p class="preview-mermaid-error">Mermaid 소스가 비어 있습니다.</p>';
         return;
       }
-      mermaid
-        .render(
-          `ks-preview-${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`,
-          code,
-        )
-        .then(({ svg }) => {
-          if (live && element.isConnected) element.innerHTML = svg;
-        })
-        .catch(() => {
+      const cached = sharedMermaidRenders.peek(code);
+      if (cached) {
+        applyMermaidPreviewResult(element, cached, renderScope);
+        return;
+      }
+      const pending = sharedMermaidRenders.pending(code);
+      if (pending) {
+        pending.then((result) => {
           if (live && element.isConnected)
-            element.innerHTML =
-              '<p class="preview-mermaid-error">Mermaid 문법을 확인해 주세요.</p>';
+            applyMermaidPreviewResult(element, result, renderScope);
         });
+        return;
+      }
+      queuedMermaid.push({ element, code, renderScope });
     });
+    const mermaidTimer = window.setTimeout(() => {
+      queuedMermaid.forEach(({ element, code, renderScope }) => {
+        sharedMermaidRenders.render(code).then((result) => {
+          if (live && element.isConnected)
+            applyMermaidPreviewResult(element, result, renderScope);
+        });
+      });
+    }, MERMAID_RENDER_DEBOUNCE_MS);
     const plantDiagrams = Array.from(host.querySelectorAll('[data-type="plantuml"]'));
     plantDiagrams.forEach(async (element) => {
       try {
@@ -1991,12 +2114,13 @@ export function RichPreview({ html, className = "" }) {
       window.addEventListener("message", handleDrawIoMessage);
     return () => {
       live = false;
+      window.clearTimeout(mermaidTimer);
       window.removeEventListener("message", handleDrawIoMessage);
       drawIoEntries.forEach((entry) => {
         if (entry.timeout) window.clearTimeout(entry.timeout);
       });
     };
-  }, [html]);
+  }, [html, mermaidInstanceId]);
   return <article ref={root} className={`split-preview ${className}`.trim()} />;
 }
 
@@ -2482,6 +2606,22 @@ export default function RichDocumentEditor({
       keywords: "quote 인용",
     },
     {
+      id: "info",
+      label: "Info 패널",
+      command: "/info",
+      description: "참고할 내용을 강조하는 안내 상자",
+      icon: Info,
+      keywords: "info note panel macro 정보 안내 패널 매크로 confluence",
+    },
+    {
+      id: "warn",
+      label: "Warning 패널",
+      command: "/warn",
+      description: "주의가 필요한 내용을 강조하는 경고 상자",
+      icon: TriangleAlert,
+      keywords: "warn warning caution panel macro 경고 주의 패널 매크로 confluence",
+    },
+    {
       id: "divider",
       label: "구분선",
       command: "/divider",
@@ -2603,20 +2743,47 @@ export default function RichDocumentEditor({
       chain.insertTable({ rows: 3, cols: 3, withHeaderRow: true });
     else if (item.id === "code") chain.setCodeBlock();
     else if (item.id === "mermaid")
-      chain.insertContent({ type: "mermaidBlock" });
+      chain
+        .insertContent(
+          editableDiagramWithTrailingParagraph("mermaidBlock"),
+        )
+        .scrollIntoView();
     else if (item.id === "plantuml")
-      chain.insertContent({ type: "plantUmlBlock" });
+      chain
+        .insertContent(editableDiagramBlock("plantUmlBlock"))
+        .createParagraphNear()
+        .scrollIntoView();
     else if (item.id === "draw_edit")
-      chain.insertContent({ type: "drawIoBlock", attrs: { view: "edit" } });
+      chain
+        .insertContent(editableDiagramBlock("drawIoBlock", { view: "edit" }))
+        .createParagraphNear()
+        .scrollIntoView();
     else if (item.id === "draw_xml")
-      chain.insertContent({ type: "drawIoBlock", attrs: { view: "source" } });
+      chain
+        .insertContent(editableDiagramBlock("drawIoBlock", { view: "source" }))
+        .createParagraphNear()
+        .scrollIntoView();
     else if (item.id === "draw_mermaid")
-      chain.insertContent({ type: "mermaidBlock" });
+      chain
+        .insertContent(
+          editableDiagramWithTrailingParagraph("mermaidBlock"),
+        )
+        .scrollIntoView();
     else if (item.id === "imggen")
       chain.insertContent([
         { type: "imageGenerationBlock" },
         { type: "paragraph" },
       ]);
+    else if (item.id === "info" || item.id === "warn") {
+      const variant = normalizeCalloutVariant(item.id);
+      if (editor.isActive("calloutBlock"))
+        chain.updateAttributes("calloutBlock", { variant });
+      else
+        chain
+          .insertContent([calloutBlock(item.id), { type: "paragraph" }])
+          .setTextSelection(current.from + 1)
+          .scrollIntoView();
+    }
     else if (item.id === "toc")
       chain.insertContent({ type: "tableOfContents" });
     else if (item.id === "check") chain.toggleTaskList();
@@ -2644,6 +2811,7 @@ export default function RichDocumentEditor({
       StarterKit.configure({ codeBlock: false, link: false }),
       SmartCodeBlock.configure({ lowlight, defaultLanguage: "plaintext" }),
       TextStyle,
+      FontSize,
       Color,
       Highlight.configure({ multicolor: true }),
       TextAlign.configure({ types: ["heading", "paragraph"] }),
@@ -2653,6 +2821,7 @@ export default function RichDocumentEditor({
       MermaidBlock,
       PlantUmlBlock,
       DrawIoBlock,
+      CalloutBlock,
       TableOfContentsBlock,
       TaskList,
       SmartTaskItem.configure({ nested: true }),
@@ -2689,21 +2858,35 @@ export default function RichDocumentEditor({
         if (!files.length && /^@startuml[\s\S]*@enduml\s*$/i.test(text)) {
           if (!window.confirm("PlantUML 다이어그램 블록으로 변환할까요?\n취소하면 일반 텍스트로 붙여 넣습니다.")) return false;
           event.preventDefault();
-          editor?.chain().focus().insertContent({ type: "plantUmlBlock", attrs: { code: text } }).run();
+          editor
+            ?.chain()
+            .focus()
+            .insertContent(
+              editableDiagramBlock("plantUmlBlock", { code: text }),
+            )
+            .createParagraphNear()
+            .scrollIntoView()
+            .run();
           return true;
         }
-        if (
-          !files.length &&
-          /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie)\b/m.test(
-            text,
-          )
-        ) {
-          if (!window.confirm("Mermaid 다이어그램 블록으로 변환할까요?\n취소하면 일반 텍스트로 붙여 넣습니다.")) return false;
+        const mermaidPaste = !files.length
+          ? normalizeMermaidPaste(text)
+          : null;
+        if (mermaidPaste) {
+          const prompt = mermaidPaste.fenceRemoved
+            ? "복사된 Mermaid 코드 펜스를 제거하고 다이어그램 블록으로 변환할까요?"
+            : "Mermaid 다이어그램 블록으로 변환할까요?";
+          if (!window.confirm(`${prompt}\n취소하면 일반 텍스트로 붙여 넣습니다.`)) return false;
           event.preventDefault();
           editor
             ?.chain()
             .focus()
-            .insertContent({ type: "mermaidBlock", attrs: { code: text } })
+            .insertContent(
+              editableDiagramWithTrailingParagraph("mermaidBlock", {
+                code: mermaidPaste.code,
+              }),
+            )
+            .scrollIntoView()
             .run();
           return true;
         }
@@ -2723,6 +2906,19 @@ export default function RichDocumentEditor({
               .run();
             return true;
           } catch {}
+        }
+        const markdownTablePaste = !files.length
+          ? normalizeMarkdownTablePaste(text)
+          : null;
+        if (markdownTablePaste) {
+          if (!window.confirm("Markdown 표를 편집 가능한 표로 변환할까요?\n취소하면 원문을 붙여 넣습니다.")) return false;
+          event.preventDefault();
+          editor
+            ?.chain()
+            .focus()
+            .insertContent(marked.parse(markdownTablePaste.markdown))
+            .run();
+          return true;
         }
         const lines = text.split(/\r?\n/).filter((line) => line.length);
         const delimiter =
@@ -3292,6 +3488,10 @@ export default function RichDocumentEditor({
     };
   }, [editor]);
   if (!editor) return null;
+  const inTable = editor.isActive("table");
+  const hasSelectedText =
+    editor.state.selection instanceof TextSelection &&
+    !editor.state.selection.empty;
   const inCode = editor.isActive("codeBlock");
   const inTask = editor.isActive("taskItem");
   const taskAttrs = editor.getAttributes("taskItem");
@@ -3316,29 +3516,84 @@ export default function RichDocumentEditor({
   const insertMermaid = () => {
     const pos = pendingDiagramPos.current;
     if (pos != null)
-      editor.commands.insertContentAt(pos, { type: "mermaidBlock" });
-    else editor.chain().focus().insertContent({ type: "mermaidBlock" }).run();
+      editor
+        .chain()
+        .focus()
+        .insertContentAt(
+          pos,
+          editableDiagramWithTrailingParagraph("mermaidBlock"),
+        )
+        .scrollIntoView()
+        .run();
+    else
+      editor
+        .chain()
+        .focus()
+        .insertContent(
+          editableDiagramWithTrailingParagraph("mermaidBlock"),
+        )
+        .scrollIntoView()
+        .run();
     pendingDiagramPos.current = null;
     setDiagramOpen(false);
   };
   const insertPlantUml = () => {
     const pos = pendingDiagramPos.current;
-    if (pos != null) editor.commands.insertContentAt(pos, { type: "plantUmlBlock" });
-    else editor.chain().focus().insertContent({ type: "plantUmlBlock" }).run();
+    if (pos != null)
+      editor
+        .chain()
+        .focus()
+        .insertContentAt(pos, editableDiagramBlock("plantUmlBlock"))
+        .createParagraphNear()
+        .scrollIntoView()
+        .run();
+    else
+      editor
+        .chain()
+        .focus()
+        .insertContent(editableDiagramBlock("plantUmlBlock"))
+        .createParagraphNear()
+        .scrollIntoView()
+        .run();
     pendingDiagramPos.current = null;
     setDiagramOpen(false);
   };
   const insertDrawIo = () => {
     const pos = pendingDiagramPos.current;
-    if (pos != null) editor.commands.insertContentAt(pos, { type: "drawIoBlock", attrs: { view: "edit" } });
-    else editor.chain().focus().insertContent({ type: "drawIoBlock", attrs: { view: "edit" } }).run();
+    if (pos != null)
+      editor
+        .chain()
+        .focus()
+        .insertContentAt(
+          pos,
+          editableDiagramBlock("drawIoBlock", { view: "edit" }),
+        )
+        .createParagraphNear()
+        .scrollIntoView()
+        .run();
+    else
+      editor
+        .chain()
+        .focus()
+        .insertContent(
+          editableDiagramBlock("drawIoBlock", { view: "edit" }),
+        )
+        .createParagraphNear()
+        .scrollIntoView()
+        .run();
     pendingDiagramPos.current = null;
     setDiagramOpen(false);
   };
-  const restoreSelection = (chain) =>
-    savedSelection.current
-      ? chain.setTextSelection(savedSelection.current)
-      : chain;
+  const restoreSelection = (chain) => {
+    const selection = savedSelection.current;
+    const maxPosition = editor.state.doc.content.size;
+    const isValidSelection =
+      selection &&
+      selection.from >= 0 &&
+      selection.from < selection.to &&
+      selection.to <= maxPosition;
+    return isValidSelection ? chain.setTextSelection(selection) : chain;
+  };
   const setLink = () => {
     const previous = editor.getAttributes("link").href || "https://";
     const href = window.prompt("링크 주소", previous);
@@ -3770,6 +4025,7 @@ export default function RichDocumentEditor({
           onMouseDown={() => {
             const { from, to } = editor.state.selection;
             if (from !== to) savedSelection.current = { from, to };
+            else savedSelection.current = null;
           }}
         >
           <select
@@ -3796,6 +4052,25 @@ export default function RichDocumentEditor({
             <option value="h4">제목 4</option>
             <option value="h5">제목 5</option>
             <option value="h6">제목 6</option>
+          </select>
+          <select
+            aria-label="글자 크기"
+            defaultValue=""
+            onChange={(event) => {
+              const value = event.target.value;
+              if (!value || !savedSelection.current) return;
+              restoreSelection(editor.chain().focus())
+                .setMark("textStyle", { fontSize: `${value}px` })
+                .run();
+            }}
+          >
+            <option value="" disabled>크기</option>
+            <option value="12">12</option>
+            <option value="14">14</option>
+            <option value="16">16</option>
+            <option value="18">18</option>
+            <option value="24">24</option>
+            <option value="32">32</option>
           </select>
           <i />
           <button
@@ -3838,7 +4113,7 @@ export default function RichDocumentEditor({
                   style={{ background: c }}
                   onMouseDown={(e) => {
                     e.preventDefault();
-                    if (inTable)
+                    if (inTable && !hasSelectedText)
                       editor
                         .chain()
                         .focus()
@@ -3872,7 +4147,7 @@ export default function RichDocumentEditor({
                   style={{ background: c }}
                   onMouseDown={(e) => {
                     e.preventDefault();
-                    if (inTable)
+                    if (inTable && !hasSelectedText)
                       editor
                         .chain()
                         .focus()

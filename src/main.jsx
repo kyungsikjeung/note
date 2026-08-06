@@ -9,6 +9,11 @@ import {
   requiresMcpUserApproval,
 } from "../mcp/write-approval.mjs";
 import {
+  readLastLocation,
+  resolveLastLocation,
+  saveLastLocation,
+} from "./last-location.mjs";
+import {
   Search,
   Plus,
   FileText,
@@ -70,6 +75,7 @@ import {
 } from "lucide-react";
 import "highlight.js/styles/github.css";
 import "./styles.css";
+import "./large-screen.css";
 import "./slash.css";
 import "./settings.css";
 import "./settings-agent.css";
@@ -706,8 +712,16 @@ function TableDesigner({ onCancel, onInsert }) {
 
 function App() {
   const [data, setData] = useState(loadData);
-  const [projectId, setProjectId] = useState("p1");
-  const [noteId, setNoteId] = useState("n1");
+  const initialLocation = useRef(null);
+  if (!initialLocation.current)
+    initialLocation.current = resolveLastLocation(
+      data,
+      readLastLocation(window.localStorage),
+    );
+  const [projectId, setProjectId] = useState(
+    initialLocation.current.projectId,
+  );
+  const [noteId, setNoteId] = useState(initialLocation.current.noteId);
   const [mode, setMode] = useState("split");
   const [leftOpen, setLeftOpen] = useState(true);
   const [search, setSearch] = useState("");
@@ -812,6 +826,7 @@ function App() {
   const undoStack = useRef([]);
   const redoStack = useRef([]);
   const storageReady = useRef(false);
+  const locationReady = useRef(false);
   const dataRef = useRef(data);
   dataRef.current = data;
   const mcpRoutedOperationIds = useRef(new Set());
@@ -885,14 +900,46 @@ function App() {
   }), [data.notes, projectId]);
   useEffect(() => {
     let live = true;
-    window.ksnoteStorage?.load().then((stored) => {
+    const loadPromise = window.ksnoteStorage?.load?.();
+    if (!loadPromise || typeof loadPromise.then !== "function") {
+      locationReady.current = true;
+      return () => { live = false; };
+    }
+    loadPromise.then((stored) => {
       if (!live) return;
-      if (stored?.projects && stored?.notes) setData(stored);
+      const hasStoredData = Boolean(stored?.projects && stored?.notes);
+      const nextData = hasStoredData ? stored : dataRef.current;
+      if (hasStoredData) {
+        const location = resolveLastLocation(
+          nextData,
+          readLastLocation(window.localStorage),
+        );
+        setData(nextData);
+        setProjectId(location.projectId);
+        setNoteId(location.noteId);
+      }
       storageReady.current = true;
-      if (!stored) window.ksnoteStorage?.save(data);
-    }).catch(() => { storageReady.current = true; });
+      locationReady.current = true;
+      if (!hasStoredData) window.ksnoteStorage?.save?.(nextData);
+    }).catch(() => {
+      if (!live) return;
+      storageReady.current = true;
+      locationReady.current = true;
+    });
     return () => { live = false; };
   }, []);
+  useEffect(() => {
+    if (!locationReady.current || !projectId || !noteId) return;
+    const activeNote = dataRef.current.notes.find(
+      (item) =>
+        !item.trashed && item.id === noteId && item.projectId === projectId,
+    );
+    if (activeNote)
+      saveLastLocation(window.localStorage, {
+        projectId: activeNote.projectId,
+        noteId: activeNote.id,
+      });
+  }, [projectId, noteId]);
   useEffect(() => {
     setSaved(false);
     const t = setTimeout(() => {

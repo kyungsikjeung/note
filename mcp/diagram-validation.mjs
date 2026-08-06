@@ -1,5 +1,33 @@
 const MERMAID_DECLARATION = /^(?:---[\s\S]*?---\s*)?(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|gantt|pie|journey|mindmap|timeline|quadrantChart|xychart-beta|block-beta|architecture-beta|gitGraph|C4\w*)\b/i;
 
+const parseMarkdownFence = (line) => {
+  const match = String(line || "").match(/^\s*(`{3,})\s*([^`]*)\s*$/);
+  if (!match) return null;
+  return {
+    size: match[1].length,
+    language: match[2].trim().toLowerCase().split(/\s+/)[0] || "",
+  };
+};
+
+const isMermaidFenceLanguage = (language) =>
+  ["", "mermaid"].includes(language);
+
+const unwrapMarkdownFence = (value) => {
+  const lines = String(value || "").split("\n");
+  if (lines.length < 2) return null;
+  const opening = parseMarkdownFence(lines[0]);
+  const closing = parseMarkdownFence(lines.at(-1));
+  if (
+    !opening ||
+    !closing ||
+    closing.language ||
+    closing.size < opening.size ||
+    !isMermaidFenceLanguage(opening.language)
+  )
+    return null;
+  return lines.slice(1, -1).join("\n").trim();
+};
+
 const attributeMap = (tag) => {
   const attributes = {};
   for (const match of tag.matchAll(/([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g))
@@ -128,4 +156,43 @@ export const validateDiagramSource = (formatValue, value) => {
     code,
     details: drawIoResult.details || {},
   };
+};
+
+export const normalizeMermaidPaste = (value) => {
+  const original = String(value || "")
+    .replace(/^\uFEFF/, "")
+    .replace(/\r\n?/g, "\n")
+    .trim();
+  if (!original) return null;
+
+  let code = original;
+  let fenceRemoved = false;
+  for (let depth = 0; depth < 8; depth += 1) {
+    const unwrapped = unwrapMarkdownFence(code);
+    if (unwrapped !== null) {
+      code = unwrapped;
+      fenceRemoved = true;
+      continue;
+    }
+
+    const lines = code.split("\n");
+    const opening = parseMarkdownFence(lines[0]);
+    if (opening && isMermaidFenceLanguage(opening.language)) {
+      code = lines.slice(1).join("\n").trim();
+      fenceRemoved = true;
+      continue;
+    }
+
+    const closing = parseMarkdownFence(lines.at(-1));
+    if (closing && !closing.language) {
+      code = lines.slice(0, -1).join("\n").trim();
+      fenceRemoved = true;
+      continue;
+    }
+    break;
+  }
+
+  const validation = validateDiagramSource("mermaid", code);
+  if (!validation.ok) return null;
+  return { code: validation.code, fenceRemoved };
 };
