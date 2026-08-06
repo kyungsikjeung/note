@@ -1827,6 +1827,27 @@ const DrawIoBlock = Node.create({
   },
 });
 
+const FontSize = Extension.create({
+  name: "fontSize",
+  addGlobalAttributes() {
+    return [
+      {
+        types: ["textStyle"],
+        attributes: {
+          fontSize: {
+            default: null,
+            parseHTML: (element) => element.style.fontSize || null,
+            renderHTML: (attributes) =>
+              attributes.fontSize
+                ? { style: `font-size:${attributes.fontSize}` }
+                : {},
+          },
+        },
+      },
+    ];
+  },
+});
+
 const CalloutBlock = Node.create({
   name: "calloutBlock",
   group: "block",
@@ -2790,6 +2811,7 @@ export default function RichDocumentEditor({
       StarterKit.configure({ codeBlock: false, link: false }),
       SmartCodeBlock.configure({ lowlight, defaultLanguage: "plaintext" }),
       TextStyle,
+      FontSize,
       Color,
       Highlight.configure({ multicolor: true }),
       TextAlign.configure({ types: ["heading", "paragraph"] }),
@@ -3562,10 +3584,16 @@ export default function RichDocumentEditor({
     pendingDiagramPos.current = null;
     setDiagramOpen(false);
   };
-  const restoreSelection = (chain) =>
-    savedSelection.current
-      ? chain.setTextSelection(savedSelection.current)
-      : chain;
+  const restoreSelection = (chain) => {
+    const selection = savedSelection.current;
+    const maxPosition = editor.state.doc.content.size;
+    const isValidSelection =
+      selection &&
+      selection.from >= 0 &&
+      selection.from < selection.to &&
+      selection.to <= maxPosition;
+    return isValidSelection ? chain.setTextSelection(selection) : chain;
+  };
   const setLink = () => {
     const previous = editor.getAttributes("link").href || "https://";
     const href = window.prompt("링크 주소", previous);
@@ -3997,6 +4025,7 @@ export default function RichDocumentEditor({
           onMouseDown={() => {
             const { from, to } = editor.state.selection;
             if (from !== to) savedSelection.current = { from, to };
+            else savedSelection.current = null;
           }}
         >
           <select
@@ -4023,6 +4052,25 @@ export default function RichDocumentEditor({
             <option value="h4">제목 4</option>
             <option value="h5">제목 5</option>
             <option value="h6">제목 6</option>
+          </select>
+          <select
+            aria-label="글자 크기"
+            defaultValue=""
+            onChange={(event) => {
+              const value = event.target.value;
+              if (!value || !savedSelection.current) return;
+              restoreSelection(editor.chain().focus())
+                .setMark("textStyle", { fontSize: `${value}px` })
+                .run();
+            }}
+          >
+            <option value="" disabled>크기</option>
+            <option value="12">12</option>
+            <option value="14">14</option>
+            <option value="16">16</option>
+            <option value="18">18</option>
+            <option value="24">24</option>
+            <option value="32">32</option>
           </select>
           <i />
           <button

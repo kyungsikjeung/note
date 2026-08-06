@@ -174,7 +174,7 @@
   margin: 0 auto;
   padding: 36px 18px 120px;
   outline: 0;
-  font: 14px/1.75 var(--body);
+  font: var(--ks-editor-size, 14px) / 1.75 var(--ks-editor-font, var(--body));
   color: #263638;
 }
 .mori-rich-content h1 {
