@@ -204,6 +204,10 @@ class CodexAppServerClient extends EventEmitter {
     return this.request("model/list", { limit: 100, includeHidden: false });
   }
 
+  async mcpServerStatusList() {
+    return this.request("mcpServerStatus/list", {});
+  }
+
   async runTurn({
     contextKey,
     existingThreadId,

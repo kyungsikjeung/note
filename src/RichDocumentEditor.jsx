@@ -50,6 +50,7 @@ import {
   stepDrawioZoom,
 } from "../mcp/drawio-preview.mjs";
 import { isApprovedMcpOperation } from "../mcp/write-approval.mjs";
+import { validateAIPatch } from "../mcp/patch-schema.mjs";
 import {
   Bold,
   Italic,
@@ -339,7 +340,7 @@ const detectEncodingDamage = (value) => {
   return null;
 };
 
-const parseAIPatch = (value, fallbackTarget) => {
+const parseAIPatch = (value, fallbackTarget, context = {}) => {
   const raw = String(value || "").trim();
   const candidate = raw
     .replace(/^\s*```(?:json)?\s*/i, "")
@@ -352,6 +353,8 @@ const parseAIPatch = (value, fallbackTarget) => {
       ["replace", "insert_before", "insert_after"].includes(patch.operation) &&
       typeof patch.html === "string"
     ) {
+      const validation = validateAIPatch(patch, context);
+      if (!validation.ok) throw new Error(validation.message);
       return {
         ...patch,
         target: ["note", "selection", "block", "table"].includes(patch.target)
@@ -411,6 +414,7 @@ const getActiveBlockContext = (editor) => {
       target: "block",
       range: { from: $from.before(depth), to: $from.after(depth) },
       nodeType: node.type.name,
+      blockId: node.attrs?.blockId || undefined,
       label:
         node.type.name === "codeBlock"
           ? "현재 코드 블록"
@@ -537,6 +541,93 @@ const downloadSvg = (svg, name, format = "svg") => {
   };
   image.src = url;
 };
+
+const svgToPngBlob = (svg) =>
+  new Promise((resolve, reject) => {
+    const source = String(svg || "");
+    if (!/<svg\b/i.test(source)) {
+      reject(new Error("복사할 다이어그램 이미지가 없습니다."));
+      return;
+    }
+
+    const image = new window.Image();
+    const url = URL.createObjectURL(
+      new Blob([source], { type: "image/svg+xml;charset=utf-8" }),
+    );
+    const release = () => URL.revokeObjectURL(url);
+    image.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, image.naturalWidth || 1200);
+        canvas.height = Math.max(1, image.naturalHeight || 800);
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("이미지 변환 캔버스를 만들 수 없습니다.");
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob((blob) => {
+          release();
+          if (blob) resolve(blob);
+          else reject(new Error("PNG 이미지 변환에 실패했습니다."));
+        }, "image/png");
+      } catch (error) {
+        release();
+        reject(error);
+      }
+    };
+    image.onerror = () => {
+      release();
+      reject(new Error("SVG 이미지를 읽을 수 없습니다."));
+    };
+    image.src = url;
+  });
+
+const copySvgImageToClipboard = async (svg) => {
+  if (!navigator.clipboard?.write || typeof window.ClipboardItem !== "function")
+    throw new Error("이 환경에서는 이미지 클립보드 복사를 지원하지 않습니다.");
+
+  await navigator.clipboard.write([
+    new window.ClipboardItem({ "image/png": svgToPngBlob(svg) }),
+  ]);
+};
+
+function DiagramImageCopyButton({ svg }) {
+  const [copyState, setCopyState] = useState("idle");
+  const resetTimer = useRef(null);
+  useEffect(
+    () => () => window.clearTimeout(resetTimer.current),
+    [],
+  );
+
+  const copyImage = async () => {
+    try {
+      await copySvgImageToClipboard(svg);
+      setCopyState("copied");
+    } catch (error) {
+      setCopyState("error");
+      window.alert(error?.message || "이미지를 클립보드에 복사하지 못했습니다.");
+    }
+    window.clearTimeout(resetTimer.current);
+    resetTimer.current = window.setTimeout(() => setCopyState("idle"), 1600);
+  };
+
+  const title = copyState === "copied"
+    ? "이미지를 클립보드에 복사했습니다"
+    : copyState === "error"
+      ? "이미지 복사 실패"
+      : "이미지 복사 (PNG)";
+  return (
+    <button
+      type="button"
+      className="diagram-image-copy"
+      title={title}
+      aria-label={title}
+      disabled={!svg}
+      onClick={copyImage}
+    >
+      {copyState === "copied" ? <Check /> : <ImageIcon />}
+      <span>{copyState === "copied" ? "복사됨" : "이미지 복사"}</span>
+    </button>
+  );
+}
 
 const downloadTextFile = (content, name, extension = "txt", type = "text/plain") => {
   const url = URL.createObjectURL(new Blob([content || ""], { type }));
@@ -935,7 +1026,7 @@ const diagramAuditAttributes = () => ({
 });
 
 function PlantUmlView({ node, selected, updateAttributes, deleteNode, editor, getPos }) {
-  const [mode, setMode] = useState("split");
+  const [mode, setMode] = useState("preview");
   const [svg, setSvg] = useState("");
   const [error, setError] = useState("");
   const sourceEmpty = !String(node.attrs.code || "").trim();
@@ -961,6 +1052,7 @@ function PlantUmlView({ node, selected, updateAttributes, deleteNode, editor, ge
         <span><Workflow /> PlantUML</span>
         <nav>{["source", "split", "preview"].map((item) => <button key={item} className={mode === item ? "active" : ""} onClick={() => setMode(item)}>{item[0].toUpperCase() + item.slice(1)}</button>)}</nav>
         <button title="소스 복사" onClick={() => navigator.clipboard.writeText(node.attrs.code)}><Copy /></button>
+        <DiagramImageCopyButton svg={svg} />
         <button title="SVG 저장" onClick={() => downloadSvg(svg, "plantuml-diagram")}><Download /></button>
         <button title="PNG 저장" onClick={() => downloadSvg(svg, "plantuml-diagram", "png")}>PNG</button>
         <button title="Mermaid 블록으로 변환" onClick={() => replaceDiagramNode(editor, getPos, "mermaidBlock", plantUmlToMermaid(node.attrs.code))}>→ Mermaid</button>
@@ -1062,7 +1154,7 @@ const verifyDiagramBeforeInsert = async (format, code, _operationId, preferences
 };
 
 function MermaidView({ node, selected, updateAttributes, deleteNode, editor, getPos }) {
-  const [mode, setMode] = useState("split"),
+  const [mode, setMode] = useState("preview"),
     [error, setError] = useState(""),
     [svgOutput, setSvgOutput] = useState("");
   const renderSeq = useRef(0);
@@ -1142,6 +1234,7 @@ function MermaidView({ node, selected, updateAttributes, deleteNode, editor, get
         >
           <Copy />
         </button>
+        <DiagramImageCopyButton svg={svgOutput} />
         <button title="SVG 저장" onClick={() => downloadSvg(svgOutput, "mermaid-diagram")}><Download /></button>
         <button title="PNG 저장" onClick={() => downloadSvg(svgOutput, "mermaid-diagram", "png")}>PNG</button>
         <button title="PlantUML 블록으로 변환" onClick={() => replaceDiagramNode(editor, getPos, "plantUmlBlock", mermaidToPlantUml(node.attrs.code))}>→ PlantUML</button>
@@ -3874,7 +3967,12 @@ export default function RichDocumentEditor({
       }, 700);
       const rawOutput = await runPromise;
       setAiProgress((value) => ({ ...value, stage: "preview" }));
-      const patch = aiMode === "edit" ? parseAIPatch(rawOutput, target) : null;
+      const patch = aiMode === "edit"
+        ? parseAIPatch(rawOutput, target, {
+            blockId: editContext.blockId,
+            sourceRevision,
+          })
+        : null;
       if (patch) patch.operation = operation;
       if (patch && target === "table")
         patch.html = preserveTableFormatting(selectionHtml, patch.html);

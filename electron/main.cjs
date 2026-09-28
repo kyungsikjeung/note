@@ -854,15 +854,33 @@ ipcMain.handle("rovo-diagnose", async (_, request) => {
   if (!command || /[;&|<>\r\n]/.test(command))
     throw new Error("Codex 실행 명령을 확인해 주세요.");
   const result = await captureCommand(command, ["mcp", "get", "atlassian"]);
+  let account = null;
+  let serverStatus = null;
+  try {
+    const appServer = getCodexAppServer(command);
+    await appServer.start();
+    account = (await appServer.accountRead())?.account || null;
+    const statusResult = await appServer.mcpServerStatusList();
+    const statuses = statusResult?.servers || statusResult?.data || statusResult || [];
+    serverStatus = Array.isArray(statuses)
+      ? statuses.find((item) => /atlassian|rovo/i.test(`${item?.name || ""} ${item?.serverName || ""}`))
+      : null;
+  } catch {}
   const configured =
     result.ok && /enabled:\s*true/i.test(result.output) && /mcp\.atlassian\.com/i.test(result.output);
   return {
     ok: configured,
     configured,
     endpoint: configured ? "https://mcp.atlassian.com/v1/mcp/authv2" : "",
-    authenticated: null,
+    authenticated: configured
+      ? serverStatus?.authenticated === true || serverStatus?.authenticated === "true" || serverStatus?.authStatus === "authenticated"
+      : false,
+    account,
+    serverStatus,
     message: configured
-      ? "Rovo MCP 구성됨 · OAuth는 첫 조사 실행에서 확인"
+      ? (serverStatus?.authenticated === true || serverStatus?.authenticated === "true" || serverStatus?.authStatus === "authenticated"
+        ? `Atlassian Rovo OAuth 인증됨${account?.email ? ` · ${account.email}` : ""}`
+        : "Atlassian Rovo가 구성되었지만 OAuth 인증이 필요합니다.")
       : "Atlassian MCP가 아직 구성되지 않았습니다.",
   };
 });
@@ -1079,12 +1097,14 @@ function formatCliError(stderr, command, code) {
 }
 
 ipcMain.handle("ai-run", async (_, request) => {
+  if (request.mode === "external-write" && request.externalWriteApproval !== true)
+    throw new Error("외부 쓰기는 별도 작업 모드에서 명시적으로 승인해야 합니다.");
   const system =
     request.mode === "research"
       ? "Use the configured Atlassian Rovo tools to inspect the Jira or Confluence resources explicitly requested by the user. Read only. Answer in Korean. Include source URLs and a Sources section. Never create, update, or delete external content or local files."
       : request.mode === "ask"
       ? "You answer questions about the supplied note. Answer in Korean, concisely. Do not use tools. Do not modify files."
-      : "You are a document editor operating on one explicitly supplied editor target. Return ONLY one JSON object with this exact shape: {\"version\":1,\"operation\":\"replace|insert_before|insert_after\",\"target\":\"note|selection|block|table\",\"html\":\"valid HTML fragment\",\"summary\":\"short Korean summary\"}. Obey REQUESTED OPERATION. For insert_before or insert_after, html contains only the new content and must not repeat the existing target. For replace, html contains only the replacement target. Never invent or rewrite content outside the supplied target. Preserve table structure and existing cell style attributes unless explicitly asked to change formatting. Do not use markdown fences, explanations, or tools.";
+      : "You are a document editor operating on one explicitly supplied editor target. Return ONLY one JSON object with this exact shape: {\"version\":1,\"operation\":\"replace|insert_before|insert_after\",\"target\":\"note|selection|block|table\",\"blockId\":\"target block id when target=block\",\"expectedRevision\":\"source revision\",\"html\":\"valid HTML fragment\",\"summary\":\"short Korean summary\"}. Obey REQUESTED OPERATION. For insert_before or insert_after, html contains only the new content and must not repeat the existing target. For replace, html contains only the replacement target. Never invent or rewrite content outside the supplied target. Preserve table structure and existing cell style attributes unless explicitly asked to change formatting. Do not use markdown fences, explanations, or tools.";
   const sessionId = request.sessionId || `${request.projectId || "workspace"}:${request.noteId || "note"}:${request.mode || "edit"}`;
   const storedSession = readAiSession(sessionId);
   const currentNoteContent = request.noteContent || request.content || "";

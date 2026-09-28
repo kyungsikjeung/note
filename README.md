@@ -50,6 +50,9 @@ npm run desktop
 - 로컬 CLI 기반 Codex/Claude 실행
 - 현재 데이터 저장소: SQLite + 로컬 assets (`localStorage`는 호환 백업)
 
+구조와 주요 실행 흐름은 [아키텍처 및 주요 동작 흐름](docs/architecture-overview.md)에서
+Mermaid 다이어그램으로 확인할 수 있다.
+
 ---
 
 # MVP 1 — Smart Editor

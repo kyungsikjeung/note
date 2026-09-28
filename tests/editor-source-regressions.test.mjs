@@ -67,3 +67,18 @@ test("editor and preview share the code-keyed Mermaid render cache", () => {
   assert.doesNotMatch(editorSource, /const mermaidCache = useRef/);
   assert.doesNotMatch(editorSource, /const mermaidPending = useRef/);
 });
+
+test("diagram blocks default to preview and copy rendered PNG images", () => {
+  assert.equal(
+    editorSource.match(/\[mode, setMode\] = useState\("preview"\)/g)?.length,
+    2,
+  );
+  assert.match(editorSource, /const copySvgImageToClipboard = async \(svg\)/);
+  assert.match(
+    editorSource,
+    /new window\.ClipboardItem\(\{ "image\/png": svgToPngBlob\(svg\) \}\)/,
+  );
+  assert.match(editorSource, /<DiagramImageCopyButton svg=\{svg\} \/>/);
+  assert.match(editorSource, /<DiagramImageCopyButton svg=\{svgOutput\} \/>/);
+  assert.match(editorSource, /"이미지 복사"/);
+});
