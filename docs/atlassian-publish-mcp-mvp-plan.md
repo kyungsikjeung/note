@@ -364,8 +364,8 @@ CREATE TABLE external_publications (
 
 ## 7. MVP 완료 기준
 
-- [ ] KsNote가 `codex app-server`와 초기화·종료를 안정적으로 수행한다.
-- [ ] Codex 로그인과 Rovo OAuth 상태를 구조화된 값으로 표시한다.
+- [x] KsNote가 `codex app-server`와 초기화·종료를 안정적으로 수행한다.
+- [x] Codex 로그인과 Rovo OAuth 상태를 구조화된 값으로 표시한다.
 - [ ] 도구명을 하드코딩하지 않고 런타임 schema에서 Confluence 생성 도구를 찾는다.
 - [ ] 현재 노트를 유효한 ADF로 변환하고 schema 검증한다.
 - [ ] 표의 구조·병합·열 너비가 Confluence에서 허용 범위 내 유지된다.
@@ -374,7 +374,7 @@ CREATE TABLE external_publications (
 - [ ] Codex/App MCP 승인 요청을 KsNote UI에서 승인 또는 거절할 수 있다.
 - [ ] 성공한 페이지의 ID, URL, source revision, hash가 SQLite에 저장된다.
 - [ ] 취소·거절·로그인 만료·권한 부족이 서로 다른 오류로 표시된다.
-- [ ] 일반 AI 질문과 Rovo 조사 모드는 계속 외부 쓰기가 불가능하다.
+- [x] 일반 AI 질문과 Rovo 조사 모드는 계속 외부 쓰기가 불가능하다.
 
 ## 8. 후속 증분
 

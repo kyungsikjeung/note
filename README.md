@@ -447,7 +447,7 @@ Mermaid 다이어그램으로 확인할 수 있다.
 - [x] Claude 도구 사용을 제한한 print 모드 실행
 - [x] 앱이 계정 비밀번호나 웹 세션 쿠키를 저장하지 않음
 - [x] 사용자 설정 CLI 명령의 위험한 shell 구분자 차단
-- [ ] Block ID 기반 Patch Schema
+- [x] Block ID 기반 Patch Schema
 - [x] revision 기반 충돌 확인
 - [x] AI 변경 revision 자동 저장
 - [x] 변경 전후 diff와 부분 선택 적용
@@ -470,7 +470,7 @@ Mermaid 다이어그램으로 확인할 수 있다.
 - [x] 조사 모드에서도 Codex 파일 시스템 sandbox는 read-only 유지
 - [x] 허용 MCP 서버를 Atlassian Rovo로 제한하고 다른 전역 MCP 서버는 차단
 - [x] Atlassian Rovo MCP 구성·활성화 상태 진단
-- [ ] Atlassian 로그인 및 OAuth 연결 상태 진단
+- [x] Atlassian 로그인 및 OAuth 연결 상태 진단
 - [ ] 현재 인증 사용자와 접근 가능한 Atlassian 사이트 표시
 - [ ] 접근 가능한 Jira 프로젝트와 Confluence 공간을 읽기 전용으로 조회
 - [x] Confluence URL에서 site, space, page ID 자동 판별
@@ -693,15 +693,15 @@ polling을 유지하므로, 백그라운드 절전 때문에 열린 앱을 닫�
 
 - [x] `workspace_get_context`
 - [x] `project_list`
-- [ ] `note_search`
+- [x] `note_search`
 - [x] `note_get`
 - [x] `diagram_capabilities`
 - [x] 앱 heartbeat 조회
 - [ ] `task_query`
 - [ ] `asset_get`
-- [ ] `history_list`
-- [ ] pagination
-- [ ] 검색 결과 score와 snippet
+- [x] `history_list`
+- [x] pagination
+- [x] 검색 결과 score와 snippet
 - [ ] block/heading 범위 읽기
 
 ## 3. 쓰기 MCP Tools
@@ -714,7 +714,7 @@ polling을 유지하므로, 백그라운드 절전 때문에 열린 앱을 닫�
 - [x] `operation_get`
 - [ ] `note_move`
 - [ ] `task_update`
-- [ ] `history_restore`
+- [x] `history_restore`
 - [x] expected revision 검사
 - [x] 작업 queue atomic write
 - [x] pending/applying/completed/error/expired 상태
@@ -726,7 +726,7 @@ polling을 유지하므로, 백그라운드 절전 때문에 열린 앱을 닫�
 - [x] 텍스트 인코딩 손상 의심 입력 차단
 - [ ] 최소 block patch
 - [ ] 쓰기 전 diff
-- [ ] 쓰기 승인
+- [x] 쓰기 승인
 - [x] 충돌 응답
 
 ## 4. Codex 연결
@@ -755,11 +755,11 @@ polling을 유지하므로, 백그라운드 절전 때문에 열린 앱을 닫�
 - [x] Codex가 `diagram_insert`로 현재 클릭 지점에 Mermaid/PlantUML/draw.io 블록을 삽입할 수 있다.
 - [x] Codex가 안정 block ID로 기존 다이어그램을 교체하거나 정확히 삭제할 수 있다.
 - [x] Codex가 `diagram_capabilities`로 적합한 다이어그램 형식을 선택할 수 있다.
-- [ ] 프로젝트 전체 노트를 검색할 수 있다.
+- [x] 프로젝트 전체 노트를 검색할 수 있다.
 - [x] 쓰기 작업은 변경 미리보기 후 사용자 승인을 요구한다.
 - [x] UI와 Codex가 동시에 편집할 때 expected revision이 있으면 자동 덮어쓰지 않는다.
 - [x] 완료 operation은 SQLite 저장 확인 뒤 성공을 반환하며 토스트에서 즉시 Undo할 수 있다.
-- [ ] 모든 MCP 변경을 history에서 복구할 수 있다.
+- [x] 모든 MCP 변경을 history에서 복구할 수 있다.
 
 ---
 

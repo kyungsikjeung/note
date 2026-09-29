@@ -32,6 +32,7 @@ import {
   validateDiagramSource,
 } from "../mcp/diagram-validation.mjs";
 import { normalizeMarkdownTablePaste } from "./markdown-table-paste.mjs";
+import { resolveBlockNode, resolveBlockOffset } from "./block-anchor.mjs";
 import {
   calloutBlock,
   editableDiagramBlock,
@@ -233,27 +234,6 @@ const editorTargetSnapshot = (editor, noteId, projectId) => {
     empty: from === to,
     text: editor.state.doc.textBetween(from, to, "\n").slice(0, 240),
   };
-};
-
-const resolveBlockOffset = (doc, blockId, offset = 0) => {
-  if (!blockId) return undefined;
-  let resolved;
-  doc.descendants((node, pos) => {
-    if (resolved !== undefined || node.attrs?.blockId !== blockId) return;
-    const contentSize = Math.max(0, node.content.size);
-    resolved = pos + 1 + Math.min(Math.max(0, offset), contentSize);
-  });
-  return resolved;
-};
-
-const resolveBlockNode = (doc, blockId) => {
-  if (!blockId) return null;
-  let resolved = null;
-  doc.descendants((node, pos) => {
-    if (resolved || node.attrs?.blockId !== blockId) return;
-    resolved = { node, pos };
-  });
-  return resolved;
 };
 
 const stripHtmlFence = (value) =>
@@ -2353,6 +2333,7 @@ export default function RichDocumentEditor({
   });
   const [aiOpen, setAiOpen] = useState(false),
     [aiMode, setAiMode] = useState("edit"),
+    [aiDiagramFormat, setAiDiagramFormat] = useState("auto"),
     [aiPrompt, setAiPrompt] = useState(""),
     [aiModel, setAiModel] = useState(preferredModel),
     [aiLoading, setAiLoading] = useState(false),
@@ -3355,6 +3336,38 @@ export default function RichDocumentEditor({
             undoable: true,
             undo: () => editor.chain().focus().undo().run(),
             message: "MCP 작업 완료: 지정한 다이어그램 블록을 삭제했습니다.",
+            targetNoteId: noteId,
+            source: claimed.code || "",
+            sourceTitle: "삭제된 다이어그램 소스",
+          });
+          return;
+        }
+        const isHistoryRestore = claimed.type === "history_restore";
+        if (isHistoryRestore) {
+          if (typeof claimed.content !== "string" || !claimed.content)
+            throw Object.assign(
+              new Error("복원할 History 스냅샷이 없습니다."),
+              { code: "restore_snapshot_missing" },
+            );
+          editor.chain().focus().setContent(claimed.content).run();
+          const appliedRevision = contentRevision(editor.getHTML());
+          if (!onPersistContent)
+            throw new Error("SQLite 저장 브리지가 준비되지 않았습니다.");
+          await onPersistContent(editor.getHTML());
+          await window.ksnoteMcp?.complete?.({
+            id: claimed.id,
+            status: "completed",
+            appliedRevision,
+            restoreRevisionId: claimed.restoreRevisionId,
+          });
+          onExternalOperation?.({
+            status: "completed",
+            undoable: true,
+            undo: () => editor.chain().focus().undo().run(),
+            message: "MCP 작업 완료: History 스냅샷으로 복원했습니다.",
+            targetNoteId: noteId,
+            source: claimed.content,
+            sourceTitle: "복원된 스냅샷",
           });
           return;
         }
@@ -3484,6 +3497,11 @@ export default function RichDocumentEditor({
               : format === "drawio"
                 ? "MCP 작업 완료: draw.io 다이어그램을 삽입했습니다."
               : "MCP 작업 완료: Mermaid 다이어그램을 삽입했습니다.",
+          targetNoteId: noteId,
+          source: claimed.text || claimed.code || "",
+          sourceTitle: isTextInsert
+            ? "삽입된 텍스트"
+            : "삽입된 다이어그램 소스",
         });
       } catch (error) {
         await window.ksnoteMcp?.complete?.({
@@ -3945,6 +3963,7 @@ export default function RichDocumentEditor({
         model: selectedModel?.id,
         command: agentCommands[provider],
         mode: aiMode,
+        diagramFormat: aiMode === "edit" ? aiDiagramFormat : "auto",
         instruction,
         content: aiMode === "edit" ? editContext.html : editor.getHTML(),
         noteContent: editor.getHTML(),
@@ -4949,6 +4968,19 @@ export default function RichDocumentEditor({
                     ))}
                   </optgroup>
                 </select>
+                {aiMode === "edit" && (
+                  <select
+                    value={aiDiagramFormat}
+                    onChange={(e) => setAiDiagramFormat(e.target.value)}
+                    aria-label="다이어그램 형식 선택"
+                    title="AI가 삽입하는 다이어그램 형식"
+                  >
+                    <option value="auto">자동 형식</option>
+                    <option value="mermaid">Mermaid</option>
+                    <option value="plantuml">PlantUML</option>
+                    <option value="drawio">draw.io</option>
+                  </select>
+                )}
                 <button
                   className="ai-send"
                   disabled={!aiPrompt.trim() || aiLoading}

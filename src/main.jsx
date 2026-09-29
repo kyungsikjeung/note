@@ -4,6 +4,7 @@ import { marked } from "marked";
 import mermaid from "mermaid";
 import hljs from "highlight.js";
 import { buildKsNoteTargetRef } from "../mcp/target-ref.mjs";
+import { findDiagramBlock } from "../mcp/note-html.mjs";
 import {
   isApprovedMcpOperation,
   requiresMcpUserApproval,
@@ -237,6 +238,56 @@ const mcpOperationPreviewHtml = (operation) => {
         ? "drawio"
         : "mermaid";
   return `<div data-type="${type}" data-code="${escapeAttribute(operation.code)}"></div>`;
+};
+const escapeHtmlText = (value) =>
+  String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+const createBackgroundBlockId = () =>
+  globalThis.crypto?.randomUUID?.() ||
+  `block-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const backgroundDiagramBlockHtml = (operation) => {
+  const format = String(operation.format || "mermaid").toLowerCase();
+  const type = format === "plantuml" ? "plantuml" : "mermaid";
+  const blockId =
+    operation.operation === "replace-block" && operation.target?.blockId
+      ? operation.target.blockId
+      : createBackgroundBlockId();
+  return `<div data-type="${type}" data-code="${escapeAttribute(operation.code || "")}" data-block-id="${blockId}" data-mcp-operation-id="${operation.id}" data-render-status="verified"></div><p></p>`;
+};
+const isBackgroundApplicableMcpOperation = (operation) => {
+  const target = operation?.target || {};
+  const hasSelectionRange =
+    Number.isFinite(target.from) &&
+    Number.isFinite(target.to) &&
+    target.from !== target.to;
+  if (operation?.type === "diagram_delete")
+    return Boolean(target.blockId) && !hasSelectionRange;
+  if (operation?.type === "diagram_insert") {
+    const format = String(operation.format || "mermaid").toLowerCase();
+    if (format === "drawio") return false;
+    if (operation.operation === "replace-block")
+      return Boolean(target.blockId) && !hasSelectionRange;
+    if (
+      operation.operation &&
+      !["insert", "append"].includes(operation.operation)
+    )
+      return false;
+    if (hasSelectionRange || target.blockId) return false;
+    return true;
+  }
+  if (operation?.type === "text_insert") {
+    const insertOperation = operation.operation || "insert";
+    if (!["insert", "append"].includes(insertOperation)) return false;
+    if (hasSelectionRange || target.blockId) return false;
+    return typeof operation.text === "string" && Boolean(operation.text);
+  }
+  if (operation?.type === "history_restore")
+    return (
+      typeof operation.content === "string" && Boolean(operation.content)
+    );
+  return false;
 };
 const markdownToRich = (markdown) => {
   const diagrams = [];
@@ -1040,10 +1091,122 @@ function App() {
         return;
       }
       mcpRoutedOperationIds.current.add(operation.id);
+      if (await applyOperationInBackground(operation, targetNote)) return;
       setProjectId(targetNote.projectId);
       setNoteId(targetNote.id);
       if (mode === "preview") setMode("edit");
       showToast(`Codex 다이어그램을 '${targetNote.title}' 페이지에 적용합니다.`, "diagram");
+    };
+    const applyOperationInBackground = async (pendingOperation, targetNote) => {
+      if (!isBackgroundApplicableMcpOperation(pendingOperation)) return false;
+      const claimed = await window.ksnoteMcp
+        ?.claim?.({ id: pendingOperation.id, noteId: pendingOperation.noteId })
+        .catch(() => null);
+      if (!claimed || claimed.status !== "applying") return false;
+      const failBackgroundApply = async (code, message, extra) => {
+        await window.ksnoteMcp
+          ?.complete?.({
+            id: claimed.id,
+            status: "error",
+            code,
+            message,
+            ...extra,
+          })
+          .catch(() => {});
+        showToast(`MCP 백그라운드 적용 실패: ${message}`, "warning");
+        return true;
+      };
+      const currentRevision = contentRevision(targetNote.content || "");
+      if (
+        claimed.expectedRevision &&
+        claimed.expectedRevision !== currentRevision
+      )
+        return failBackgroundApply(
+          "revision_conflict",
+          "노트가 MCP 요청 이후 변경되었습니다.",
+          {
+            currentRevision,
+            expectedRevision: claimed.expectedRevision,
+          },
+        );
+      let nextContent = String(targetNote.content || "");
+      if (claimed.type === "diagram_delete") {
+        const block = findDiagramBlock(nextContent, claimed.target?.blockId);
+        if (!block)
+          return failBackgroundApply(
+            "diagram_block_not_found",
+            "지정한 block ID에 해당하는 다이어그램을 찾을 수 없습니다.",
+            { blockId: claimed.target?.blockId },
+          );
+        nextContent =
+          nextContent.slice(0, block.start) + nextContent.slice(block.end);
+      } else if (claimed.type === "diagram_insert") {
+        if (claimed.operation === "replace-block") {
+          const block = findDiagramBlock(nextContent, claimed.target?.blockId);
+          if (!block)
+            return failBackgroundApply(
+              "diagram_block_not_found",
+              "교체할 다이어그램 블록을 찾을 수 없습니다.",
+              { blockId: claimed.target?.blockId },
+            );
+          nextContent =
+            nextContent.slice(0, block.start) +
+            backgroundDiagramBlockHtml(claimed) +
+            nextContent.slice(block.end);
+        } else {
+          nextContent = `${nextContent}${backgroundDiagramBlockHtml(claimed)}`;
+        }
+      } else if (claimed.type === "text_insert") {
+        nextContent = `${nextContent}<p>${escapeHtmlText(claimed.text).replace(/\n/g, "<br>")}</p>`;
+      } else if (claimed.type === "history_restore") {
+        if (typeof claimed.content !== "string" || !claimed.content)
+          return failBackgroundApply(
+            "restore_snapshot_missing",
+            "복원할 History 스냅샷이 없습니다.",
+          );
+        nextContent = claimed.content;
+      } else {
+        return false;
+      }
+      const appliedRevision = contentRevision(nextContent);
+      const nextData = {
+        ...data,
+        notes: data.notes.map((item) =>
+          item.id === targetNote.id
+            ? { ...item, content: nextContent, updatedAt: Date.now() }
+            : item,
+        ),
+      };
+      await window.ksnoteStorage?.save?.(nextData);
+      setData(nextData);
+      await window.ksnoteMcp
+        ?.complete?.({
+          id: claimed.id,
+          status: "completed",
+          appliedRevision,
+          background: true,
+        })
+        .catch(() => {});
+      showToast(
+        `'${targetNote.title}' 페이지에 MCP 변경을 백그라운드로 적용했습니다.`,
+        "diagram",
+        {
+          onGoToTarget: () => goToNote(targetNote.id),
+          onShowSource: () =>
+            setSourceView({
+              title:
+                claimed.type === "diagram_delete"
+                  ? "삭제된 다이어그램 소스"
+                  : claimed.type === "text_insert"
+                    ? "삽입된 텍스트"
+                    : claimed.type === "history_restore"
+                      ? "복원된 스냅샷"
+                      : "삽입된 다이어그램 소스",
+              code: claimed.text || claimed.code || "",
+            }),
+        },
+      );
+      return true;
     };
     routePendingOperation();
     const timer = window.setInterval(routePendingOperation, 1000);
@@ -1486,7 +1649,21 @@ function App() {
   };
   const showToast = (message, icon, options = {}) => {
     setToast({ message, icon, ...options });
-    setTimeout(() => setToast(null), 2600);
+    const visibleMs =
+      options.onGoToTarget || options.onShowSource ? 8000 : 2600;
+    setTimeout(() => setToast(null), visibleMs);
+  };
+  const [sourceView, setSourceView] = useState(null);
+  const goToNote = (targetNoteId) => {
+    const target = data.notes.find((item) => item.id === targetNoteId);
+    if (!target) {
+      showToast("대상 페이지를 찾을 수 없습니다.", "warning");
+      return;
+    }
+    setProjectId(target.projectId);
+    setNoteId(target.id);
+    if (mode === "preview") setMode("edit");
+    setToast(null);
   };
   const approveMcpReview = async () => {
     if (!mcpApproval || mcpApprovalBusy) return;
@@ -1525,12 +1702,16 @@ function App() {
     }
   };
   const pageRefFor = (targetNote = note) =>
-    buildKsNoteTargetRef({ pageId: targetNote.id });
+    buildKsNoteTargetRef({
+      pageId: targetNote.id,
+      workspaceId: mcpInfo?.workspaceId,
+    });
   const selectionRefFor = (target = editorTarget, targetNote = note) => {
     const from = Number.isFinite(target?.from) ? target.from : 0;
     const to = Number.isFinite(target?.to) ? target.to : from;
     return buildKsNoteTargetRef({
       pageId: targetNote.id,
+      workspaceId: mcpInfo?.workspaceId,
       blockId: target?.blockId,
       offset: target?.offset,
       toBlockId: target?.toBlockId,
@@ -1557,6 +1738,7 @@ function App() {
       projectName: data.projects.find((project) => project.id === note.projectId)?.name || note.projectId,
       targetRef: buildKsNoteTargetRef({
         pageId: note.id,
+        workspaceId: mcpInfo?.workspaceId,
         blockId: target.blockId,
         offset: target.offset,
         toBlockId: target.toBlockId,
@@ -2574,6 +2756,20 @@ function App() {
               {
                 undoable: Boolean(event.undoable),
                 onUndo: event.undo,
+                ...(event.targetNoteId
+                  ? {
+                      onGoToTarget: () => goToNote(event.targetNoteId),
+                    }
+                  : {}),
+                ...(event.source
+                  ? {
+                      onShowSource: () =>
+                        setSourceView({
+                          title: event.sourceTitle || "적용된 소스",
+                          code: event.source,
+                        }),
+                    }
+                  : {}),
               },
             )
           }
@@ -2794,9 +2990,63 @@ function App() {
               <Undo2 /> 실행 취소
             </button>
           )}
+          {typeof toast.onGoToTarget === "function" && (
+            <button
+              className="toast-goto"
+              onClick={() => toast.onGoToTarget()}
+            >
+              대상 이동
+            </button>
+          )}
+          {typeof toast.onShowSource === "function" && (
+            <button
+              className="toast-source"
+              onClick={() => {
+                toast.onShowSource();
+                setToast(null);
+              }}
+            >
+              소스 보기
+            </button>
+          )}
           <button className="toast-close" onClick={() => setToast(null)}>
             <X size={15} />
           </button>
+        </div>
+      )}
+      {sourceView && (
+        <div
+          className="diagram-picker-backdrop"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setSourceView(null);
+          }}
+        >
+          <section className="diagram-picker">
+            <header>
+              <span>
+                <Code2 />
+                <span>
+                  <b>{sourceView.title}</b>
+                  <small>적용된 소스</small>
+                </span>
+              </span>
+              <button onClick={() => setSourceView(null)}>
+                <X />
+              </button>
+            </header>
+            <div>
+              <pre className="source-view-pre">{sourceView.code}</pre>
+            </div>
+            <footer>
+              <button
+                onClick={() =>
+                  navigator.clipboard.writeText(sourceView.code || "")
+                }
+              >
+                소스 복사
+              </button>
+            </footer>
+          </section>
         </div>
       )}
       {projectDialog && (

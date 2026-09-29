@@ -75,7 +75,7 @@ ksnote://page/<pageId>?block=<blockId>&offset=<offset>&toBlock=<blockId>&toOffse
 - [x] block/offset과 from/to fallback을 함께 복사
 - [x] 복사 시 revision 및 operation 포함
 - [x] 기존 단순 `ksnote://page/<pageId>?from=&to=` 호환
-- [ ] workspaceId를 포함한 다중 작업공간 주소
+- [x] workspaceId를 포함한 다중 작업공간 주소
 
 ### P1 — Codex 및 포맷 선택
 
@@ -85,7 +85,7 @@ ksnote://page/<pageId>?block=<blockId>&offset=<offset>&toBlock=<blockId>&toOffse
 - [x] 창이 가려지거나 최소화돼도 MCP heartbeat/polling 유지
 - [x] 사용자가 명시한 형식 우선
 - [x] Codex가 최종 format을 선택해 `diagram_insert` 호출
-- [ ] KsNote AI 패널에 `자동` 형식 선택 UI
+- [x] KsNote AI 패널에 `자동` 형식 선택 UI
 
 ### P2 — 적용 및 라우팅
 
@@ -104,7 +104,7 @@ ksnote://page/<pageId>?block=<blockId>&offset=<offset>&toBlock=<blockId>&toOffse
 - [x] 전체화면 `축소 / 현재 배율 / 확대 / 100% / 화면 맞춤` 컨트롤
 - [x] 25~400% 휠 확대·축소, 확대 상태 드래그 이동, `Esc` 종료
 - [x] 마지막 배율은 다이어그램 속성이 아닌 renderer 세션 메모리에서만 공유
-- [ ] 화면 전환 없는 백그라운드 노트 적용
+- [x] 화면 전환 없는 백그라운드 노트 적용
 - [x] 적용 직전 실제 다이어그램 미리보기와 메인 프로세스 소유 `pending → approved → applying` 승인 정책
 
 ### P3 — 검증 및 복구
@@ -123,16 +123,16 @@ ksnote://page/<pageId>?block=<blockId>&offset=<offset>&toBlock=<blockId>&toOffse
 - [x] 정확한 block ID 기반 `diagram_delete`
 - [x] 완료 operation 원본으로 다이어그램 복구 스크립트 제공
 - [x] 문서 정제/재시작 후 다이어그램 `data-code` 보존
-- [ ] 실패 시 Codex 1~2회 자동 수정 재시도 계약
+- [x] 실패 시 Codex 1~2회 자동 수정 재시도 계약
 - [x] 완료 토스트의 편집기 history 기반 즉시 되돌리기 액션
-- [ ] 완료 토스트의 대상 이동·소스 보기 액션
+- [x] 완료 토스트의 대상 이동·소스 보기 액션
 
 ## 테스트 및 완료 기준
 
 - [x] target reference round-trip 단위 테스트
 - [x] MCP 도구 목록에 `diagram_capabilities`가 노출된다.
 - [x] 페이지 ID만 전달하면 대상 페이지 끝에 삽입된다.
-- [ ] 클릭 타깃을 전달하면 해당 block/offset에 삽입된다.
+- [x] 클릭 타깃을 전달하면 해당 block/offset에 삽입된다.
 - [x] 편집 후 revision이 달라지면 `revision_conflict`가 반환된다.
 - [x] 다른 페이지 타깃이면 해당 페이지로 이동해 삽입된다.
 - [x] 세 포맷 모두 operation이 `completed`와 `renderVerified=true`로 종료된다.

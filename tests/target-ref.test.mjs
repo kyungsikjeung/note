@@ -10,6 +10,7 @@ test("page-only references do not inherit a cursor", () => {
   assert.equal(ref, "ksnote://page/note-%ED%95%9C%EA%B8%80");
   assert.deepEqual(parseKsNoteTargetRef(ref), {
     pageId: "note-한글",
+    workspaceId: undefined,
     blockId: undefined,
     offset: undefined,
     toBlockId: undefined,
@@ -34,6 +35,7 @@ test("click targets preserve stable block and revision metadata", () => {
   });
   assert.deepEqual(parseKsNoteTargetRef(ref), {
     pageId: "n1",
+    workspaceId: undefined,
     blockId: "block-123",
     offset: 7,
     toBlockId: undefined,
@@ -65,4 +67,27 @@ test("selection targets preserve both block anchors", () => {
 
 test("invalid references are rejected", () => {
   assert.equal(parseKsNoteTargetRef("https://example.com/page/n1"), null);
+});
+
+test("workspace-qualified references round-trip the workspace id", () => {
+  const ref = buildKsNoteTargetRef({ pageId: "n1", workspaceId: "work" });
+  assert.equal(ref, "ksnote://page/n1?workspace=work");
+  const parsed = parseKsNoteTargetRef(ref);
+  assert.equal(parsed.workspaceId, "work");
+  assert.equal(parsed.pageId, "n1");
+});
+
+test("workspace id survives alongside block and revision metadata", () => {
+  const ref = buildKsNoteTargetRef({
+    pageId: "n9",
+    blockId: "block-7",
+    offset: 3,
+    revision: "r123",
+    operation: "insert",
+    workspaceId: "studio",
+  });
+  const parsed = parseKsNoteTargetRef(ref);
+  assert.equal(parsed.workspaceId, "studio");
+  assert.equal(parsed.blockId, "block-7");
+  assert.equal(parsed.revision, "r123");
 });

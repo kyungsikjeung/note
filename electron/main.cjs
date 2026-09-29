@@ -66,6 +66,12 @@ function getMcpDirectory() {
   return path.join(app.getPath("userData"), "mcp");
 }
 
+function getWorkspaceId() {
+  const override = String(process.env.KSNOTE_WORKSPACE_ID || "").trim();
+  if (override) return override;
+  return path.basename(app.getPath("userData")) || "ksnote";
+}
+
 function getMcpOperationDirectory() {
   return path.join(getMcpDirectory(), "operations");
 }
@@ -292,6 +298,7 @@ ipcMain.handle("mcp-info", async () => {
     codexConfigToml: getMcpCodexConfig(),
     claudeConfigJson: getMcpClaudeConfig(),
     dbPath: noteDbPath,
+    workspaceId: getWorkspaceId(),
     mcpDirectory: getMcpDirectory(),
     targetPath: path.join(getMcpDirectory(), "current-target.json"),
     operationsDirectory: getMcpOperationDirectory(),
@@ -326,6 +333,7 @@ ipcMain.handle("mcp-codex-register", async (_, { command = "codex" } = {}) => {
 ipcMain.handle("mcp-target-save", async (_, target) => {
   await ensureMcpDirectories();
   const payload = {
+    workspaceId: getWorkspaceId(),
     ...target,
     updatedAt: Date.now(),
   };
@@ -1121,7 +1129,13 @@ ipcMain.handle("ai-run", async (_, request) => {
     : useDelta
     ? `NOTE UPDATE SINCE PREVIOUS TURN (${noteDelta.kind}):\n${noteDelta.text}`
     : `CURRENT NOTE HTML:\n${request.content}`;
-  const prompt = `${system}${continuityContext}\n\nUSER INSTRUCTION:\n${request.instruction}\n\nTARGET: ${request.target}\n\nREQUESTED OPERATION: ${request.requestedOperation || "replace"}\n\nSOURCE REVISION: ${request.sourceRevision || ""}\n\n${noteContext}\n\nSELECTED HTML:\n${request.selectionHtml || request.selection || "(none)"}\n\nDETECTED EXTERNAL LINKS:\n${(request.externalLinks || []).join("\n") || "(none)"}`;
+  const diagramFormat = ["mermaid", "plantuml", "drawio"].includes(request.diagramFormat)
+    ? request.diagramFormat
+    : "auto";
+  const diagramFormatLine = request.mode === "edit" && diagramFormat !== "auto"
+    ? `\n\nDIAGRAM FORMAT PREFERENCE: ${diagramFormat}. If the edit inserts a diagram block, write it as a ${diagramFormat} block (${diagramFormat === "mermaid" ? "mermaidBlock" : diagramFormat === "plantuml" ? "plantUmlBlock" : "drawioBlock"}). Otherwise ignore this preference.`
+    : "";
+  const prompt = `${system}${continuityContext}\n\nUSER INSTRUCTION:\n${request.instruction}\n\nTARGET: ${request.target}\n\nREQUESTED OPERATION: ${request.requestedOperation || "replace"}${diagramFormatLine}\n\nSOURCE REVISION: ${request.sourceRevision || ""}\n\n${noteContext}\n\nSELECTED HTML:\n${request.selectionHtml || request.selection || "(none)"}\n\nDETECTED EXTERNAL LINKS:\n${(request.externalLinks || []).join("\n") || "(none)"}`;
   const command = String(request.command || request.provider || "").trim();
   if (!command || /[;&|<>\r\n]/.test(command))
     throw new Error("AI Agent 실행 명령을 확인해 주세요.");

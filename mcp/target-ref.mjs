@@ -14,9 +14,11 @@ export const buildKsNoteTargetRef = ({
   to,
   revision,
   operation,
+  workspaceId,
 } = {}) => {
   if (!pageId) throw new Error("KsNote pageId가 필요합니다.");
   const params = new URLSearchParams();
+  if (workspaceId) params.set("workspace", workspaceId);
   if (blockId) params.set("block", blockId);
   if (Number.isFinite(offset)) params.set("offset", String(offset));
   if (toBlockId) params.set("toBlock", toBlockId);
@@ -37,6 +39,7 @@ export const parseKsNoteTargetRef = (targetRef) => {
   const operation = params.get("operation") || undefined;
   return {
     pageId: decodeURIComponent(match[1]),
+    workspaceId: params.get("workspace") || undefined,
     blockId: params.get("block") || undefined,
     offset: finiteNumber(params.get("offset")),
     toBlockId: params.get("toBlock") || undefined,

@@ -14,6 +14,14 @@ const mermaidCacheSource = await readFile(
   new URL("../src/mermaid-render-cache.mjs", import.meta.url),
   "utf8",
 );
+const mainSource = await readFile(
+  new URL("../electron/main.cjs", import.meta.url),
+  "utf8",
+);
+const appSource = await readFile(
+  new URL("../src/main.jsx", import.meta.url),
+  "utf8",
+);
 
 test("Info and Warning macros serialize as editable callout blocks", () => {
   assert.match(editorSource, /name: "calloutBlock"/);
@@ -81,4 +89,70 @@ test("diagram blocks default to preview and copy rendered PNG images", () => {
   assert.match(editorSource, /<DiagramImageCopyButton svg=\{svg\} \/>/);
   assert.match(editorSource, /<DiagramImageCopyButton svg=\{svgOutput\} \/>/);
   assert.match(editorSource, /"이미지 복사"/);
+});
+
+test("AI panel offers an automatic diagram format choice in edit mode", () => {
+  assert.match(
+    editorSource,
+    /\[aiDiagramFormat, setAiDiagramFormat\] = useState\("auto"\)/,
+  );
+  assert.match(editorSource, /aria-label="다이어그램 형식 선택"/);
+  assert.match(editorSource, /<option value="auto">자동 형식<\/option>/);
+  assert.match(
+    editorSource,
+    /diagramFormat: aiMode === "edit" \? aiDiagramFormat : "auto"/,
+  );
+  assert.match(mainSource, /DIAGRAM FORMAT PREFERENCE/);
+  assert.match(
+    mainSource,
+    /\["mermaid", "plantuml", "drawio"\]\.includes\(request\.diagramFormat\)/,
+  );
+});
+
+test("approved operations on other pages apply in the background", () => {  assert.match(appSource, /isBackgroundApplicableMcpOperation/);
+  assert.match(
+    appSource,
+    /if \(format === "drawio"\) return false;/,
+  );
+  assert.match(
+    appSource,
+    /if \(await applyOperationInBackground\(operation, targetNote\)\) return;/,
+  );
+  assert.match(appSource, /background: true/);
+  assert.match(appSource, /findDiagramBlock\(nextContent, claimed\.target\?\.blockId\)/);
+  assert.match(appSource, /data-render-status="verified"/);
+});
+
+test("completion toasts offer target navigation and source view", () => {  assert.match(appSource, /toast-goto/);
+  assert.match(appSource, /대상 이동/);
+  assert.match(appSource, /toast-source/);
+  assert.match(appSource, /소스 보기/);
+  assert.match(appSource, /source-view-pre/);
+  assert.match(appSource, /onGoToTarget/);
+  assert.match(appSource, /onShowSource/);
+  assert.match(editorSource, /targetNoteId: noteId/);
+});
+
+test("click targets insert at the anchored block offset", () => {  assert.match(
+    editorSource,
+    /resolveBlockOffset\(\s*editor\.state\.doc,\s*target\.blockId,\s*target\.offset,/,
+  );
+  assert.match(
+    editorSource,
+    /resolveBlockOffset\(\s*editor\.state\.doc,\s*target\.toBlockId,\s*target\.toOffset,/,
+  );
+  assert.match(editorSource, /from "\.\/block-anchor\.mjs"/);
+});
+
+test("history restores apply as full-content replacements", () => {
+  assert.match(
+    editorSource,
+    /claimed\.type === "history_restore"/,
+  );
+  assert.match(
+    editorSource,
+    /editor\.chain\(\)\.focus\(\)\.setContent\(claimed\.content\)\.run\(\)/,
+  );
+  assert.match(appSource, /claimed\.type === "history_restore"/);
+  assert.match(appSource, /복원된 스냅샷/);
 });

@@ -8,7 +8,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import initSqlJs from "sql.js";
 import * as z from "zod/v4";
 import { validateDiagramSource } from "./diagram-validation.mjs";
+import { buildHistoryList, resolveRestoreSnapshot } from "./history.mjs";
 import { findDiagramBlock } from "./note-html.mjs";
+import { searchNotes } from "./note-search.mjs";
+import { operationRetryAdvice } from "./operation-retry.mjs";
 import { parseKsNoteTargetRef } from "./target-ref.mjs";
 
 const require = createRequire(import.meta.url);
@@ -184,6 +187,25 @@ const readHeartbeat = async () => {
   }
 };
 
+const workspaceIdForPaths = (paths) => {
+  const override = String(process.env.KSNOTE_WORKSPACE_ID || "").trim();
+  if (override) return override;
+  return path.basename(paths?.userData || "") || "ksnote";
+};
+
+const workspaceMismatch = (parsed, paths) => {
+  const serving = workspaceIdForPaths(paths);
+  if (parsed?.workspaceId && parsed.workspaceId !== serving)
+    return {
+      ok: false,
+      code: "workspace_mismatch",
+      message: `targetRef의 작업공간(${parsed.workspaceId})이 현재 MCP 작업공간(${serving})과 다릅니다. 해당 작업공간의 KSNOTE_DB_PATH로 MCP를 실행하거나 workspace 없는 ref를 사용하세요.`,
+      refWorkspaceId: parsed.workspaceId,
+      servingWorkspaceId: serving,
+    };
+  return null;
+};
+
 const getTarget = async (targetRef) => {
   const parsed = parseKsNoteTargetRef(targetRef);
   const current = await readCurrentTarget();
@@ -208,7 +230,7 @@ const getTarget = async (targetRef) => {
 
 const noteById = (data, id) => data.notes.find((note) => note.id === id);
 
-const notePayload = (data, note, target = {}) => {
+const notePayload = (data, note, target = {}, workspaceId) => {
   const project = data.projects.find((item) => item.id === note.projectId);
   return {
     id: note.id,
@@ -218,8 +240,12 @@ const notePayload = (data, note, target = {}) => {
     content: note.content || "",
     text: plainText(note.content),
     revision: contentRevision(note.content),
+    workspaceId,
     target: {
-      targetRef: target.targetRef || `ksnote://page/${note.id}`,
+      targetRef:
+        target.targetRef ||
+        `ksnote://page/${note.id}${workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : ""}`,
+      workspaceId: target.workspaceId || workspaceId,
       blockId: target.blockId,
       offset: target.offset,
       toBlockId: target.toBlockId,
@@ -266,6 +292,55 @@ const readOperation = async (id) => {
   }
 };
 
+const readRevisionRows = async (paths, noteId) => {
+  const SQL = await getSql();
+  let bytes;
+  try {
+    bytes = await fs.readFile(paths.dbPath);
+  } catch {
+    return [];
+  }
+  const db = new SQL.Database(bytes);
+  try {
+    const statement = db.prepare(
+      "SELECT id, note_id, title, content, created_at FROM revisions WHERE note_id=? ORDER BY id DESC LIMIT 50",
+    );
+    statement.bind([String(noteId)]);
+    const rows = [];
+    while (statement.step()) rows.push(statement.getAsObject());
+    statement.free();
+    return rows;
+  } finally {
+    db.close();
+  }
+};
+
+const listNoteOperations = async (paths, noteId, limit = 200) => {
+  let files;
+  try {
+    files = await fs.readdir(paths.operationsDir);
+  } catch {
+    return [];
+  }
+  const operations = [];
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    try {
+      const operation = JSON.parse(
+        await fs.readFile(path.join(paths.operationsDir, file), "utf8"),
+      );
+      if (noteId && operation.noteId !== noteId) continue;
+      operations.push(operation);
+    } catch {}
+    if (operations.length >= limit) break;
+  }
+  return operations.sort(
+    (a, b) =>
+      Number(b.updatedAt || b.createdAt || 0) -
+      Number(a.updatedAt || a.createdAt || 0),
+  );
+};
+
 const server = new McpServer(
   {
     name: "ksnote",
@@ -273,7 +348,7 @@ const server = new McpServer(
   },
   {
     instructions:
-      "Use this server to read KsNote projects/pages and insert content into an explicit copied target or the current editor target. Explicit targetRef always wins over live cursor state. Call note_get before writes and pass expectedRevision. Choose Mermaid for flows, sequences, state, ERD, and code architecture; PlantUML for UML when configured; draw.io for visually arranged diagrams the user wants to edit manually. After diagram_insert, poll operation_get until completed or error.",
+      "Use this server to read KsNote projects/pages and insert content into an explicit copied target or the current editor target. Explicit targetRef always wins over live cursor state. Call note_get before writes and pass expectedRevision. Target refs may carry ?workspace=<id> identifying the source workspace; a write whose workspace does not match this server is rejected with workspace_mismatch, so switch to the matching KSNOTE_DB_PATH instead of retrying. Failed operations carry a retry field: when retry.retryable is true, fix the cause using retry.hint and retry the same tool call at most 2 more times; otherwise report the structured error to the user instead of looping. Choose Mermaid for flows, sequences, state, ERD, and code architecture; PlantUML for UML when configured; draw.io for visually arranged diagrams the user wants to edit manually. After diagram_insert, poll operation_get until completed or error.",
   },
 );
 
@@ -294,6 +369,7 @@ server.registerTool(
     const project = data.projects.find((item) => item.id === note?.projectId);
     return jsonText({
       workspace: "KsNote",
+      workspaceId: workspaceIdForPaths(paths),
       dbPath: paths.dbPath,
       mcpDirectory: paths.mcpDir,
       updatedAt,
@@ -361,16 +437,20 @@ server.registerTool(
     const expired =
       ["pending", "applying"].includes(operation.status) &&
       Date.now() > (operation.expiresAt || operation.createdAt + OPERATION_TTL_MS);
+    const resolved = expired
+      ? {
+          ...operation,
+          status: "expired",
+          code: "operation_expired",
+          message: "KsNote 앱에서 제한 시간 안에 작업을 적용하지 못했습니다.",
+        }
+      : operation;
+    const failed = resolved.status === "error" || resolved.status === "expired";
     return jsonText({
       ok: true,
-      operation: expired
-        ? {
-            ...operation,
-            status: "expired",
-            code: "operation_expired",
-            message: "KsNote 앱에서 제한 시간 안에 작업을 적용하지 못했습니다.",
-          }
-        : operation,
+      operation: failed
+        ? { ...resolved, retry: operationRetryAdvice(resolved.code) }
+        : resolved,
     });
   },
 );
@@ -455,7 +535,7 @@ server.registerTool(
     annotations: { readOnlyHint: true },
   },
   async ({ pageId, targetRef }) => {
-    const { data } = await loadState();
+    const { data, paths } = await loadState();
     const target = await getTarget(targetRef);
     const note = noteById(data, pageId || target.noteId);
     if (!note)
@@ -464,7 +544,50 @@ server.registerTool(
         code: "note_not_found",
         message: "KsNote 페이지를 찾을 수 없습니다.",
       });
-    return jsonText({ ok: true, note: notePayload(data, note, target) });
+    return jsonText({
+      ok: true,
+      note: notePayload(data, note, target, workspaceIdForPaths(paths)),
+    });
+  },
+);
+
+server.registerTool(
+  "note_search",
+  {
+    title: "Search KsNote Pages",
+    description:
+      "Search KsNote pages across all projects by title and text. Returns ranked matches with score and snippet, plus pagination.",
+    inputSchema: {
+      query: z.string(),
+      projectId: z.string().optional(),
+      limit: z.number().int().min(1).max(50).optional(),
+      offset: z.number().int().min(0).optional(),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ query, projectId, limit, offset }) => {
+    const { data } = await loadState();
+    const result = searchNotes(data.notes, { query, projectId, limit, offset });
+    if (!result.ok)
+      return jsonText({
+        ok: false,
+        code: result.code,
+        message: "검색어를 입력해 주세요.",
+      });
+    return jsonText({
+      ...result,
+      results: result.results.map((item) => {
+        const note = noteById(data, item.id);
+        const project = data.projects.find(
+          (entry) => entry.id === item.projectId,
+        );
+        return {
+          ...item,
+          projectName: project?.name || item.projectId,
+          revision: note ? contentRevision(note.content) : undefined,
+        };
+      }),
+    });
   },
 );
 
@@ -487,9 +610,14 @@ server.registerTool(
     annotations: { readOnlyHint: false, destructiveHint: false },
   },
   async ({ targetRef, format, code, title, operation, expectedRevision }) => {
-    const { data } = await loadState();
+    const { data, paths } = await loadState();
     const heartbeat = await readHeartbeat();
     const target = await getTarget(targetRef);
+    const mismatch = workspaceMismatch(
+      parseKsNoteTargetRef(targetRef),
+      paths,
+    );
+    if (mismatch) return jsonText(mismatch);
     const note = noteById(data, target.noteId);
     if (!note)
       return jsonText({
@@ -506,6 +634,7 @@ server.registerTool(
         message: "노트가 마지막 조회 이후 변경되었습니다. note_get으로 다시 읽고 재시도하세요.",
         expectedRevision: guardedRevision,
         currentRevision,
+        retry: operationRetryAdvice("revision_conflict"),
       });
     const validation = validateDiagramSource(format, code);
     if (!validation.ok)
@@ -514,6 +643,9 @@ server.registerTool(
         code: validation.code || "diagram_syntax_invalid",
         format,
         message: validation.message,
+        retry: operationRetryAdvice(
+          validation.code || "diagram_syntax_invalid",
+        ),
       });
     const requestedOperation =
       operation || target.operation || (target.from !== target.to ? "replace-selection" : "insert");
@@ -552,6 +684,7 @@ server.registerTool(
       operation: requestedOperation,
       target: {
         targetRef: target.targetRef || `ksnote://page/${note.id}`,
+        workspaceId: target.workspaceId || workspaceIdForPaths(paths),
         blockId: target.blockId,
         offset: target.offset,
         toBlockId: target.toBlockId,
@@ -599,7 +732,9 @@ server.registerTool(
         code: "diagram_target_required",
         message: "페이지와 안정 block ID가 포함된 명시적 ksnote:// targetRef가 필요합니다.",
       });
-    const { data } = await loadState();
+    const { data, paths } = await loadState();
+    const mismatch = workspaceMismatch(parsed, paths);
+    if (mismatch) return jsonText(mismatch);
     const heartbeat = await readHeartbeat();
     const note = noteById(data, parsed.pageId);
     if (!note)
@@ -616,6 +751,7 @@ server.registerTool(
         message: "노트가 마지막 조회 이후 변경되었습니다. note_get으로 다시 읽고 재시도하세요.",
         expectedRevision,
         currentRevision,
+        retry: operationRetryAdvice("revision_conflict"),
       });
     const block = findDiagramBlock(note.content, parsed.blockId);
     if (!block)
@@ -676,9 +812,14 @@ server.registerTool(
         ok: false,
         ...damage,
       });
-    const { data } = await loadState();
+    const { data, paths } = await loadState();
     const heartbeat = await readHeartbeat();
     const target = await getTarget(targetRef);
+    const mismatch = workspaceMismatch(
+      parseKsNoteTargetRef(targetRef),
+      paths,
+    );
+    if (mismatch) return jsonText(mismatch);
     const note = noteById(data, target.noteId);
     if (!note)
       return jsonText({
@@ -695,6 +836,7 @@ server.registerTool(
         message: "노트가 마지막 조회 이후 변경되었습니다. note_get으로 다시 읽고 재시도하세요.",
         expectedRevision: guardedRevision,
         currentRevision,
+        retry: operationRetryAdvice("revision_conflict"),
       });
     const queued = await queueOperation({
       type: "text_insert",
@@ -705,6 +847,7 @@ server.registerTool(
         operation || target.operation || (target.from !== target.to ? "replace-selection" : "insert"),
       target: {
         targetRef: target.targetRef || `ksnote://page/${note.id}`,
+        workspaceId: target.workspaceId || workspaceIdForPaths(paths),
         blockId: target.blockId,
         offset: target.offset,
         toBlockId: target.toBlockId,
@@ -727,6 +870,136 @@ server.registerTool(
         Boolean(heartbeat.appOpen) && !heartbeat.stale
           ? "KsNote 앱에서 변경 내용을 검토하고 승인해야 적용됩니다. 승인 후 operation_get으로 완료 여부를 확인하세요."
           : "승인 대기 작업을 큐에 넣었습니다. KsNote 앱을 열어 변경 내용을 검토해 주세요.",
+    });
+  },
+);
+
+server.registerTool(
+  "history_list",
+  {
+    title: "List KsNote Page History",
+    description:
+      "List saved revisions and past MCP operations for a KsNote page, newest first. Use to find a restorable snapshot before history_restore.",
+    inputSchema: {
+      pageId: z.string().optional(),
+      targetRef: z.string().optional(),
+      limit: z.number().int().min(1).max(50).optional(),
+      offset: z.number().int().min(0).optional(),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ pageId, targetRef, limit, offset }) => {
+    const { data, paths } = await loadState();
+    const target = await getTarget(targetRef);
+    const note = noteById(data, pageId || target.noteId);
+    if (!note)
+      return jsonText({
+        ok: false,
+        code: "note_not_found",
+        message: "KsNote 페이지를 찾을 수 없습니다.",
+      });
+    const revisions = await readRevisionRows(paths, note.id);
+    const operations = await listNoteOperations(paths, note.id);
+    return jsonText({
+      ok: true,
+      noteId: note.id,
+      workspaceId: workspaceIdForPaths(paths),
+      ...buildHistoryList({ revisions, operations, limit, offset }),
+    });
+  },
+);
+
+server.registerTool(
+  "history_restore",
+  {
+    title: "Restore KsNote Page From History",
+    description:
+      "Queue a history restore that replaces the page with a saved revision snapshot or the content from before a completed MCP operation. Uses expectedRevision for conflict detection.",
+    inputSchema: {
+      targetRef: z.string().optional(),
+      noteId: z.string().optional(),
+      revisionId: z.number().int().optional(),
+      operationId: z.string().optional(),
+      expectedRevision: z.string().optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true },
+  },
+  async ({ targetRef, noteId, revisionId, operationId, expectedRevision }) => {
+    const { data, paths } = await loadState();
+    const heartbeat = await readHeartbeat();
+    const target = await getTarget(targetRef);
+    const mismatch = workspaceMismatch(
+      parseKsNoteTargetRef(targetRef),
+      paths,
+    );
+    if (mismatch) return jsonText(mismatch);
+    const note = noteById(data, noteId || target.noteId);
+    if (!note)
+      return jsonText({
+        ok: false,
+        code: "note_not_found",
+        message: "KsNote 페이지를 찾을 수 없습니다.",
+      });
+    const revisions = await readRevisionRows(paths, note.id);
+    const operations = await listNoteOperations(paths, note.id);
+    const snapshot = resolveRestoreSnapshot({
+      revisions,
+      operations,
+      revisionId,
+      operationId,
+    });
+    if (!snapshot.ok)
+      return jsonText({
+        ok: false,
+        code: snapshot.code,
+        message:
+          snapshot.code === "revision_not_found"
+            ? "지정한 revision을 찾을 수 없습니다. history_list로 확인하세요."
+            : snapshot.code === "operation_not_found"
+              ? "지정한 operation을 찾을 수 없습니다."
+              : snapshot.code === "operation_not_restorable"
+                ? "완료된 operation만 복구 기준이 됩니다."
+                : snapshot.code === "restore_snapshot_missing"
+                  ? "복구할 이전 스냅샷이 없습니다."
+                  : "revisionId 또는 operationId 중 하나를 지정하세요.",
+      });
+    const currentRevision = contentRevision(note.content);
+    const guardedRevision = expectedRevision || target.revision;
+    if (guardedRevision && guardedRevision !== currentRevision)
+      return jsonText({
+        ok: false,
+        code: "revision_conflict",
+        message: "노트가 마지막 조회 이후 변경되었습니다. note_get으로 다시 읽고 재시도하세요.",
+        expectedRevision: guardedRevision,
+        currentRevision,
+        retry: operationRetryAdvice("revision_conflict"),
+      });
+    const queued = await queueOperation({
+      type: "history_restore",
+      noteId: note.id,
+      projectId: note.projectId,
+      content: snapshot.content,
+      restoreRevisionId: snapshot.revisionId,
+      sourceOperationId: snapshot.sourceOperationId,
+      target: {
+        targetRef:
+          target.targetRef || `ksnote://page/${note.id}`,
+        workspaceId: target.workspaceId || workspaceIdForPaths(paths),
+      },
+      expectedRevision: guardedRevision,
+    });
+    return jsonText({
+      ok: true,
+      status: "awaiting_approval",
+      approvalRequired: true,
+      operationId: queued.id,
+      noteId: note.id,
+      restoreRevisionId: snapshot.revisionId,
+      revision: currentRevision,
+      expiresAt: queued.expiresAt,
+      appOpen: Boolean(heartbeat.appOpen) && !heartbeat.stale,
+      message:
+        "History 복원 작업을 큐에 넣었습니다. KsNote 앱에서 검토하고 승인해야 적용됩니다.",
     });
   },
 );
