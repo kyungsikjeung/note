@@ -355,26 +355,34 @@ const listNoteOperations = async (paths, noteId, limit = 200) => {
       if (noteId && operation.noteId !== noteId) continue;
       operations.push(operation);
     } catch {}
-    if (operations.length >= limit) break;
   }
-  return operations.sort(
+  operations.sort(
     (a, b) =>
       Number(b.updatedAt || b.createdAt || 0) -
       Number(a.updatedAt || a.createdAt || 0),
   );
+  return operations.slice(0, Math.max(0, Number(limit) || 0));
 };
 
-const server = new McpServer(
-  {
-    name: "ksnote",
-    version: "0.1.0",
-  },
-  {
-    instructions:
-      "Use this server to read KsNote projects/pages and insert content into an explicit copied target or the current editor target. Explicit targetRef always wins over live cursor state. Call note_get before writes and pass expectedRevision. Target refs may carry ?workspace=<id> identifying the source workspace; a write whose workspace does not match this server is rejected with workspace_mismatch, so switch to the matching KSNOTE_DB_PATH instead of retrying. Failed operations carry a retry field: when retry.retryable is true, fix the cause using retry.hint and retry the same tool call at most 2 more times; otherwise report the structured error to the user instead of looping. Choose Mermaid for flows, sequences, state, ERD, and code architecture; PlantUML for UML when configured; draw.io for visually arranged diagrams the user wants to edit manually. After diagram_insert, poll operation_get until completed or error.",
-  },
-);
+// A single McpServer can only be connected to one transport, so every HTTP
+// request builds its own instance. `registerTools` below holds the shared
+// tool definitions and runs unchanged for stdio and each HTTP request.
+const createServer = () => {
+  const server = new McpServer(
+    {
+      name: "ksnote",
+      version: "0.1.0",
+    },
+    {
+      instructions:
+        "Use this server to read KsNote projects/pages and insert content into an explicit copied target or the current editor target. Explicit targetRef always wins over live cursor state. Call note_get before writes and pass expectedRevision. Target refs may carry ?workspace=<id> identifying the source workspace; a write whose workspace does not match this server is rejected with workspace_mismatch, so switch to the matching KSNOTE_DB_PATH instead of retrying. Failed operations carry a retry field: when retry.retryable is true, fix the cause using retry.hint and retry the same tool call at most 2 more times; otherwise report the structured error to the user instead of looping. Choose Mermaid for flows, sequences, state, ERD, and code architecture; PlantUML for UML when configured; draw.io for visually arranged diagrams the user wants to edit manually. After diagram_insert, poll operation_get until completed or error.",
+    },
+  );
+  registerTools(server);
+  return server;
+};
 
+const registerTools = (server) => {
 server.registerTool(
   "workspace_get_context",
   {
@@ -676,7 +684,7 @@ server.registerTool(
       operation: z
         .enum(["insert", "append", "replace-selection", "replace-block"])
         .optional(),
-      expectedRevision: z.string().optional(),
+      expectedRevision: z.string(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },
@@ -873,7 +881,7 @@ server.registerTool(
       operation: z
         .enum(["insert", "append", "replace-selection"])
         .optional(),
-      expectedRevision: z.string().optional(),
+      expectedRevision: z.string(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },
@@ -957,7 +965,7 @@ server.registerTool(
       noteId: z.string().optional(),
       blockId: z.string(),
       html: z.string().min(1),
-      expectedRevision: z.string().optional(),
+      expectedRevision: z.string(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },
@@ -1073,7 +1081,7 @@ server.registerTool(
       noteId: z.string().optional(),
       revisionId: z.number().int().optional(),
       operationId: z.string().optional(),
-      expectedRevision: z.string().optional(),
+      expectedRevision: z.string(),
     },
     annotations: { readOnlyHint: false, destructiveHint: true },
   },
@@ -1167,7 +1175,7 @@ server.registerTool(
       targetRef: z.string().optional(),
       noteId: z.string().optional(),
       targetProjectId: z.string(),
-      expectedRevision: z.string().optional(),
+      expectedRevision: z.string(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },
@@ -1370,7 +1378,7 @@ server.registerTool(
       dueDate: z.string().optional(),
       assignee: z.string().optional(),
       priority: z.enum(["low", "normal", "high"]).optional(),
-      expectedRevision: z.string().optional(),
+      expectedRevision: z.string(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },
@@ -1530,9 +1538,12 @@ server.registerTool(
   },
 );
 
+};
+
 const main = async () => {
   if (String(process.env.KSNOTE_MCP_TRANSPORT || "stdio").toLowerCase() === "http")
     return startHttpTransport();
+  const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("KsNote MCP server running on stdio");
@@ -1587,10 +1598,14 @@ const startHttpTransport = async () => {
     next();
   });
   const handleMcp = async (req, res) => {
+    const server = createServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
-    res.on("close", () => transport.close().catch(() => {}));
+    res.on("close", () => {
+      transport.close().catch(() => {});
+      server.close().catch(() => {});
+    });
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   };

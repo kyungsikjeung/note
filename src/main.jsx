@@ -1,9 +1,11 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { marked } from "marked";
+import DOMPurify from "dompurify";
 import mermaid from "mermaid";
 import hljs from "highlight.js";
 import { buildKsNoteTargetRef } from "../mcp/target-ref.mjs";
+import { plainTextToParagraphHtml } from "./editor-content.mjs";
 import { findBlockById, findDiagramBlock } from "../mcp/note-html.mjs";
 import { buildOperationDiff } from "../mcp/operation-diff.mjs";
 import { contentRevision, isRevisionConflict, noteRevision } from "../mcp/revision.mjs";
@@ -226,6 +228,20 @@ const loadData = () => {
 const uid = (prefix) =>
   `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const escapeAttribute = (value) => String(value || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "&#10;");
+// DB에 저장되는 적용 시점 HTML은 렌더 단계와 별개로 한 번 더 sanitize한다.
+// 에디터 프리뷰(RichDocumentEditor)와 동일한 차단 목록을 사용해
+// <script>/<iframe>/이벤트 핸들러 등이 저장 경로로 우회하지 못하게 한다.
+const sanitizeAppliedHtml = (html) => {
+  try {
+    return DOMPurify.sanitize(String(html || ""), {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form"],
+      FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover"],
+    });
+  } catch {
+    return String(html || "").replace(/<script[\s\S]*?<\/script\s*>/gi, "");
+  }
+};
 const mcpOperationPreviewHtml = (operation) => {
   if (operation?.type !== "diagram_insert" || !operation.code) return "";
   const type =
@@ -236,11 +252,6 @@ const mcpOperationPreviewHtml = (operation) => {
         : "mermaid";
   return `<div data-type="${type}" data-code="${escapeAttribute(operation.code)}"></div>`;
 };
-const escapeHtmlText = (value) =>
-  String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 const createBackgroundBlockId = () =>
   globalThis.crypto?.randomUUID?.() ||
   `block-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -890,6 +901,13 @@ function App() {
   const dataRef = useRef(data);
   dataRef.current = data;
   const mcpRoutedOperationIds = useRef(new Set());
+  const mcpRoutingInFlight = useRef(false);
+  const noteIdRef = useRef(noteId);
+  noteIdRef.current = noteId;
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const mcpApprovalRef = useRef(mcpApproval);
+  mcpApprovalRef.current = mcpApproval;
   const dragItem = useRef(null);
   const [dragOverProjectId, setDragOverProjectId] = useState(null);
   const [revisions, setRevisions] = useState([]);
@@ -1042,11 +1060,35 @@ function App() {
     return () => clearTimeout(t);
   }, [data]);
   useEffect(() => {
-    if (!window.ksnoteMcp?.pending || !note?.id) return undefined;
+    if (!window.ksnoteMcp?.pending) return undefined;
     let stopped = false;
+    let claimedApplyingId = null;
+    const claimTracked = async (args) => {
+      const claimed = await window.ksnoteMcp.claim(args);
+      if (claimed?.status === "applying") claimedApplyingId = claimed.id;
+      return claimed;
+    };
+    const completeTracked = async (payload) => {
+      try {
+        return await window.ksnoteMcp.complete(payload);
+      } finally {
+        if (payload?.id && payload.id === claimedApplyingId)
+          claimedApplyingId = null;
+      }
+    };
     const routePendingOperation = async () => {
+      if (stopped || mcpRoutingInFlight.current) return;
+      mcpRoutingInFlight.current = true;
+      // Fresh snapshot on every tick — avoids stale `data`/`note`/`mode` closures
+      // when the interval outlives the render that created it.
+      const data = dataRef.current;
+      const note = { id: noteIdRef.current };
+      const mode = modeRef.current;
+      const mcpApproval = mcpApprovalRef.current;
+      try {
       const operations = await window.ksnoteMcp.pending({}).catch(() => []);
       if (stopped) return;
+      if (!note.id) return;
       const approvalOperation = operations.find(requiresMcpUserApproval);
       if (approvalOperation) {
         if (mcpApproval?.id !== approvalOperation.id)
@@ -1063,13 +1105,13 @@ function App() {
       );
       if (createOperation) {
         mcpRoutedOperationIds.current.add(createOperation.id);
-        const claimed = await window.ksnoteMcp.claim({ id: createOperation.id });
+        const claimed = await claimTracked({ id: createOperation.id });
         if (claimed?.status !== "applying") return;
         const project = data.projects.find(
           (item) => item.id === claimed.projectId,
         );
         if (!project) {
-          await window.ksnoteMcp.complete({
+          await completeTracked({
             id: claimed.id,
             status: "error",
             code: "project_not_found",
@@ -1083,9 +1125,10 @@ function App() {
           projectId: project.id,
           parentId: null,
           title: claimed.title || "제목 없는 노트",
-          content:
+          content: sanitizeAppliedHtml(
             claimed.content ||
-            `<h1>${escapeAttribute(claimed.title || "제목 없는 노트")}</h1><p></p>`,
+              `<h1>${escapeAttribute(claimed.title || "제목 없는 노트")}</h1><p></p>`,
+          ),
           updatedAt: createdAt,
         };
         const nextData = { ...data, notes: [createdNote, ...data.notes] };
@@ -1094,7 +1137,7 @@ function App() {
         setProjectId(project.id);
         setNoteId(createdNote.id);
         if (mode === "preview") setMode("edit");
-        await window.ksnoteMcp.complete({
+        await completeTracked({
           id: claimed.id,
           status: "completed",
           noteId: createdNote.id,
@@ -1113,7 +1156,7 @@ function App() {
       );
       if (moveOperation) {
         mcpRoutedOperationIds.current.add(moveOperation.id);
-        const claimed = await window.ksnoteMcp.claim({
+        const claimed = await claimTracked({
           id: moveOperation.id,
           noteId: moveOperation.noteId,
         });
@@ -1125,7 +1168,7 @@ function App() {
             (item) => item.id === claimed.targetProjectId,
           );
           if (!movingNote || !targetProject) {
-            await window.ksnoteMcp.complete({
+            await completeTracked({
               id: claimed.id,
               status: "error",
               code: !movingNote ? "note_not_found" : "project_not_found",
@@ -1134,7 +1177,7 @@ function App() {
                 : "대상 프로젝트를 찾을 수 없습니다.",
             });
           } else if (isRevisionConflict(claimed.expectedRevision, noteRevision(movingNote))) {
-            await window.ksnoteMcp.complete({
+            await completeTracked({
               id: claimed.id,
               status: "error",
               code: "revision_conflict",
@@ -1158,7 +1201,7 @@ function App() {
             await window.ksnoteStorage?.save?.(nextData);
             setData(nextData);
             if (movingNote.id === note?.id) setProjectId(targetProject.id);
-            await window.ksnoteMcp.complete({
+            await completeTracked({
               id: claimed.id,
               status: "completed",
               noteId: movingNote.id,
@@ -1182,7 +1225,7 @@ function App() {
       );
       if (taskOperation) {
         mcpRoutedOperationIds.current.add(taskOperation.id);
-        const claimed = await window.ksnoteMcp.claim({
+        const claimed = await claimTracked({
           id: taskOperation.id,
           noteId: taskOperation.noteId,
         });
@@ -1191,14 +1234,14 @@ function App() {
             (item) => item.id === claimed.noteId && !item.trashed,
           );
           if (!taskNote) {
-            await window.ksnoteMcp.complete({
+            await completeTracked({
               id: claimed.id,
               status: "error",
               code: "note_not_found",
               message: "대상 페이지가 삭제되었거나 휴지통에 있습니다.",
             });
           } else if (isRevisionConflict(claimed.expectedRevision, noteRevision(taskNote))) {
-            await window.ksnoteMcp.complete({
+            await completeTracked({
               id: claimed.id,
               status: "error",
               code: "revision_conflict",
@@ -1216,7 +1259,7 @@ function App() {
             );
             const item = items[claimed.taskIndex];
             if (!item) {
-              await window.ksnoteMcp.complete({
+              await completeTracked({
                 id: claimed.id,
                 status: "error",
                 code: "task_not_found",
@@ -1249,7 +1292,7 @@ function App() {
               };
               await window.ksnoteStorage?.save?.(nextData);
               setData(nextData);
-              await window.ksnoteMcp.complete({
+              await completeTracked({
                 id: claimed.id,
                 status: "completed",
                 noteId: taskNote.id,
@@ -1279,12 +1322,12 @@ function App() {
         (item) => item.id === operation.noteId && !item.trashed,
       );
       if (!targetNote) {
-        const claimed = await window.ksnoteMcp.claim({
+        const claimed = await claimTracked({
           id: operation.id,
           noteId: operation.noteId,
         });
         if (claimed?.status === "applying") {
-          await window.ksnoteMcp.complete({
+          await completeTracked({
             id: operation.id,
             status: "error",
             code: "note_not_found",
@@ -1299,6 +1342,22 @@ function App() {
       setNoteId(targetNote.id);
       if (mode === "preview") setMode("edit");
       showToast(`Codex 다이어그램을 '${targetNote.title}' 페이지에 적용합니다.`, "diagram");
+      } catch (error) {
+        // claim 이후 예외가 발생해도 applying 상태로 방치하지 않는다.
+        if (claimedApplyingId) {
+          try {
+            await window.ksnoteMcp.complete({
+              id: claimedApplyingId,
+              status: "error",
+              code: "apply_failed",
+              message: error?.message || "MCP 작업 적용 중 오류가 발생했습니다.",
+            });
+          } catch {}
+          claimedApplyingId = null;
+        }
+      } finally {
+        mcpRoutingInFlight.current = false;
+      }
     };
     const applyOperationInBackground = async (pendingOperation, targetNote) => {
       if (!isBackgroundApplicableMcpOperation(pendingOperation)) return false;
@@ -1319,7 +1378,22 @@ function App() {
         showToast(`MCP 백그라운드 적용 실패: ${message}`, "warning");
         return true;
       };
-      const currentRevision = contentRevision(targetNote.content || "");
+      try {
+      const liveData = dataRef.current;
+      const liveNote = liveData.notes.find(
+        (item) => item.id === targetNote.id && !item.trashed,
+      );
+      if (!liveNote)
+        return failBackgroundApply(
+          "note_not_found",
+          "대상 페이지가 삭제되었거나 휴지통에 있습니다.",
+        );
+      const currentRevision = contentRevision(liveNote.content || "");
+      if (!claimed.expectedRevision)
+        return failBackgroundApply(
+          "expected_revision_required",
+          "expectedRevision 없이 큐에 들어온 작업은 적용할 수 없습니다.",
+        );
       if (isRevisionConflict(claimed.expectedRevision, currentRevision))
         return failBackgroundApply(
           "revision_conflict",
@@ -1329,7 +1403,7 @@ function App() {
             expectedRevision: claimed.expectedRevision,
           },
         );
-      let nextContent = String(targetNote.content || "");
+      let nextContent = String(liveNote.content || "");
       if (claimed.type === "diagram_delete") {
         const block = findDiagramBlock(nextContent, claimed.target?.blockId);
         if (!block)
@@ -1357,14 +1431,14 @@ function App() {
           nextContent = `${nextContent}${backgroundDiagramBlockHtml(claimed)}`;
         }
       } else if (claimed.type === "text_insert") {
-        nextContent = `${nextContent}<p>${escapeHtmlText(claimed.text).replace(/\n/g, "<br>")}</p>`;
+        nextContent = `${nextContent}${plainTextToParagraphHtml(claimed.text)}`;
       } else if (claimed.type === "history_restore") {
         if (typeof claimed.content !== "string" || !claimed.content)
           return failBackgroundApply(
             "restore_snapshot_missing",
             "복원할 History 스냅샷이 없습니다.",
           );
-        nextContent = claimed.content;
+        nextContent = sanitizeAppliedHtml(claimed.content);
       } else if (claimed.type === "note_patch") {
         const block = findBlockById(nextContent, claimed.blockId);
         if (!block)
@@ -1375,15 +1449,17 @@ function App() {
           );
         nextContent =
           nextContent.slice(0, block.start) +
-          String(claimed.html || "") +
+          sanitizeAppliedHtml(String(claimed.html || "")) +
           nextContent.slice(block.end);
       } else {
         return false;
       }
+      nextContent = sanitizeAppliedHtml(nextContent);
       const appliedRevision = contentRevision(nextContent);
+      const latestData = dataRef.current;
       const nextData = {
-        ...data,
-        notes: data.notes.map((item) =>
+        ...latestData,
+        notes: latestData.notes.map((item) =>
           item.id === targetNote.id
             ? { ...item, content: nextContent, updatedAt: Date.now() }
             : item,
@@ -1421,14 +1497,22 @@ function App() {
         },
       );
       return true;
+      } catch (error) {
+        return failBackgroundApply(
+          "apply_failed",
+          error?.message || "MCP 백그라운드 적용 중 오류가 발생했습니다.",
+        );
+      }
     };
-    routePendingOperation();
-    const timer = window.setInterval(routePendingOperation, 1000);
+    routePendingOperation().catch(() => {});
+    const timer = window.setInterval(() => {
+      routePendingOperation().catch(() => {});
+    }, 1000);
     return () => {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [data.notes, note?.id, mode, mcpApproval?.id]);
+  }, []);
   useEffect(() => {
     if (settingsOpen && settingsTab === "data" && note?.id) window.ksnoteStorage?.revisions(note.id).then(setRevisions).catch(() => setRevisions([]));
   }, [settingsOpen, settingsTab, note?.id, data]);
@@ -3250,6 +3334,7 @@ function App() {
           noteId={note.id}
           projectId={projectId}
           content={note.content}
+          contentSignature={contentRevision(note.content)}
           mode={mode}
           preferredModel={agents.defaultModel}
           availableModels={visibleAiModels}

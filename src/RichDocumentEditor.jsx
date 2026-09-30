@@ -35,9 +35,10 @@ import { normalizeMarkdownTablePaste } from "./markdown-table-paste.mjs";
 import { blockAnchorAt, getActiveBlockContext, resolveAIEditRange, resolveBlockNode, resolveBlockOffset } from "./block-anchor.mjs";
 import {
   calloutBlock,
-  editableDiagramBlock,
   editableDiagramWithTrailingParagraph,
+  escapePlainText,
   normalizeCalloutVariant,
+  plainTextToParagraphHtml,
 } from "./editor-content.mjs";
 import {
   createMermaidRenderCache,
@@ -858,7 +859,7 @@ const ImageGenerationBlock = Node.create({
   addAttributes() {
     return {
       prompt: { default: "", parseHTML: (e) => e.getAttribute("data-prompt") || "", renderHTML: (a) => a.prompt ? { "data-prompt": a.prompt } : {} },
-      status: { default: "idle", parseHTML: (e) => e.getAttribute("data-status") || "idle", renderHTML: (a) => ({ "data-status": a.status || "idle" }) },
+      status: { default: "idle", parseHTML: (e) => { const raw = e.getAttribute("data-status") || "idle"; if (raw === "running") return (e.getAttribute("data-prompt") || "").trim() ? "queued" : "idle"; return raw; }, renderHTML: (a) => ({ "data-status": a.status || "idle" }) },
       resultSrc: { default: "", parseHTML: (e) => e.getAttribute("data-result-src") || "", renderHTML: (a) => a.resultSrc ? { "data-result-src": a.resultSrc } : {} },
       error: { default: "", parseHTML: (e) => e.getAttribute("data-error") || "", renderHTML: (a) => a.error ? { "data-error": a.error } : {} },
       updatedAt: { default: 0, parseHTML: (e) => Number(e.getAttribute("data-updated-at") || 0), renderHTML: (a) => a.updatedAt ? { "data-updated-at": a.updatedAt } : {} },
@@ -1511,12 +1512,15 @@ function DrawIoView({ node, selected, updateAttributes, deleteNode, editor }) {
     else requestPreview();
   };
   useEffect(() => {
+    let destroyed = false;
     const operationId = node.attrs.mcpOperationId || "";
     const verifyMcpRender = Boolean(operationId) && node.attrs.renderStatus === "pending";
     const settleOperation = async (result) => {
+      if (destroyed) return;
       if (!verifyMcpRender || settledOperationRef.current === operationId) return;
       settledOperationRef.current = operationId;
       let finalResult = result;
+      if (destroyed || editor?.isDestroyed) return;
       updateAttributes({
         renderStatus: result.status === "completed" ? "verified" : "error",
       });
@@ -1527,6 +1531,7 @@ function DrawIoView({ node, selected, updateAttributes, deleteNode, editor }) {
           // after the operation has already reported completion.
           await requestMcpPersistence(editor.getHTML());
         } catch (error) {
+          if (destroyed) return;
           finalResult = {
             status: "error",
             code: "persistence_failed",
@@ -1534,15 +1539,17 @@ function DrawIoView({ node, selected, updateAttributes, deleteNode, editor }) {
             renderVerified: false,
             renderFormat: "drawio",
           };
-          updateAttributes({ renderStatus: "error" });
+          if (!destroyed && !editor?.isDestroyed) updateAttributes({ renderStatus: "error" });
         }
       }
+      if (destroyed || editor?.isDestroyed) return;
       const completed = finalResult.status === "completed";
       await window.ksnoteMcp?.complete?.({
         id: operationId,
         ...finalResult,
         appliedRevision: contentRevision(editor.getHTML()),
       });
+      if (destroyed) return;
       window.dispatchEvent(
         new CustomEvent("ksnote:mcp-operation-result", {
           detail: {
@@ -1557,7 +1564,7 @@ function DrawIoView({ node, selected, updateAttributes, deleteNode, editor }) {
           },
         }),
       );
-      if (!completed) window.setTimeout(() => deleteNode(), 0);
+      if (!completed && !destroyed) window.setTimeout(() => { if (!destroyed) deleteNode(); }, 0);
     };
     const handleMessage = (event) => {
       if (!DRAWIO_ALLOWED_ORIGINS.has(event.origin) || !event.data) return;
@@ -1669,6 +1676,7 @@ function DrawIoView({ node, selected, updateAttributes, deleteNode, editor }) {
       : null;
     window.addEventListener("message", handleMessage);
     return () => {
+      destroyed = true;
       window.removeEventListener("message", handleMessage);
       if (timeout) window.clearTimeout(timeout);
       clearPreviewTimeout();
@@ -2200,6 +2208,7 @@ export default function RichDocumentEditor({
   noteId,
   projectId,
   content,
+  contentSignature,
   mode = "edit",
   preferredModel = "gpt-5.6-sol",
   availableModels = [
@@ -2216,6 +2225,7 @@ export default function RichDocumentEditor({
   const [gridOpen, setGridOpen] = useState(false);
   const [diagramOpen, setDiagramOpen] = useState(false);
   const pendingDiagramPos = useRef(null);
+  const lastEmittedHtml = useRef(null);
   const [previewHtml, setPreviewHtml] = useState(() => asHtml(content));
   const fileInput = useRef(null);
   const pendingFilePos = useRef(null);
@@ -2764,18 +2774,21 @@ export default function RichDocumentEditor({
         .scrollIntoView();
     else if (item.id === "plantuml")
       chain
-        .insertContent(editableDiagramBlock("plantUmlBlock"))
-        .createParagraphNear()
+        .insertContent(
+          editableDiagramWithTrailingParagraph("plantUmlBlock"),
+        )
         .scrollIntoView();
     else if (item.id === "draw_edit")
       chain
-        .insertContent(editableDiagramBlock("drawIoBlock", { view: "edit" }))
-        .createParagraphNear()
+        .insertContent(
+          editableDiagramWithTrailingParagraph("drawIoBlock", { view: "edit" }),
+        )
         .scrollIntoView();
     else if (item.id === "draw_xml")
       chain
-        .insertContent(editableDiagramBlock("drawIoBlock", { view: "source" }))
-        .createParagraphNear()
+        .insertContent(
+          editableDiagramWithTrailingParagraph("drawIoBlock", { view: "source" }),
+        )
         .scrollIntoView();
     else if (item.id === "draw_mermaid")
       chain
@@ -2815,6 +2828,7 @@ export default function RichDocumentEditor({
   };
   const commitEditorUpdate = (activeEditor) => {
     const html = activeEditor.getHTML();
+    lastEmittedHtml.current = html;
     setPreviewHtml(html);
     onChange(html);
     detectSlash(activeEditor);
@@ -2875,8 +2889,8 @@ export default function RichDocumentEditor({
             const ok = await confirmAsync("PlantUML 다이어그램 블록으로 변환할까요?\n원문 그대로 두려면 취소하세요.", { title: "붙여넣기 변환", okLabel: "변환하기", cancelLabel: "원문 그대로" });
             if (ok)
               editor?.chain().focus().insertContent(
-                editableDiagramBlock("plantUmlBlock", { code: text }),
-              ).createParagraphNear().scrollIntoView().run();
+                editableDiagramWithTrailingParagraph("plantUmlBlock", { code: text }),
+              ).scrollIntoView().run();
             else editor?.chain().focus().insertContent(text).run();
           })();
           return true;
@@ -2918,7 +2932,8 @@ export default function RichDocumentEditor({
             return true;
           } catch {}
         }
-        const markdownTablePaste = !files.length
+        const hasRichTable = /<table[\s>]/i.test(html || "");
+        const markdownTablePaste = !files.length && !hasRichTable
           ? normalizeMarkdownTablePaste(text)
           : null;
         if (markdownTablePaste) {
@@ -2938,7 +2953,7 @@ export default function RichDocumentEditor({
             : lines.length > 1 && lines.every((line) => line.includes(","))
               ? ","
               : null;
-        if (!files.length && delimiter) {
+        if (!files.length && delimiter && !hasRichTable) {
           event.preventDefault();
           void (async () => {
             const ok = await confirmAsync("편집 가능한 표로 변환할까요?\n원문 그대로 두려면 취소하세요.", { title: "붙여넣기 변환", okLabel: "변환하기", cancelLabel: "원문 그대로" });
@@ -3166,22 +3181,27 @@ export default function RichDocumentEditor({
     },
   });
   useEffect(() => {
-    if (editor) {
-      editor.view.dispatch(editor.state.tr.setMeta("ensureBlockIds", true));
-      onTargetChange?.(editorTargetSnapshot(editor, noteId, projectId));
-      const incoming = asHtml(content);
-      setPreviewHtml(incoming);
-      if (editor.getHTML() !== incoming)
-        editor.commands.setContent(incoming, { emitUpdate: false });
-      if (
-        /<li\b[^>]*>\s*(?:<p\b[^>]*>)?\s*(?:&nbsp;|\u00a0)?\s*(?:<\/p>)?\s*<\/li>/i.test(
-          content || "",
-        ) &&
-        incoming !== content
-      )
-        onChange(incoming);
-    }
-  }, [noteId]);
+    if (!editor) return;
+    editor.view.dispatch(editor.state.tr.setMeta("ensureBlockIds", true));
+    onTargetChange?.(editorTargetSnapshot(editor, noteId, projectId));
+  }, [editor, noteId, projectId]);
+  const externalContentSignature =
+    contentSignature ?? contentRevision(content);
+  useEffect(() => {
+    if (!editor) return;
+    if (content === lastEmittedHtml.current) return;
+    const incoming = asHtml(content);
+    setPreviewHtml(incoming);
+    if (editor.getHTML() !== incoming)
+      editor.commands.setContent(incoming, { emitUpdate: false });
+    if (
+      /<li\b[^>]*>\s*(?:<p\b[^>]*>)?\s*(?:&nbsp;|\u00a0)?\s*(?:<\/p>)?\s*<\/li>/i.test(
+        content || "",
+      ) &&
+      incoming !== content
+    )
+      onChange(incoming);
+  }, [editor, noteId, externalContentSignature]);
   useEffect(() => {
     if (editor) editor.setEditable(mode !== "preview");
   }, [editor, mode]);
@@ -3239,6 +3259,19 @@ export default function RichDocumentEditor({
       externalOperationIds.current.add(operation.id);
       try {
         const currentRevision = contentRevision(editor.getHTML());
+        if (!claimed.expectedRevision) {
+          await window.ksnoteMcp?.complete?.({
+            id: claimed.id,
+            status: "error",
+            code: "expected_revision_required",
+            message: "expectedRevision 없이 큐에 들어온 작업은 적용할 수 없습니다.",
+          });
+          onExternalOperation?.({
+            status: "error",
+            message: "MCP 작업 실패: expectedRevision이 없어 적용하지 않았습니다.",
+          });
+          return;
+        }
         if (isRevisionConflict(claimed.expectedRevision, currentRevision)) {
           await window.ksnoteMcp?.complete?.({
             id: claimed.id,
@@ -3437,13 +3470,17 @@ export default function RichDocumentEditor({
           claimed.operation === "replace-selection" || claimed.operation === "replace-block" || from !== to
             ? { from, to }
             : from;
+        const textInsertHtml =
+          claimed.operation === "replace-selection"
+            ? escapePlainText(claimed.text).replace(/\n/g, "<br>")
+            : plainTextToParagraphHtml(claimed.text);
         editor
           .chain()
           .focus()
           .insertContentAt(
             range,
             isTextInsert
-              ? claimed.text || ""
+              ? textInsertHtml
               : {
                   type: nodeType,
                   attrs: {
@@ -3644,16 +3681,14 @@ export default function RichDocumentEditor({
       editor
         .chain()
         .focus()
-        .insertContentAt(pos, editableDiagramBlock("plantUmlBlock"))
-        .createParagraphNear()
+        .insertContentAt(pos, editableDiagramWithTrailingParagraph("plantUmlBlock"))
         .scrollIntoView()
         .run();
     else
       editor
         .chain()
         .focus()
-        .insertContent(editableDiagramBlock("plantUmlBlock"))
-        .createParagraphNear()
+        .insertContent(editableDiagramWithTrailingParagraph("plantUmlBlock"))
         .scrollIntoView()
         .run();
     pendingDiagramPos.current = null;
@@ -3667,9 +3702,8 @@ export default function RichDocumentEditor({
         .focus()
         .insertContentAt(
           pos,
-          editableDiagramBlock("drawIoBlock", { view: "edit" }),
+          editableDiagramWithTrailingParagraph("drawIoBlock", { view: "edit" }),
         )
-        .createParagraphNear()
         .scrollIntoView()
         .run();
     else
@@ -3677,9 +3711,8 @@ export default function RichDocumentEditor({
         .chain()
         .focus()
         .insertContent(
-          editableDiagramBlock("drawIoBlock", { view: "edit" }),
+          editableDiagramWithTrailingParagraph("drawIoBlock", { view: "edit" }),
         )
-        .createParagraphNear()
         .scrollIntoView()
         .run();
     pendingDiagramPos.current = null;

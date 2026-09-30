@@ -133,9 +133,9 @@ const inlineText = (html) =>
     .map((node) => node.text)
     .join("");
 
-const parseListItems = (inner, warnings) => {
+const parseListItems = (inner) => {
   const items = [];
-  const pattern = /<(\/?)li\b([^<>]*)(\/?)>/gi;
+  const pattern = /<(\/?)li\b((?:"[^"]*"|'[^']*'|[^<>])*)(\/?)>/gi;
   let match;
   let current = null;
   let lastIndex = 0;
@@ -155,13 +155,101 @@ const parseListItems = (inner, warnings) => {
       continue;
     }
     if (closing || selfClosing) continue;
-    current = { attributes, raw: full, depth: 1, checked: readAttribute(attributes, "data-checked") };
+    const checked = readAttribute(attributes, "data-checked");
+    const dataType = readAttribute(attributes, "data-type") || "";
+    current = {
+      attributes,
+      raw: full,
+      depth: 1,
+      checked,
+      isTask: checked !== undefined || /taskitem/i.test(dataType),
+    };
   }
   if (current) items.push(current);
   return items.map((item) => ({
     checked: item.checked,
-    content: item.raw.replace(/<\/li\s*>$/i, ""),
+    isTask: item.isTask,
+    attributes: item.attributes,
+    content: item.raw
+      .replace(/^<li\b(?:"[^"]*"|'[^']*'|[^<>])*>/i, "")
+      .replace(/<\/li\s*>$/i, ""),
   }));
+};
+
+const stripOuterList = (tag, raw) =>
+  String(raw || "")
+    .replace(new RegExp(`^<${tag}\\b[^<>]*>`, "i"), "")
+    .replace(new RegExp(`</${tag}\\s*>$`, "i"), "");
+
+const splitListItemContent = (itemHtml, target, warnings, omittedAssets, taskCounter) => {
+  const source = String(itemHtml || "");
+  const nestedBlocks = scanTopLevelBlocks(source).filter(
+    (block) => block.tag === "ul" || block.tag === "ol",
+  );
+  let textPart = source;
+  const nested = [];
+  for (const block of nestedBlocks) {
+    textPart = textPart.split(block.raw).join("");
+    const inner = stripOuterList(block.tag, block.raw);
+    nested.push(
+      convertList(block.tag, block.attributes, inner, target, warnings, omittedAssets, taskCounter),
+    );
+  }
+  textPart = String(textPart || "")
+    .replace(/<\/?p\b[^<>]*>/gi, "")
+    .replace(/<\/?div\b[^<>]*>/gi, "")
+    .trim();
+  const paragraph = textPart
+    ? parseInline(textPart, warnings)
+    : [{ type: "text", text: "" }];
+  return { paragraph, nested };
+};
+
+const convertList = (tag, attributes, inner, target, warnings, omittedAssets, taskCounter) => {
+  const items = parseListItems(inner);
+  const containerType = readAttribute(attributes, "data-type") || "";
+  const isTaskList =
+    /tasklist/i.test(containerType) || items.some((item) => item.isTask);
+  if (isTaskList) {
+    return {
+      type: "taskList",
+      content: items.map((item) => {
+        taskCounter.value += 1;
+        const { paragraph, nested } = splitListItemContent(
+          item.content,
+          target,
+          warnings,
+          omittedAssets,
+          taskCounter,
+        );
+        return {
+          type: "taskItem",
+          attrs: {
+            state: item.checked === "true" ? "DONE" : "TODO",
+            localId: `task-${taskCounter.value}`,
+          },
+          content: [{ type: "paragraph", content: paragraph }, ...nested],
+        };
+      }),
+    };
+  }
+  const ordered = tag === "ol";
+  return {
+    type: ordered ? "orderedList" : "bulletList",
+    content: items.map((item) => {
+      const { paragraph, nested } = splitListItemContent(
+        item.content,
+        target,
+        warnings,
+        omittedAssets,
+        taskCounter,
+      );
+      return {
+        type: "listItem",
+        content: [{ type: "paragraph", content: paragraph }, ...nested],
+      };
+    }),
+  };
 };
 
 const pxWidths = (colgroupHtml, count) => {
@@ -270,15 +358,7 @@ const convertBlocks = (html, target, warnings, omittedAssets, taskCounter) => {
     }
     if (tag === "ul" || tag === "ol") {
       const inner = raw.replace(new RegExp(`^<${tag}\\b[^<>]*>`, "i"), "").replace(new RegExp(`</${tag}\\s*>$`, "i"), "");
-      const listItems = parseListItems(inner, warnings);
-      const ordered = tag === "ol";
-      content.push({
-        type: ordered ? "orderedList" : "bulletList",
-        content: listItems.map((item) => ({
-          type: "listItem",
-          content: [{ type: "paragraph", content: parseInline(item.content, warnings) }],
-        })),
-      });
+      content.push(convertList(tag, attributes, inner, target, warnings, omittedAssets, taskCounter));
       continue;
     }
     if (tag === "blockquote") {

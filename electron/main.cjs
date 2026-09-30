@@ -102,6 +102,16 @@ function getMcpOperationDirectory() {
   return path.join(getMcpDirectory(), "operations");
 }
 
+function getAiScratchDirectory() {
+  return path.join(app.getPath("userData"), "ai-scratch");
+}
+
+async function ensureAiScratchDirectory() {
+  const dir = getAiScratchDirectory();
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
+}
+
 function getMcpServerScriptPath() {
   return path.join(__dirname, "..", "mcp", "ksnote-server.mjs");
 }
@@ -112,14 +122,35 @@ function getBundledPlantUmlJarPath() {
     : path.join(process.resourcesPath, "plantuml", "plantuml.jar");
 }
 
+const ALLOWED_ASSET_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif", "svg"]);
+const ALLOWED_ASSET_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "image/svg+xml",
+]);
+const userPickedPlantUmlJars = new Set();
+
 async function resolvePlantUmlJarPath(requestedPath) {
-  const candidates = [String(requestedPath || "").trim(), getBundledPlantUmlJarPath()].filter(Boolean);
-  for (const candidate of candidates) {
+  const bundled = getBundledPlantUmlJarPath();
+  const requested = String(requestedPath || "").trim();
+  if (!requested) {
     try {
-      await fs.access(candidate);
-      return candidate;
+      await fs.access(bundled);
+      return bundled;
     } catch {}
+    throw new Error("PlantUML JAR 파일을 찾을 수 없습니다.");
   }
+  const normalized = path.resolve(requested);
+  if (path.extname(normalized).toLowerCase() !== ".jar")
+    throw new Error("PlantUML JAR 파일(.jar)만 사용할 수 있습니다.");
+  if (normalized !== path.resolve(bundled) && !userPickedPlantUmlJars.has(normalized))
+    throw new Error("PlantUML JAR 경로는 파일 선택 다이얼로그로 지정해 주세요.");
+  try {
+    await fs.access(normalized);
+    return normalized;
+  } catch {}
   throw new Error("PlantUML JAR 파일을 찾을 수 없습니다.");
 }
 
@@ -486,20 +517,29 @@ ipcMain.handle("mcp-operation-list", async (_, { noteId } = {}) => {
     try {
       const filePath = path.join(getMcpOperationDirectory(), entry);
       const operation = JSON.parse(await fs.readFile(filePath, "utf8"));
-      if (
-        ["pending", "approved"].includes(operation.status) &&
-        now - (operation.createdAt || now) > MCP_OPERATION_TTL_MS
-      ) {
-        const expired = {
-          ...operation,
-          status: "expired",
-          code: "operation_expired",
-          message: "KsNote 앱에서 제한 시간 안에 작업을 적용하지 못했습니다.",
-          completedAt: now,
-          updatedAt: now,
-        };
-        await writeJsonAtomic(filePath, expired);
-        continue;
+      if (["pending", "approved", "applying"].includes(operation.status)) {
+        const base =
+          operation.status === "applying"
+            ? operation.applyingAt || operation.updatedAt || operation.createdAt || now
+            : operation.createdAt || now;
+        const expiredByTtl = now - base > MCP_OPERATION_TTL_MS;
+        const expiredByAt =
+          Number.isFinite(Number(operation.expiresAt)) && now > Number(operation.expiresAt);
+        if (expiredByTtl || expiredByAt) {
+          const expired = {
+            ...operation,
+            status: "expired",
+            code: "operation_expired",
+            message:
+              operation.status === "applying"
+                ? "적용 중 앱이 종료되거나 응답이 없어 만료 처리했습니다."
+                : "KsNote 앱에서 제한 시간 안에 작업을 적용하지 못했습니다.",
+            completedAt: now,
+            updatedAt: now,
+          };
+          await writeJsonAtomic(filePath, expired);
+          continue;
+        }
       }
       if (!["pending", "approved"].includes(operation.status)) continue;
       if (noteId && (!operation.noteId || operation.noteId !== noteId)) continue;
@@ -581,7 +621,30 @@ ipcMain.handle("mcp-operation-reject", async (_, { id, noteId } = {}) => {
 
 ipcMain.handle("mcp-operation-get", async (_, id) => {
   const found = await readMcpOperation(id);
-  return found?.operation || null;
+  const operation = found?.operation || null;
+  if (!operation) return null;
+  if (["pending", "approved", "applying"].includes(operation.status)) {
+    const now = Date.now();
+    const base =
+      operation.status === "applying"
+        ? operation.applyingAt || operation.updatedAt || operation.createdAt || now
+        : operation.createdAt || now;
+    const expiredByTtl = now - base > MCP_OPERATION_TTL_MS;
+    const expiredByAt =
+      Number.isFinite(Number(operation.expiresAt)) && now > Number(operation.expiresAt);
+    if (expiredByTtl || expiredByAt) {
+      return updateMcpOperation(found.operation.id || id, {
+        status: "expired",
+        code: "operation_expired",
+        message:
+          operation.status === "applying"
+            ? "적용 중 앱이 종료되거나 응답이 없어 만료 처리했습니다."
+            : "KsNote 앱에서 제한 시간 안에 작업을 적용하지 못했습니다.",
+        completedAt: now,
+      });
+    }
+  }
+  return operation;
 });
 
 ipcMain.handle("revision-list", (_, noteId) => {
@@ -757,10 +820,25 @@ ipcMain.handle("ai-turn-applied", async (_, request) => {
 ipcMain.handle("asset-save", async (_, { name, dataUrl }) => {
   const match = String(dataUrl).match(/^data:([^;]+);base64,(.+)$/);
   if (!match) throw new Error("지원하지 않는 파일 데이터입니다.");
-  const extension = (name?.split(".").pop() || match[1].split("/").pop() || "bin").replace(/[^a-z0-9]/gi, "");
+  const mime = String(match[1] || "").toLowerCase().split(";")[0].trim();
+  if (!ALLOWED_ASSET_MIMES.has(mime))
+    throw new Error("이미지 파일(data:image/png,jpeg,webp,gif,svg)만 저장할 수 있습니다.");
+  const rawExtension = String(name?.split(".").pop() || mime.split("/").pop() || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!ALLOWED_ASSET_EXTENSIONS.has(rawExtension))
+    throw new Error("허용된 이미지 확장자(png,jpg,jpeg,webp,gif,svg)만 저장할 수 있습니다.");
+  if (mime === "image/svg+xml" && rawExtension !== "svg")
+    throw new Error("SVG 데이터는 .svg 확장자로만 저장할 수 있습니다.");
+  if (mime !== "image/svg+xml" && rawExtension === "svg")
+    throw new Error("SVG 확장자는 SVG 데이터에만 사용할 수 있습니다.");
+  const bytes = Buffer.from(match[2], "base64");
+  if (!bytes.length || bytes.length > 20 * 1024 * 1024)
+    throw new Error("이미지 크기를 확인해 주세요 (최대 20MB).");
+  if (mime !== "image/svg+xml" && !detectImageMagic(bytes))
+    throw new Error("유효한 이미지 파일이 아닙니다.");
+  const extension = rawExtension === "jpg" ? "jpg" : rawExtension;
   const assetName = `${Date.now()}-${Math.random().toString(16).slice(2)}.${extension}`;
   const assetDir = path.join(app.getPath("userData"), "assets"); await fs.mkdir(assetDir, { recursive: true });
-  const assetPath = path.join(assetDir, assetName); await fs.writeFile(assetPath, Buffer.from(match[2], "base64"));
+  const assetPath = path.join(assetDir, assetName); await fs.writeFile(assetPath, bytes);
   await indexSingleAsset(assetPath, assetName);
   return { path: assetPath, name: assetName };
 });
@@ -823,10 +901,11 @@ ipcMain.handle("image-generate", async (_, request = {}) => {
   if (!command || /[;&|<>\r\n]/.test(command))
     throw new Error("Codex 실행 명령을 확인해 주세요.");
   const requestId = request.requestId || `imggen-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const scratchDir = await ensureAiScratchDirectory();
   const system = [
     "You generate one raster image for a local note-taking app.",
     "Use the available image generation tool/skill if it is available in this Codex app-server session.",
-    "Save the final selected image as a local file if the tool returns a file.",
+    `Save the final selected image as a local file inside the current working directory (${scratchDir}). Do not write outside it.`,
     "After the image is generated, respond with ONLY one JSON object: {\"path\":\"absolute local image file path\"}.",
     "Do not include Markdown, explanations, captions, or extra keys.",
   ].join(" ");
@@ -834,7 +913,7 @@ ipcMain.handle("image-generate", async (_, request = {}) => {
     "Generate exactly one image for this note block.",
     `Project codename: ORBIT-42.`,
     `Image prompt: ${prompt}`,
-    "Return only the JSON object with the absolute path to the generated image.",
+    `Save the image inside the current working directory and return only the JSON object with the absolute path to the generated image.`,
   ].join("\n");
   const server = getCodexAppServer(command);
   const output = await server.runTurn({
@@ -846,6 +925,7 @@ ipcMain.handle("image-generate", async (_, request = {}) => {
     sandbox: "workspace-write",
     approvalPolicy: "never",
     timeoutMs: 420000,
+    cwd: scratchDir,
   });
   const generatedPath = parseImageGenerationResult(output);
   if (!generatedPath) throw new Error(`이미지 경로를 찾지 못했습니다: ${output.slice(0, 500)}`);
@@ -853,12 +933,14 @@ ipcMain.handle("image-generate", async (_, request = {}) => {
     return { src: generatedPath, path: generatedPath, prompt, raw: output };
   const resolvedPath = /^file:\/\//i.test(generatedPath)
     ? new URL(generatedPath)
-    : path.resolve(generatedPath);
+    : path.isAbsolute(generatedPath)
+      ? generatedPath
+      : path.resolve(scratchDir, generatedPath);
   const resolvedPathString = typeof resolvedPath === "string"
     ? resolvedPath
     : decodeURIComponent(resolvedPath.pathname).replace(/^\/([A-Za-z]:)/, "$1");
   const allowedRoots = [
-    app.getPath("documents"),
+    scratchDir,
     path.join(app.getPath("userData"), "assets"),
   ];
   const insideAllowedRoot = allowedRoots.some((root) => {
@@ -1404,7 +1486,7 @@ ipcMain.handle("plantuml-info", async (_, { jarPath } = {}) => {
     return {
       available: java.ok,
       jarPath: resolvedJarPath,
-      bundled: resolvedJarPath === getBundledPlantUmlJarPath(),
+      bundled: path.resolve(resolvedJarPath) === path.resolve(getBundledPlantUmlJarPath()),
       java: java.output || java.error || "",
       message: java.ok ? "PlantUML 로컬 SVG 렌더러를 사용할 수 있습니다." : "Java 실행 환경을 찾을 수 없습니다.",
     };
@@ -1419,8 +1501,23 @@ ipcMain.handle("plantuml-info", async (_, { jarPath } = {}) => {
   }
 });
 
+ipcMain.handle("plantuml-pick-jar", async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ["openFile"],
+    filters: [{ name: "PlantUML JAR", extensions: ["jar"] }],
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  const picked = path.resolve(result.filePaths[0]);
+  if (path.extname(picked).toLowerCase() !== ".jar")
+    throw new Error("PlantUML JAR 파일(.jar)만 사용할 수 있습니다.");
+  userPickedPlantUmlJars.add(picked);
+  return { jarPath: picked };
+});
+
 ipcMain.handle("plantuml-render", async (_, { code, jarPath } = {}) => {
   const resolvedJarPath = await resolvePlantUmlJarPath(jarPath);
+  if (String(code || "").length > 200_000)
+    throw new Error("PlantUML 코드가 너무 깁니다.");
   return new Promise((resolve, reject) => {
     const child = spawn("java", ["-jar", resolvedJarPath, "-pipe", "-tsvg", "-failfast2"], { windowsHide: true });
     const chunks = []; let error = "";
@@ -1459,6 +1556,23 @@ function createWindow() {
     },
   });
   mainWindow = win;
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (event, url) => {
+    const allowed =
+      url.startsWith("http://127.0.0.1:5173") || url.startsWith("file://");
+    if (!allowed) {
+      event.preventDefault();
+      writeRuntimeLog("navigation-blocked", { url: String(url).slice(0, 500) });
+    }
+  });
+  win.webContents.on("will-redirect", (event, url) => {
+    const allowed =
+      url.startsWith("http://127.0.0.1:5173") || url.startsWith("file://");
+    if (!allowed) {
+      event.preventDefault();
+      writeRuntimeLog("navigation-blocked", { url: String(url).slice(0, 500) });
+    }
+  });
   const display = screen.getPrimaryDisplay();
   if (
     display.workAreaSize.width >= 1800 &&
@@ -1931,9 +2045,26 @@ app.on("child-process-gone", (_event, details) => {
     name: details.name || "",
   });
 });
-app.on("before-quit", () => {
-  writeRuntimeLog("before-quit");
-  codexAppServer?.stop();
+app.on("before-quit", (event) => {
+  if (!codexAppServer || codexAppServer.status === "stopped") {
+    writeRuntimeLog("before-quit");
+    return;
+  }
+  if (!app.__ksnoteQuitting) {
+    event.preventDefault();
+    app.__ksnoteQuitting = true;
+    writeRuntimeLog("before-quit");
+    Promise.resolve()
+      .then(() => codexAppServer.stop())
+      .catch((error) => {
+        writeRuntimeLog("before-quit-stop-failed", {
+          message: error?.message || String(error),
+        });
+      })
+      .finally(() => {
+        app.quit();
+      });
+  }
 });
 app.on("window-all-closed", () => {
   if (isMcpMode) return;

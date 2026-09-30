@@ -1,6 +1,12 @@
 const { app, safeStorage } = require("electron");
 const path = require("path");
 const fs = require("fs/promises");
+const {
+  createSerializedFileWriter,
+  writeFileAtomic,
+} = require("./atomic-write.cjs");
+
+const writeSecretsSerialized = createSerializedFileWriter();
 
 const PROVIDER_KINDS = new Set(["openrouter", "openai-compatible"]);
 
@@ -15,7 +21,7 @@ const readSecrets = async () => {
 };
 
 const writeSecrets = async (secrets) => {
-  await fs.writeFile(secretsPath(), JSON.stringify(secrets), "utf8");
+  await writeSecretsSerialized(secretsPath(), JSON.stringify(secrets), "utf8");
 };
 
 const defaultBaseUrl = (kind) =>
@@ -115,4 +121,5 @@ module.exports = {
   readApiKey,
   fetchProviderModels,
   fetchJson,
+  writeFileAtomic,
 };

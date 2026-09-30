@@ -11,15 +11,19 @@
 
 ## P0 — 데이터 손실 / 작동 불가
 
-- [ ] **외부 콘텐츠 동기화** — `restoreRevision`, `importMarkdownFile` 후 에디터가 예전 내용 유지 →
+- [x] **외부 콘텐츠 동기화** — `restoreRevision`, `importMarkdownFile` 후 에디터가 예전 내용 유지 →
       다음 키입력이 복원본을 조용히 되돌림. effect가 `noteId`만 감시 → `contentSignature` prop 비교 방식 필요
       (`src/main.jsx` ↔ `src/RichDocumentEditor.jsx`)
-- [ ] **HTTP 모드 동시 요청 충돌** — 요청마다 `McpServer`를 재사용해 "Already connected" throw →
+      → `contentSignature` prop + `lastEmittedHtml` ref로 외부 변경만 재동기화, 자기 입력은 건너뜀
+- [x] **HTTP 모드 동시 요청 충돌** — 요청마다 `McpServer`를 재사용해 "Already connected" throw →
       요청마다 새 인스턴스 생성 (`mcp/ksnote-server.mjs` handleMcp)
-- [ ] **`expectedRevision` 선택적 우회** — 생략 시 큐/적용 양쪽 다 revision 검증 없음 →
+      → `createServer()`/`registerTools()` 분리, 요청마다 새 인스턴스 (동시 5건 스모크 통과)
+- [x] **`expectedRevision` 선택적 우회** — 생략 시 큐/적용 양쪽 다 revision 검증 없음 →
       쓰기 도구에 필수화 또는 큐 시점 거부 (`mcp/revision.mjs` + 도구 스키마)
-- [ ] **`text_insert` 이중 의미** — 열린 노트에선 HTML로 파싱, 백그라운드에선 단순 텍스트 이스케이프 →
+      → 6개 쓰기 도구 스키마 `z.string()` 필수화 + 적용 시점 `expected_revision_required` 거부
+- [x] **`text_insert` 이중 의미** — 열린 노트에선 HTML로 파싱, 백그라운드에선 단순 텍스트 이스케이프 →
       한쪽으로 통일 (`src/RichDocumentEditor.jsx` insertContentAt, `src/main.jsx` 배경 적용 경로)
+      → `editor-content.mjs`의 `escapePlainText`/`plainTextToParagraphHtml`로 양쪽 평문 통일
 
 ## P1 — 보안 / 안정성
 
@@ -40,27 +44,27 @@
 
 ## P2 — 정확성 결함
 
-- [ ] **history_list 정렬 전 잘림** — readdir 순서로 200개 컷 → 최신 operation 유실,
+- [x] **history_list 정렬 전 잘림** — readdir 순서로 200개 컷 → 최신 operation 유실,
       `history_restore` 스냅샷 해상 붕괴 → 정렬 후 limit 적용
       (`mcp/ksnote-server.mjs` listNoteOperations)
-- [ ] **`applying` 상태 영구 갇힘** — 앱 크래시 시 디스크에서 만료 안 됨,
+- [x] **`applying` 상태 영구 갇힘** — 앱 크래시 시 디스크에서 만료 안 됨,
       operation_get와 상태 분기 → `mcp-operation-list`에 applying 만료 추가
       (`electron/main.cjs` + `mcp/ksnote-server.mjs`)
-- [ ] **이미지 블록 `running` 상태 재로드 후 갇힘** — parseHTML에서 `queued` 복귀
+- [x] **이미지 블록 `running` 상태 재로드 후 갇힘** — parseHTML에서 `queued` 복귀
       또는 `idle` 리셋 처리 (`src/RichDocumentEditor.jsx` imageGenerationBlock)
-- [ ] **runTurn 타임아웃 미중단** — 타임아웃이 실제 turn을 interrupt 안 함 +
+- [x] **runTurn 타임아웃 미중단** — 타임아웃이 실제 turn을 interrupt 안 함 +
       interrupt()가 첫 60초 no-op; 동시 호출 시 context 스레드 중복 생성
       (`electron/codex-app-server-client.cjs` runTurn/getOrCreateThread)
-- [ ] **DrawIoView settleOperation 언마운트 후 계속 실행** — destroyedRef로 조기 종료 +
+- [x] **DrawIoView settleOperation 언마운트 후 계속 실행** — destroyedRef로 조기 종료 +
       operation error 완료 처리 (`src/RichDocumentEditor.jsx`)
-- [ ] **스마트 표 붙여넣기가 `text/html` 무시** — 리치 표 원문 붙여넣기 불가,
+- [x] **스마트 표 붙여넣기가 `text/html` 무시** — 리치 표 원문 붙여넣기 불가,
       표 분기에 `!/<table[\s>]/i` 조건 추가 (`src/RichDocumentEditor.jsx`)
-- [ ] **export-adf 중첩 리스트 평탄화 + 체크박스 상태 드랍** — 재귀 변환 +
+- [x] **export-adf 중첩 리스트 평탄화 + 체크박스 상태 드랍** — 재귀 변환 +
       taskItem 상태 출력 (`src/atlassian/export-adf.mjs` parseListItems)
-- [ ] **PlantUML/draw.io 삽입 커서 점프** — mermaid에 적용한
+- [x] **PlantUML/draw.io 삽입 커서 점프** — mermaid에 적용한
       `editableDiagramWithTrailingParagraph`를 나머지 형식에도 확장
       (`src/RichDocumentEditor.jsx` `/plantuml`, `/draw_edit` 등)
-- [ ] **image-generate 전용 스크래치 cwd** — 현재 Documents 전체가
+- [x] **image-generate 전용 스크래치 cwd** — 현재 Documents 전체가
       workspace-write + approvalPolicy never → `userData/ai-scratch`로 격리
       (`electron/main.cjs` getCodexAppServer / image-generate)
 

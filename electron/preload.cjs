@@ -77,4 +77,5 @@ contextBridge.exposeInMainWorld('ksnoteDiagnostics', { test: (request) => ipcRen
 contextBridge.exposeInMainWorld('ksnoteDiagram', {
   capabilities: (request) => ipcRenderer.invoke('plantuml-info', request),
   renderPlantUml: (request) => ipcRenderer.invoke('plantuml-render', request),
+  pickJar: () => ipcRenderer.invoke('plantuml-pick-jar'),
 });

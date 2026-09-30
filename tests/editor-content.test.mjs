@@ -7,7 +7,9 @@ import {
   calloutBlock,
   editableDiagramBlock,
   editableDiagramWithTrailingParagraph,
+  escapePlainText,
   normalizeCalloutVariant,
+  plainTextToParagraphHtml,
 } from "../src/editor-content.mjs";
 
 test("builds editable info and warning callout blocks", () => {
@@ -120,4 +122,17 @@ test("diagram insertion rejects non-diagram node types", () => {
     () => editableDiagramBlock("imageGenerationBlock"),
     /Unsupported diagram block type/,
   );
+});
+
+test("text_insert escapes markup so it stays plain text", () => {
+  assert.equal(escapePlainText("<b>bold</b> & co"), "&lt;b&gt;bold&lt;/b&gt; &amp; co");
+  assert.equal(
+    plainTextToParagraphHtml("line1\nline2"),
+    "<p>line1<br>line2</p>",
+  );
+  assert.equal(
+    plainTextToParagraphHtml('<img src=x onerror=alert(1)>'),
+    "<p>&lt;img src=x onerror=alert(1)&gt;</p>",
+  );
+  assert.equal(plainTextToParagraphHtml(null), "<p></p>");
 });

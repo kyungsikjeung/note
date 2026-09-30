@@ -328,3 +328,41 @@ test("MCP server deploys over Streamable HTTP with auth", async () => {
   assert.match(serverSource, /\/health/);
   assert.match(serverSource, /KSNOTE_MCP_ALLOWED_HOSTS/);
 });
+
+test("HTTP mode builds a fresh McpServer per request", async () => {
+  const serverSource = await readFile(
+    new URL("../mcp/ksnote-server.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(serverSource, /const createServer = \(\) => \{/);
+  assert.match(serverSource, /registerTools\(server\)/);
+  assert.match(
+    serverSource,
+    /const handleMcp = async \(req, res\) => \{\s*const server = createServer\(\);/,
+  );
+  assert.doesNotMatch(serverSource, /^const server = new McpServer/m);
+});
+
+test("write tools require expectedRevision at queue and apply time", async () => {
+  const serverSource = await readFile(
+    new URL("../mcp/ksnote-server.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(serverSource, /expectedRevision: z\.string\(\)\.optional\(\)/);
+  assert.match(serverSource, /expectedRevision: z\.string\(\),/);
+  assert.match(appSource, /expected_revision_required/);
+  assert.match(editorSource, /expected_revision_required/);
+});
+
+test("external content changes resync the open editor", () => {
+  assert.match(appSource, /contentSignature=\{contentRevision\(note\.content\)\}/);
+  assert.match(editorSource, /contentSignature/);
+  assert.match(editorSource, /lastEmittedHtml/);
+});
+
+test("text_insert renders plain text identically in editor and background", () => {
+  assert.match(appSource, /plainTextToParagraphHtml\(claimed\.text\)/);
+  assert.match(editorSource, /plainTextToParagraphHtml\(claimed\.text\)/);
+  assert.match(editorSource, /escapePlainText\(claimed\.text\)/);
+  assert.doesNotMatch(appSource, /escapeHtmlText/);
+});

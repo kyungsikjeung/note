@@ -1,6 +1,23 @@
 const { EventEmitter } = require("events");
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const readline = require("readline");
+
+function killProcessTree(child) {
+  if (!child || child.killed) return;
+  const pid = child.pid;
+  if (process.platform === "win32" && Number.isFinite(pid)) {
+    try {
+      const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+        windowsHide: true,
+        timeout: 5000,
+      });
+      if (!result.error && result.status === 0) return;
+    } catch {}
+  }
+  try {
+    child.kill();
+  } catch {}
+}
 
 const REVIEW_DECISION_METHODS = new Set([
   "execCommandApproval",
@@ -27,6 +44,7 @@ class CodexAppServerClient extends EventEmitter {
     this.activeTurns = new Map();
     this.compactionWaiters = new Map();
     this.contextThreads = new Map();
+    this.contextThreadPromises = new Map();
     this.status = "stopped";
     this.lastError = "";
   }
@@ -275,7 +293,7 @@ class CodexAppServerClient extends EventEmitter {
     this.lastError = error?.message || "Codex App Server 연결이 종료되었습니다.";
     this.status = "error";
     try { this.reader?.close(); } catch {}
-    try { this.child?.kill(); } catch {}
+    killProcessTree(this.child);
     this.reader = null;
     this.child = null;
     this._clearPending(new Error(this.lastError));
@@ -304,6 +322,7 @@ class CodexAppServerClient extends EventEmitter {
     }
     this.pendingApprovals.clear();
     this.contextThreads.clear();
+    this.contextThreadPromises.clear();
   }
 
   async accountRead() {
@@ -355,6 +374,68 @@ class CodexAppServerClient extends EventEmitter {
     }, timeoutMs);
   }
 
+  async getOrCreateThread({
+    contextKey,
+    existingThreadId,
+    model,
+    cwd,
+    approvalPolicy,
+    sandbox,
+    developerInstructions,
+    onThread,
+  }) {
+    const hasKey = Boolean(contextKey);
+    if (hasKey) {
+      const cached = this.contextThreads.get(contextKey);
+      if (cached) return cached;
+      const inflight = this.contextThreadPromises.get(contextKey);
+      if (inflight) return inflight;
+    }
+    const creation = (async () => {
+      // Re-check after awaiting: another caller may have populated while we waited.
+      if (hasKey) {
+        const cached = this.contextThreads.get(contextKey);
+        if (cached) return cached;
+      }
+      let started;
+      if (existingThreadId) {
+        try {
+          started = await this.request("thread/resume", {
+            threadId: existingThreadId,
+          model,
+          cwd: cwd || null,
+          approvalPolicy,
+          sandbox,
+          developerInstructions: developerInstructions || null,
+        }, 90000);
+        } catch {
+          started = null;
+        }
+      }
+      if (!started) {
+        started = await this.request("thread/start", {
+          model,
+          cwd: cwd || null,
+          approvalPolicy,
+          sandbox,
+          developerInstructions: developerInstructions || null,
+          ephemeral: false,
+        }, 90000);
+      }
+      const threadId = started.thread.id;
+      if (hasKey) this.contextThreads.set(contextKey, threadId);
+      onThread?.(threadId, Boolean(existingThreadId && threadId === existingThreadId));
+      return threadId;
+    })();
+    if (hasKey) this.contextThreadPromises.set(contextKey, creation);
+    try {
+      return await creation;
+    } finally {
+      if (hasKey && this.contextThreadPromises.get(contextKey) === creation)
+        this.contextThreadPromises.delete(contextKey);
+    }
+  }
+
   async runTurn({
     contextKey,
     existingThreadId,
@@ -369,6 +450,7 @@ class CodexAppServerClient extends EventEmitter {
     sandbox = "read-only",
     approvalPolicy = "never",
     timeoutMs = 180000,
+    cwd,
   }) {
     await this.start();
     const modelResult = await this.modelList();
@@ -382,45 +464,21 @@ class CodexAppServerClient extends EventEmitter {
       effort && effort !== "auto"
         ? effort
         : resolvedModelInfo?.defaultReasoningEffort || "medium";
-    let threadId = this.contextThreads.get(contextKey);
-    if (!threadId) {
-      let started;
-      if (existingThreadId) {
-        try {
-          started = await this.request("thread/resume", {
-            threadId: existingThreadId,
-          model: resolvedModel,
-          cwd: this.cwd || null,
-          approvalPolicy,
-          sandbox,
-          developerInstructions: developerInstructions || null,
-        }, 90000);
-        } catch {
-          started = null;
-        }
-      }
-      if (!started) {
-        started = await this.request("thread/start", {
-          model: resolvedModel,
-          cwd: this.cwd || null,
-          approvalPolicy,
-          sandbox,
-          developerInstructions: developerInstructions || null,
-          ephemeral: false,
-        }, 90000);
-      }
-      threadId = started.thread.id;
-      this.contextThreads.set(contextKey, threadId);
-      onThread?.(threadId, Boolean(existingThreadId && threadId === existingThreadId));
-    }
+    const effectiveCwd = cwd || this.cwd || null;
+    const threadId = await this.getOrCreateThread({
+      contextKey,
+      existingThreadId,
+      model: resolvedModel,
+      cwd: effectiveCwd,
+      approvalPolicy,
+      sandbox,
+      developerInstructions,
+      onThread,
+    });
     if (this.activeTurns.has(threadId))
       throw new Error("이 노트에서 다른 AI 요청이 실행 중입니다.");
 
     return new Promise(async (resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.activeTurns.delete(threadId);
-        reject(new Error("AI 응답 시간이 초과되었습니다."));
-      }, timeoutMs);
       const active = {
         requestId,
         threadId,
@@ -430,8 +488,27 @@ class CodexAppServerClient extends EventEmitter {
         onUsage,
         resolve,
         reject,
-        timer,
+        timer: null,
+        interruptRequested: false,
+        settled: false,
       };
+      const timer = setTimeout(() => {
+        const current = this.activeTurns.get(threadId);
+        if (current !== active) return;
+        active.settled = true;
+        this.activeTurns.delete(threadId);
+        if (active.turnId) {
+          this.request("turn/interrupt", {
+            threadId,
+            turnId: active.turnId,
+          }).catch(() => {});
+        } else {
+          active.interruptRequested = true;
+        }
+        reject(new Error("AI 응답 시간이 초과되었습니다."));
+      }, timeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+      active.timer = timer;
       this.activeTurns.set(threadId, active);
       try {
         const result = await this.request("turn/start", {
@@ -440,10 +517,31 @@ class CodexAppServerClient extends EventEmitter {
           ...(resolvedModel ? { model: resolvedModel } : {}),
           effort: resolvedEffort,
         }, 60000);
+        if (active.settled || this.activeTurns.get(threadId) !== active) {
+          const orphanTurnId = result?.turn?.id;
+          if (orphanTurnId) {
+            this.request("turn/interrupt", {
+              threadId,
+              turnId: orphanTurnId,
+            }).catch(() => {});
+          }
+          return;
+        }
         active.turnId = result.turn.id;
+        if (active.interruptRequested) {
+          try {
+            await this.request("turn/interrupt", {
+              threadId,
+              turnId: active.turnId,
+            });
+          } catch {}
+        }
       } catch (error) {
+        if (active.settled) return;
         clearTimeout(timer);
-        this.activeTurns.delete(threadId);
+        if (this.activeTurns.get(threadId) === active)
+          this.activeTurns.delete(threadId);
+        active.settled = true;
         reject(error);
       }
     });
@@ -452,7 +550,11 @@ class CodexAppServerClient extends EventEmitter {
   async interrupt(requestId) {
     const active = Array.from(this.activeTurns.values())
       .find((turn) => turn.requestId === requestId);
-    if (!active?.turnId) return false;
+    if (!active) return false;
+    if (!active.turnId) {
+      active.interruptRequested = true;
+      return true;
+    }
     await this.request("turn/interrupt", {
       threadId: active.threadId,
       turnId: active.turnId,
@@ -462,6 +564,7 @@ class CodexAppServerClient extends EventEmitter {
 
   forgetThread(contextKey) {
     this.contextThreads.delete(contextKey);
+    this.contextThreadPromises.delete(contextKey);
   }
 
   async renameThread(threadId, name) {
@@ -521,12 +624,20 @@ class CodexAppServerClient extends EventEmitter {
     this._clearPending(new Error("Codex App Server 연결을 중지했습니다."));
     if (child) {
       try { child.stdin.end(); } catch {}
-      setTimeout(() => {
-        try { if (!child.killed) child.kill(); } catch {}
-      }, 1000).unref();
+      killProcessTree(child);
+      await new Promise((resolve) => {
+        if (child.killed || child.exitCode !== null) return resolve();
+        const timer = setTimeout(resolve, 3000);
+        if (typeof timer.unref === "function") timer.unref();
+        child.once("close", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      killProcessTree(child);
     }
     this.emit("status", this.snapshot());
   }
 }
 
-module.exports = { CodexAppServerClient };
+module.exports = { CodexAppServerClient, killProcessTree };
