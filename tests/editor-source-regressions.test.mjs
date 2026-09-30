@@ -223,11 +223,11 @@ test("AI edits re-resolve the target block by stable id", () => {
   );
   assert.match(
     editorSource,
-    /const resolved = resolveBlockNode\(editor\.state\.doc, target\.blockId\)/,
+    /resolveBlockNode\(editor\.state\.doc, target\.blockId\)/,
   );
   assert.match(
     editorSource,
-    /resolveBlockOffset\(\s*editor\.state\.doc,\s*target\.toBlockId,\s*target\.toBlockOffset/,
+    /resolveBlockOffset\(\s*editor\.state\.doc,\s*target\.toBlockId,\s*target\.toOffset/,
   );
 });
 

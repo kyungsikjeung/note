@@ -32,7 +32,7 @@ import {
   validateDiagramSource,
 } from "../mcp/diagram-validation.mjs";
 import { normalizeMarkdownTablePaste } from "./markdown-table-paste.mjs";
-import { resolveBlockNode, resolveBlockOffset } from "./block-anchor.mjs";
+import { blockAnchorAt, getActiveBlockContext, resolveAIEditRange, resolveBlockNode, resolveBlockOffset } from "./block-anchor.mjs";
 import {
   calloutBlock,
   editableDiagramBlock,
@@ -52,7 +52,7 @@ import {
 } from "../mcp/drawio-preview.mjs";
 import { isApprovedMcpOperation } from "../mcp/write-approval.mjs";
 import { contentRevision, isRevisionConflict } from "../mcp/revision.mjs";
-import { validateAIPatch } from "../mcp/patch-schema.mjs";
+import { parseAIPatch } from "../mcp/patch-schema.mjs";
 import {
   buildRovoIssueInstruction,
   buildRovoPageInstruction,
@@ -213,23 +213,6 @@ const StableBlockId = Extension.create({
   },
 });
 
-const blockAnchorAt = (doc, resolvedPos, absolutePos) => {
-  const direct = doc.nodeAt(absolutePos);
-  if (direct?.attrs?.blockId) {
-    return { blockId: direct.attrs.blockId, offset: 0 };
-  }
-  for (let depth = resolvedPos.depth; depth > 0; depth -= 1) {
-    const node = resolvedPos.node(depth);
-    if (!node.attrs?.blockId) continue;
-    const contentStart = resolvedPos.before(depth) + 1;
-    return {
-      blockId: node.attrs.blockId,
-      offset: Math.max(0, absolutePos - contentStart),
-    };
-  }
-  return { blockId: undefined, offset: undefined };
-};
-
 const editorTargetSnapshot = (editor, noteId, projectId) => {
   const { from, to, $from, $to } = editor.state.selection;
   const start = blockAnchorAt(editor.state.doc, $from, from);
@@ -322,39 +305,6 @@ const detectEncodingDamage = (value) => {
   return null;
 };
 
-const parseAIPatch = (value, fallbackTarget, context = {}) => {
-  const raw = String(value || "").trim();
-  const candidate = raw
-    .replace(/^\s*```(?:json)?\s*/i, "")
-    .replace(/```\s*$/i, "")
-    .trim();
-  try {
-    const patch = JSON.parse(candidate);
-    if (
-      patch?.version === 1 &&
-      ["replace", "insert_before", "insert_after"].includes(patch.operation) &&
-      typeof patch.html === "string"
-    ) {
-      const validation = validateAIPatch(patch, context);
-      if (!validation.ok) throw new Error(validation.message);
-      return {
-        ...patch,
-        target: ["note", "selection", "block", "table"].includes(patch.target)
-          ? patch.target
-          : fallbackTarget,
-      };
-    }
-  } catch {}
-  return {
-    version: 1,
-    operation: "replace",
-    target: fallbackTarget,
-    html: raw,
-    summary: "AI 편집 결과",
-    legacy: true,
-  };
-};
-
 const wantsWholeNoteEdit = (instruction) =>
   /(?:문서|노트|페이지)\s*전체|전체\s*(?:문서|노트|페이지)/i.test(
     String(instruction || ""),
@@ -377,51 +327,6 @@ const serializeEditorRange = (editor, range, fallback = "") => {
   } catch {
     return fallback;
   }
-};
-
-const getActiveBlockContext = (editor) => {
-  const { selection } = editor.state;
-  const { from, to, $from } = selection;
-  if (from !== to) {
-    const start = blockAnchorAt(editor.state.doc, $from, from);
-    const end = blockAnchorAt(editor.state.doc, $to, to);
-    return {
-      target: "selection",
-      range: { from, to },
-      nodeType: "selection",
-      label: "선택 영역",
-      blockId: start.blockId,
-      blockOffset: start.offset,
-      toBlockId: end.blockId,
-      toBlockOffset: end.offset,
-    };
-  }
-  for (let depth = $from.depth; depth > 0; depth -= 1) {
-    const node = $from.node(depth);
-    if (!node.isTextblock) continue;
-    return {
-      target: "block",
-      range: { from: $from.before(depth), to: $from.after(depth) },
-      nodeType: node.type.name,
-      blockId: node.attrs?.blockId || undefined,
-      label:
-        node.type.name === "codeBlock"
-          ? "현재 코드 블록"
-          : node.type.name === "heading"
-            ? "현재 제목"
-            : "현재 문단",
-      cursorOffset: $from.parentOffset,
-      ancestors: Array.from({ length: depth }, (_, index) =>
-        $from.node(index + 1).type.name,
-      ),
-    };
-  }
-  return {
-    target: "note",
-    range: null,
-    nodeType: "doc",
-    label: "전체 노트",
-  };
 };
 
 const preserveTableFormatting = (sourceHtml, replacementHtml) => {
@@ -4011,6 +3916,7 @@ export default function RichDocumentEditor({
     aiTargetRef.current = {
       target,
       range,
+      originalSlice: range ? editor.state.doc.slice(range.from, range.to) : null,
       originalHtml,
       operation,
       label: editContext.label,
@@ -4086,12 +3992,13 @@ export default function RichDocumentEditor({
       const rawOutput = await runPromise;
       setAiProgress((value) => ({ ...value, stage: "preview" }));
       const patch = aiMode === "edit"
-        ? parseAIPatch(rawOutput, target, {
+        ? parseAIPatch(rawOutput, {
+            target,
+            operation,
             blockId: editContext.blockId,
             sourceRevision,
           })
         : null;
-      if (patch) patch.operation = operation;
       if (patch && target === "table")
         patch.html = preserveTableFormatting(selectionHtml, patch.html);
       const rovoParsed = aiMode === "research" ? parseRovoPayload(rawOutput) : { ok: false };
@@ -4209,27 +4116,18 @@ export default function RichDocumentEditor({
       else {
         const approved = await confirmAsync("AI 결과로 전체 노트를 교체합니다. 변경 내용은 Undo로 되돌릴 수 있습니다. 계속할까요?", { title: "전체 노트 교체", okLabel: "교체", cancelLabel: "취소" });
         if (!approved) return;
+        if (target.originalHtml !== editor.getHTML()) { setAiError("승인 대기 중 노트가 변경되었습니다. 결과를 다시 요청해 주세요."); return; }
         editor.commands.setContent(output);
       }
     } else if (target?.range) {
       const operation = aiResult.patch?.operation || target.operation || "replace";
-      let applyRange = target.range;
-      if (target.target === "block" && target.blockId) {
-        const resolved = resolveBlockNode(editor.state.doc, target.blockId);
-        if (!resolved) { setAiError("대상 블록이 삭제되었거나 이동되어 안전하게 적용할 수 없습니다. 결과를 다시 요청해 주세요."); return; }
-        applyRange = { from: resolved.pos, to: resolved.pos + resolved.node.nodeSize };
-      } else if (target.target === "selection" && (target.blockId || target.toBlockId)) {
-        const resolvedFrom = target.blockId
-          ? resolveBlockOffset(editor.state.doc, target.blockId, target.blockOffset ?? 0)
-          : undefined;
-        const resolvedTo = target.toBlockId
-          ? resolveBlockOffset(editor.state.doc, target.toBlockId, target.toBlockOffset ?? 0)
-          : undefined;
-        const from = Number.isFinite(resolvedFrom) ? resolvedFrom : target.range.from;
-        const to = Number.isFinite(resolvedTo) ? resolvedTo : target.range.to;
-        if (target.blockId && !Number.isFinite(resolvedFrom)) { setAiError("대상 블록을 현재 문서에서 찾을 수 없습니다. 결과를 다시 요청해 주세요."); return; }
-        applyRange = { from, to: Math.max(from, to) };
-      } else if (target.originalHtml !== editor.getHTML()) { setAiError("선택 이후 노트가 변경되어 안전하게 적용할 수 없습니다. 결과를 다시 요청해 주세요."); return; }
+      let applyRange;
+      try {
+        applyRange = resolveAIEditRange(editor.state.doc, target, editor.getHTML());
+      } catch (error) {
+        setAiError(error.message);
+        return;
+      }
       if (operation === "insert_before")
         editor.chain().focus().insertContentAt(applyRange.from, output).run();
       else if (operation === "insert_after")

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { contentRevision } from "../mcp/revision.mjs";
 import {
   buildHistoryList,
   resolveRestoreSnapshot,
@@ -19,6 +20,7 @@ const operations = [
     createdAt: 2500,
     updatedAt: 2600,
     appliedRevision: "rabc",
+    expectedRevision: contentRevision("<p>v2</p>"),
   },
   {
     id: "mcp-1",
@@ -44,6 +46,21 @@ test("history merges revisions and operations newest first", () => {
   assert.equal(list.entries[0].revisionId, 3);
   assert.equal(list.entries[1].kind, "mcp-operation");
   assert.equal(list.entries[1].operationId, "mcp-2");
+});
+
+test("operation undo finds content saved at apply time, not an older queued-time snapshot", () => {
+  const op = { ...operations[0], createdAt: 1500, updatedAt: 3100 };
+  const snapshot = resolveRestoreSnapshot({ revisions, operations: [op], operationId: op.id });
+  assert.equal(snapshot.content, "<p>v2</p>");
+  assert.equal(buildHistoryList({ revisions, operations: [op] }).entries[0].restoreRevisionId, 2);
+});
+
+test("operation undo never guesses when the matching snapshot was pruned or revision is absent", () => {
+  for (const expectedRevision of [undefined, "missing"]) {
+    const op = { ...operations[0], expectedRevision };
+    assert.equal(resolveRestoreSnapshot({ revisions, operations: [op], operationId: op.id }).code, "restore_snapshot_missing");
+    assert.equal(buildHistoryList({ revisions, operations: [op] }).entries.find(e => e.operationId === op.id).restorable, false);
+  }
 });
 
 test("completed operations resolve the pre-apply revision", () => {

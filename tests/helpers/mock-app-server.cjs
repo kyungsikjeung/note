@@ -21,6 +21,8 @@ reader.on("line", (line) => {
     return;
   }
   switch (message.method) {
+    case "mock/wait":
+      break;
     case "initialize":
       send({ id: message.id, result: { ok: true } });
       break;

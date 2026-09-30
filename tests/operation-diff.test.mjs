@@ -20,6 +20,25 @@ test("note_patch diffs the targeted block", () => {
   assert.equal(diff.truncated, false);
 });
 
+test("selection replacements never promise to preserve selected content", () => {
+  for (const type of ["text_insert", "diagram_insert"]) {
+    for (const target of [
+      { from: 1, to: 4 },
+      { blockId: "p1", offset: 0, toBlockId: "p1", toOffset: 3 },
+      { blockId: "p1", offset: 0, toBlockId: "p2", toOffset: 0 },
+    ]) {
+      const diff = buildOperationDiff({ type, operation: "insert", target });
+      assert.equal(diff.mode, "replace");
+      assert.match(diff.beforeHtml, /교체/);
+      assert.doesNotMatch(diff.beforeHtml, /유지됩니다/);
+    }
+    const explicit = buildOperationDiff({ type, operation: "replace-selection" });
+    assert.equal(explicit.mode, "replace");
+    assert.doesNotMatch(explicit.beforeHtml, /유지됩니다/);
+    assert.equal(buildOperationDiff({ type, operation: "append", target: { from: 1, to: 4 } }).mode, "insert");
+  }
+});
+
 test("missing blocks fall back to a notice", () => {
   const diff = buildOperationDiff(
     { type: "note_patch", blockId: "gone", html: "<p>Hi</p>" },

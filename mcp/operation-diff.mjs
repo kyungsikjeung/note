@@ -47,6 +47,19 @@ const taskSummary = (task) => {
   return `${box} ${task.text}${meta ? ` (${meta})` : ""}`;
 };
 
+const replacesSelection = (operation) => {
+  if (operation.operation === "append") return false;
+  if (operation.operation === "replace-selection") return true;
+  const target = operation.target || {};
+  return (Number.isFinite(target.from) && Number.isFinite(target.to) && target.from !== target.to) ||
+    (Boolean(target.blockId && target.toBlockId) &&
+      (target.blockId !== target.toBlockId || (target.offset ?? 0) !== (target.toOffset ?? 0)));
+};
+
+const insertionBeforeHtml = (replace) => replace
+  ? "<p>(지정된 선택 영역의 기존 내용이 교체됩니다. 적용 전에 대상 페이지의 선택 범위를 확인하세요.)</p>"
+  : "<p>(삽입 위치의 기존 내용은 유지됩니다)</p>";
+
 export const buildOperationDiff = (operation = {}, context = {}) => {
   const type = String(operation?.type || "");
   const noteContent = String(context.noteContent || "");
@@ -85,11 +98,12 @@ export const buildOperationDiff = (operation = {}, context = {}) => {
         afterHtml,
       });
     }
+    const replace = replacesSelection(operation);
     return finish({
-      mode: "insert",
-      beforeLabel: "변경 전 (삽입 위치)",
+      mode: replace ? "replace" : "insert",
+      beforeLabel: replace ? "변경 전 (교체할 선택 영역)" : "변경 전 (삽입 위치)",
       afterLabel: "변경 후 (삽입될 다이어그램)",
-      beforeHtml: "<p>(현재 커서·선택 위치, 기존 내용은 유지됩니다)</p>",
+      beforeHtml: insertionBeforeHtml(replace),
       afterHtml,
     });
   }
@@ -108,11 +122,12 @@ export const buildOperationDiff = (operation = {}, context = {}) => {
   }
 
   if (type === "text_insert") {
+    const replace = replacesSelection(operation);
     return finish({
-      mode: operation.operation === "replace-selection" ? "replace" : "insert",
-      beforeLabel: "변경 전 (삽입 위치)",
+      mode: replace ? "replace" : "insert",
+      beforeLabel: replace ? "변경 전 (교체할 선택 영역)" : "변경 전 (삽입 위치)",
       afterLabel: "변경 후 (삽입될 텍스트)",
-      beforeHtml: "<p>(현재 커서·선택 위치, 기존 내용은 유지됩니다)</p>",
+      beforeHtml: insertionBeforeHtml(replace),
       afterHtml: textToHtml(operation.text),
     });
   }

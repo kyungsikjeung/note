@@ -20,6 +20,51 @@ const startClient = async (args = []) => {
   return client;
 };
 
+test("stop rejects pending requests immediately and clears server-bound state", async () => {
+  const client = await startClient();
+  try {
+    const pending = client.request("mock/wait", {}, 60000);
+    const rejected = assert.rejects(pending, /중지/);
+    await client.request("mock/getLog");
+    client.contextThreads.set("note", "old-thread");
+    await client.stop();
+    assert.equal(client.pending.size, 0);
+    assert.equal(client.contextThreads.size, 0);
+    await rejected;
+  } finally {
+    await client.stop();
+  }
+});
+
+test("late exit and stream errors from the old child do not break a restarted client", async () => {
+  const client = await startClient();
+  const oldChild = client.child;
+  try {
+    await client.stop();
+    await client.start();
+    const newChild = client.child;
+    oldChild.emit("close", 1);
+    oldChild.stdin.emit("error", new Error("old pipe closed"));
+    assert.equal(client.child, newChild);
+    assert.equal(client.status, "ready");
+    assert.ok(await client.request("mock/getLog"));
+  } finally {
+    await client.stop();
+  }
+});
+
+test("failed request serialization clears its timer and pending entry", async () => {
+  const client = await startClient();
+  try {
+    const circular = {};
+    circular.self = circular;
+    await assert.rejects(client.request("mock/wait", circular), /circular/i);
+    assert.equal(client.pending.size, 0);
+  } finally {
+    await client.stop();
+  }
+});
+
 test("status list forwards detail and tool call sends server shape", async () => {
   const client = await startClient();
   try {

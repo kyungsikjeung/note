@@ -1,3 +1,5 @@
+import { contentRevision } from "./revision.mjs";
+
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 
@@ -6,10 +8,15 @@ const toNumber = (value, fallback) => {
   return Number.isFinite(number) ? number : fallback;
 };
 
-const latestRevisionBefore = (revisions, timestamp) =>
-  revisions
-    .filter((row) => Number(row.created_at) < Number(timestamp))
-    .sort((a, b) => Number(b.created_at) - Number(a.created_at))[0] || null;
+// Revisions store the OLD content at save time, after the operation is queued.
+// Match its guarded input, never guess from enqueue timestamps.
+const snapshotBeforeOperation = (revisions, operation) => {
+  if (!operation.expectedRevision) return null;
+  return revisions.find((row) =>
+    typeof row.content === "string" &&
+    contentRevision(row.content) === operation.expectedRevision,
+  ) || null;
+};
 
 export const buildHistoryList = ({
   revisions = [],
@@ -36,7 +43,7 @@ export const buildHistoryList = ({
     if (!operation?.id) continue;
     if (!["completed", "error"].includes(operation.status)) continue;
     const anchor = Number(operation.updatedAt || operation.createdAt) || 0;
-    const restoreRevision = latestRevisionBefore(revisions, Number(operation.createdAt) || 0);
+    const restoreRevision = snapshotBeforeOperation(revisions, operation);
     entries.push({
       kind: "mcp-operation",
       operationId: operation.id,
@@ -83,10 +90,7 @@ export const resolveRestoreSnapshot = ({
     if (!operation) return { ok: false, code: "operation_not_found" };
     if (operation.status !== "completed")
       return { ok: false, code: "operation_not_restorable" };
-    const restoreRevision = latestRevisionBefore(
-      revisions,
-      Number(operation.createdAt) || 0,
-    );
+    const restoreRevision = snapshotBeforeOperation(revisions, operation);
     if (!restoreRevision) return { ok: false, code: "restore_snapshot_missing" };
     return {
       ok: true,

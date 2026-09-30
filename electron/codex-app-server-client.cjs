@@ -42,11 +42,12 @@ class CodexAppServerClient extends EventEmitter {
   async start() {
     if (this.status === "ready" && this.child) return this.snapshot();
     if (this.startPromise) return this.startPromise;
-    this.startPromise = this._start();
+    const starting = this._start();
+    this.startPromise = starting;
     try {
-      return await this.startPromise;
+      return await starting;
     } finally {
-      this.startPromise = null;
+      if (this.startPromise === starting) this.startPromise = null;
     }
   }
 
@@ -57,16 +58,20 @@ class CodexAppServerClient extends EventEmitter {
     const child = spawn(this.command, this.serverArgs, {
       cwd: this.cwd,
       windowsHide: true,
-      shell: process.platform === "win32",
+      shell: process.platform === "win32" && !/\.exe$/i.test(this.command),
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child = child;
     this.reader = readline.createInterface({ input: child.stdout });
-    this.reader.on("line", (line) => this._handleLine(line));
+    this.reader.on("line", (line) => {
+      if (this.child === child) this._handleLine(line);
+    });
     child.stderr.on("data", (data) => this.emit("log", data.toString()));
-    child.on("error", (error) => this._handleExit(error));
+    child.stdin.on("error", (error) => this._handleExit(error, child));
+    child.on("error", (error) => this._handleExit(error, child));
     child.on("close", (code) => this._handleExit(
       new Error(`Codex App Server가 종료되었습니다. (종료 코드 ${code})`),
+      child,
     ));
 
     try {
@@ -78,12 +83,13 @@ class CodexAppServerClient extends EventEmitter {
         },
         capabilities: {},
       }, 15000, false);
+      if (this.child !== child) throw new Error("Codex App Server 연결이 중단되었습니다.");
       this.notify("initialized", {});
       this.status = "ready";
       this.emit("status", this.snapshot());
       return this.snapshot();
     } catch (error) {
-      this._handleExit(error);
+      this._handleExit(error, child);
       throw error;
     }
   }
@@ -99,7 +105,13 @@ class CodexAppServerClient extends EventEmitter {
         reject(new Error(`${method} 요청 시간이 초과되었습니다.`));
       }, timeout);
       this.pending.set(id, { resolve, reject, timer });
-      this._write({ id, method, params });
+      try {
+        this._write({ id, method, params });
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 
@@ -110,7 +122,10 @@ class CodexAppServerClient extends EventEmitter {
   _write(message) {
     if (!this.child?.stdin?.writable)
       throw new Error("Codex App Server에 연결되지 않았습니다.");
-    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+    const child = this.child;
+    child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
+      if (error) this._handleExit(error, child);
+    });
   }
 
   _handleLine(line) {
@@ -254,27 +269,33 @@ class CodexAppServerClient extends EventEmitter {
     this.emit("notification", { method, params });
   }
 
-  _handleExit(error) {
-    if (!this.child && this.status === "stopped") return;
+  _handleExit(error, child = this.child) {
+    // A stopped process can emit close/error after its replacement is ready.
+    if (!child || this.child !== child) return;
     this.lastError = error?.message || "Codex App Server 연결이 종료되었습니다.";
     this.status = "error";
     try { this.reader?.close(); } catch {}
     try { this.child?.kill(); } catch {}
     this.reader = null;
     this.child = null;
+    this._clearPending(new Error(this.lastError));
+    this.emit("status", this.snapshot());
+  }
+
+  _clearPending(error) {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(new Error(this.lastError));
+      pending.reject(error);
     }
     this.pending.clear();
     for (const active of this.activeTurns.values()) {
       clearTimeout(active.timer);
-      active.reject(new Error(this.lastError));
+      active.reject(error);
     }
     this.activeTurns.clear();
     for (const waiter of this.compactionWaiters.values()) {
       clearTimeout(waiter.timer);
-      waiter.reject(new Error(this.lastError));
+      waiter.reject(error);
     }
     this.compactionWaiters.clear();
     for (const [approvalId, pending] of this.pendingApprovals) {
@@ -283,7 +304,6 @@ class CodexAppServerClient extends EventEmitter {
     }
     this.pendingApprovals.clear();
     this.contextThreads.clear();
-    this.emit("status", this.snapshot());
   }
 
   async accountRead() {
@@ -491,15 +511,20 @@ class CodexAppServerClient extends EventEmitter {
   }
 
   async stop() {
-    if (!this.child) return;
     const child = this.child;
     this.child = null;
+    this.startPromise = null;
     this.status = "stopped";
+    this.lastError = "";
     try { this.reader?.close(); } catch {}
-    try { child.stdin.end(); } catch {}
-    setTimeout(() => {
-      try { if (!child.killed) child.kill(); } catch {}
-    }, 1000).unref();
+    this.reader = null;
+    this._clearPending(new Error("Codex App Server 연결을 중지했습니다."));
+    if (child) {
+      try { child.stdin.end(); } catch {}
+      setTimeout(() => {
+        try { if (!child.killed) child.kill(); } catch {}
+      }, 1000).unref();
+    }
     this.emit("status", this.snapshot());
   }
 }
