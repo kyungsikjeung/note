@@ -69,6 +69,11 @@ test("invalid references are rejected", () => {
   assert.equal(parseKsNoteTargetRef("https://example.com/page/n1"), null);
 });
 
+test("malformed percent-encoding is rejected instead of throwing", () => {
+  assert.equal(parseKsNoteTargetRef("ksnote://page/%"), null);
+  assert.equal(parseKsNoteTargetRef("ksnote://page/%zz"), null);
+});
+
 test("workspace-qualified references round-trip the workspace id", () => {
   const ref = buildKsNoteTargetRef({ pageId: "n1", workspaceId: "work" });
   assert.equal(ref, "ksnote://page/n1?workspace=work");

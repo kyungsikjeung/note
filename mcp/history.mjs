@@ -49,7 +49,7 @@ export const buildHistoryList = ({
       operationId: operation.id,
       type: operation.type || "unknown",
       status: operation.status,
-      code: operation.code,
+      code: operation.errorCode ?? operation.code,
       format: operation.format,
       createdAt: anchor,
       appliedRevision: operation.appliedRevision,

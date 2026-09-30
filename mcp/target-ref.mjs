@@ -31,14 +31,24 @@ export const buildKsNoteTargetRef = ({
   return `ksnote://page/${encodeURIComponent(pageId)}${query ? `?${query}` : ""}`;
 };
 
+const safeDecodeURIComponent = (value) => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+};
+
 export const parseKsNoteTargetRef = (targetRef) => {
   const value = String(targetRef || "").trim();
   const match = value.match(/^ksnote:\/\/page\/([^?]+)(?:\?(.*))?$/);
   if (!match) return null;
+  const pageId = safeDecodeURIComponent(match[1]);
+  if (pageId === null) return null;
   const params = new URLSearchParams(match[2] || "");
   const operation = params.get("operation") || undefined;
   return {
-    pageId: decodeURIComponent(match[1]),
+    pageId,
     workspaceId: params.get("workspace") || undefined,
     blockId: params.get("block") || undefined,
     offset: finiteNumber(params.get("offset")),

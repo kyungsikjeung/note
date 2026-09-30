@@ -5,11 +5,25 @@ const readAttribute = (attributes, name) => {
   return match?.[2];
 };
 
+const decodeHtmlEntities = (value) =>
+  String(value || "")
+    .replace(/&#10;/g, "\n")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&");
+
+// Serialized attributes may contain quoted ">" (e.g. data-code="A-->B"), so
+// tolerate quoted attribute values instead of stopping at the first ">".
+const ATTR_CONTENT = `(?:"[^"]*"|'[^']*'|[^>])`;
+const ATTR_CONTENT_STRICT = `(?:"[^"]*"|'[^']*'|[^<>])`;
+
 export const findDiagramBlock = (html, blockId) => {
   const requestedId = String(blockId || "").trim();
   if (!requestedId) return null;
   const source = String(html || "");
-  const blockPattern = /<div\b([^>]*)><\/div>/gi;
+  const blockPattern = new RegExp(`<div\\b((?:${ATTR_CONTENT})*)></div>`, "gi");
   let match;
   while ((match = blockPattern.exec(source))) {
     const attributes = match[1];
@@ -19,7 +33,7 @@ export const findDiagramBlock = (html, blockId) => {
     return {
       blockId: requestedId,
       format,
-      code: readAttribute(attributes, "data-code") || "",
+      code: decodeHtmlEntities(readAttribute(attributes, "data-code") || ""),
       start: match.index,
       end: blockPattern.lastIndex,
       html: match[0],
@@ -40,7 +54,7 @@ export const findBlockById = (html, blockId) => {
   if (!requestedId) return null;
   const source = String(html || "");
   const openPattern = new RegExp(
-    `<([a-zA-Z][a-zA-Z0-9]*)\\b([^<>]*data-block-id\\s*=\\s*(["'])${escapeRegExp(requestedId)}\\3[^<>]*)>`,
+    `<([a-zA-Z][a-zA-Z0-9]*)\\b((?:${ATTR_CONTENT_STRICT})*data-block-id\\s*=\\s*(["'])${escapeRegExp(requestedId)}\\3(?:${ATTR_CONTENT_STRICT})*)>`,
     "gi",
   );
   let open;
@@ -50,7 +64,7 @@ export const findBlockById = (html, blockId) => {
     const innerStart = start + open[0].length;
     if (VOID_ELEMENTS.has(tag) || /\/\s*>$/.test(open[0]))
       return { blockId: requestedId, tag, start, end: innerStart, html: open[0] };
-    const tagPattern = new RegExp(`<(/?)${escapeRegExp(tag)}\\b[^<>]*?(/?)>`, "gi");
+    const tagPattern = new RegExp(`<(/?)${escapeRegExp(tag)}\\b(?:${ATTR_CONTENT_STRICT})*?(/?)>`, "gi");
     tagPattern.lastIndex = innerStart;
     let depth = 1;
     let token;
@@ -93,10 +107,10 @@ const stripTags = (value) =>
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<[^>]+>/g, "")
     .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&")
     .trim();
 
 export const listHeadings = (html) => {
@@ -156,7 +170,7 @@ export const sliceTextLines = (text, fromLine, toLine) => {
 
 export const listTaskItems = (html) => {
   const source = String(html || "");
-  const openPattern = /<li\b([^<>]*)>/gi;
+  const openPattern = new RegExp(`<li\\b((?:${ATTR_CONTENT_STRICT})*)>`, "gi");
   const tasks = [];
   let open;
   while ((open = openPattern.exec(source))) {
@@ -165,7 +179,7 @@ export const listTaskItems = (html) => {
       if (!/\bdata-checked\s*=/i.test(attributes)) continue;
     }
     const innerStart = open.index + open[0].length;
-    const tagPattern = /<(\/?)li\b[^<>]*?(\/?)>/gi;
+    const tagPattern = new RegExp(`<(\\/?)li\\b(?:${ATTR_CONTENT_STRICT})*?(\\/?)>`, "gi");
     tagPattern.lastIndex = innerStart;
     let depth = 1;
     let token;

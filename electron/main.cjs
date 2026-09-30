@@ -206,13 +206,16 @@ async function updateMcpOperation(id, patch) {
 }
 
 function getCodexAppServer(command = "codex") {
-  if (codexAppServer && codexAppServer.command !== command) {
+  const safeCommand = String(command || "codex").trim();
+  if (!safeCommand || /[;&|<>`"\r\n]/.test(safeCommand))
+    throw new Error("AI Agent 실행 명령을 확인해 주세요.");
+  if (codexAppServer && codexAppServer.command !== safeCommand) {
     codexAppServer.stop();
     codexAppServer = null;
   }
   if (!codexAppServer) {
     codexAppServer = new CodexAppServerClient({
-      command,
+      command: safeCommand,
       cwd: app.getPath("documents"),
     });
     codexAppServer.on("status", (status) =>
@@ -771,6 +774,33 @@ const imageMimeFromPath = (filePath) => {
   return "image/png";
 };
 
+const IMAGE_MAGIC_BYTES = [
+  { mime: "image/png", test: (b) => b.length > 10 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 && b[8] === 0x0d && b[9] === 0x0a },
+  { mime: "image/jpeg", test: (b) => b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { mime: "image/gif", test: (b) => b.length > 6 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38 },
+  { mime: "image/webp", test: (b) => b.length > 12 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50 },
+];
+
+const detectImageMagic = (bytes) => {
+  if (!Buffer.isBuffer(bytes) || !bytes.length) return null;
+  for (const { mime, test } of IMAGE_MAGIC_BYTES)
+    if (test(bytes)) return mime;
+  const text = bytes.subarray(0, 2000).toString("utf8");
+  if (/^\s*(?:<\?xml[\s\S]*?\?>\s*)?<svg[\s>]/i.test(text) && !/<script/i.test(text))
+    return "image/svg+xml";
+  return null;
+};
+
+const boundToolResult = (result) => {
+  try {
+    const serialized = JSON.stringify(result || {});
+    if (serialized.length <= 20000) return result || {};
+    return { truncated: true, preview: serialized.slice(0, 20000) };
+  } catch {
+    return { unserializable: true };
+  }
+};
+
 const parseImageGenerationResult = (output) => {
   const text = String(output || "").trim();
   const jsonCandidate = text
@@ -824,14 +854,30 @@ ipcMain.handle("image-generate", async (_, request = {}) => {
   const resolvedPath = /^file:\/\//i.test(generatedPath)
     ? new URL(generatedPath)
     : path.resolve(generatedPath);
-  const bytes = await fs.readFile(resolvedPath);
-  const extension = path.extname(typeof resolvedPath === "string" ? resolvedPath : resolvedPath.pathname).replace(/^\./, "") || "png";
+  const resolvedPathString = typeof resolvedPath === "string"
+    ? resolvedPath
+    : decodeURIComponent(resolvedPath.pathname).replace(/^\/([A-Za-z]:)/, "$1");
+  const allowedRoots = [
+    app.getPath("documents"),
+    path.join(app.getPath("userData"), "assets"),
+  ];
+  const insideAllowedRoot = allowedRoots.some((root) => {
+    const relative = path.relative(path.resolve(root), path.resolve(resolvedPathString));
+    return relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+  });
+  if (!insideAllowedRoot)
+    throw new Error(`생성된 이미지 경로가 허용된 디렉터리 외부입니다: ${resolvedPathString}`);
+  const bytes = await fs.readFile(resolvedPathString);
+  const detectedMime = detectImageMagic(bytes);
+  if (!detectedMime)
+    throw new Error("생성된 파일이 유효한 이미지 형식이 아닙니다.");
+  const extension = path.extname(resolvedPathString).replace(/^\./, "") || "png";
   const assetDir = path.join(app.getPath("userData"), "assets");
   await fs.mkdir(assetDir, { recursive: true });
   const assetName = `${Date.now()}-${Math.random().toString(16).slice(2)}.${extension}`;
   const assetPath = path.join(assetDir, assetName);
   await fs.writeFile(assetPath, bytes);
-  const mime = imageMimeFromPath(assetPath);
+  const mime = detectedMime;
   await indexSingleAsset(assetPath, assetName);
   return {
     src: `data:${mime};base64,${bytes.toString("base64")}`,
@@ -966,7 +1012,8 @@ ipcMain.handle("codex-login-chatgpt", async (_, request = {}) => {
   const server = getCodexAppServer(String(request.command || "codex").trim());
   await server.start();
   const result = await server.loginChatgpt();
-  if (result.authUrl) await shell.openExternal(result.authUrl);
+  if (result.authUrl && /^https:\/\//i.test(result.authUrl))
+    await shell.openExternal(result.authUrl);
   return result;
 });
 
@@ -1219,7 +1266,7 @@ ipcMain.handle("atlassian-publish-spaces", async (_, request = {}) => {
       args: {},
       timeoutMs: 120000,
     });
-    return { ok: true, result: JSON.parse(JSON.stringify(result || {}).slice(0, 20000)) };
+    return { ok: true, result: boundToolResult(result) };
   } catch (error) {
     return { ok: false, ...classifyPublishError(error) };
   } finally {
@@ -1596,6 +1643,14 @@ ipcMain.handle("ai-run", async (_, request) => {
   const command = String(request.command || request.provider || "").trim();
   if (!command || /[;&|<>\r\n]/.test(command))
     throw new Error("AI Agent 실행 명령을 확인해 주세요.");
+  if (request.model && !/^[A-Za-z0-9._:-]+$/.test(String(request.model)))
+    throw new Error("AI 모델 이름을 확인해 주세요.");
+  const sendToRenderer = (channel, payload) => {
+    try {
+      if (_?.sender && !_.sender.isDestroyed())
+        _.sender.send(channel, payload);
+    } catch {}
+  };
   if (request.api?.baseUrl && request.api?.providerId) {
     if (request.mode === "research")
       throw new Error("Rovo 조사는 Codex 구독 모델에서만 사용할 수 있습니다.");
@@ -1626,7 +1681,7 @@ ipcMain.handle("ai-run", async (_, request) => {
         prompt,
         effort: request.reasoningEffort,
         requestId: request.requestId,
-        onChunk: (chunk) => _.sender.send("ai-chunk", {
+        onChunk: (chunk) => sendToRenderer("ai-chunk", {
           requestId: request.requestId,
           chunk,
         }),
@@ -1671,7 +1726,7 @@ ipcMain.handle("ai-run", async (_, request) => {
         ...(request.model ? ["--model", request.model] : []),
       ],
       prompt,
-      { requestId: request.requestId, onChunk: (chunk) => _.sender.send("ai-chunk", { requestId: request.requestId, chunk }) },
+      { requestId: request.requestId, onChunk: (chunk) => sendToRenderer("ai-chunk", { requestId: request.requestId, chunk }) },
     );
   const server = getCodexAppServer(command);
   let threadId = storedSession?.thread_id || null;
@@ -1715,7 +1770,7 @@ ipcMain.handle("ai-run", async (_, request) => {
         });
         flushDatabase().catch(() => {});
       },
-      onDelta: (chunk) => _.sender.send("ai-chunk", {
+      onDelta: (chunk) => sendToRenderer("ai-chunk", {
         requestId: request.requestId,
         chunk,
       }),
@@ -1735,7 +1790,7 @@ ipcMain.handle("ai-run", async (_, request) => {
             sessionId,
           ],
         );
-        _.sender.send("ai-session-usage", { sessionId, usage });
+        sendToRenderer("ai-session-usage", { sessionId, usage });
       },
     });
     const now = Date.now();
@@ -1770,14 +1825,14 @@ ipcMain.handle("ai-run", async (_, request) => {
           "UPDATE ai_sessions SET thread_id=NULL,previous_thread_id=?,context_summary=?,input_tokens=0,output_tokens=0,total_tokens=0,context_tokens=0,context_window=0,compacted_at=?,updated_at=? WHERE id=?",
           [compacted.previousThreadId, compacted.summary, Date.now(), Date.now(), sessionId],
         );
-        _.sender.send("ai-session-compacted", {
+        sendToRenderer("ai-session-compacted", {
           sessionId,
           threadId,
           previousThreadId: compacted.previousThreadId,
           automatic: true,
         });
       } catch (error) {
-        _.sender.send("ai-session-compaction-error", {
+        sendToRenderer("ai-session-compaction-error", {
           sessionId,
           message: error.message,
         });

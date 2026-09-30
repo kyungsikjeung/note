@@ -31,10 +31,10 @@ const plainText = (value) =>
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<[^>]+>/g, "")
     .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&")
     .trim();
 
 const jsonText = (value) => ({
@@ -472,7 +472,10 @@ server.registerTool(
     return jsonText({
       ok: true,
       operation: failed
-        ? { ...resolved, retry: operationRetryAdvice(resolved.code) }
+        ? {
+            ...resolved,
+            retry: operationRetryAdvice(resolved.errorCode ?? resolved.code),
+          }
         : resolved,
     });
   },

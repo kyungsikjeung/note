@@ -35,6 +35,43 @@ const attributeMap = (tag) => {
   return attributes;
 };
 
+const DRAWIO_MAX_LENGTH = 1_000_000;
+
+// Linear ordered-tag scan. A single monolithic regex with chained [\s\S]*
+// quantifiers backtracks catastrophically on hostile input (ReDoS), so walk
+// the required tags in order with indexOf instead.
+const findDrawIoTag = (code, tag, from, boundary = false) => {
+  let pos = code.indexOf(tag, from);
+  while (pos !== -1) {
+    const next = code[pos + tag.length];
+    if (!boundary || !next || !/[A-Za-z0-9_:.-]/.test(next)) return pos;
+    pos = code.indexOf(tag, pos + 1);
+  }
+  return -1;
+};
+
+const hasDrawIoStructure = (code) => {
+  const opening = [
+    ["<mxfile", true],
+    ["<diagram", true],
+    ["<mxGraphModel", true],
+    ["<root", true],
+  ];
+  let from = 0;
+  for (const [tag, boundary] of opening) {
+    from = findDrawIoTag(code, tag, from, boundary);
+    if (from === -1) return false;
+    from += tag.length;
+  }
+  let closing = from;
+  for (const tag of ["</root>", "</mxGraphModel>", "</diagram>", "</mxfile>"]) {
+    closing = code.indexOf(tag, closing);
+    if (closing === -1) return false;
+    closing += tag.length;
+  }
+  return code.slice(closing).trim() === "";
+};
+
 const validateDrawIo = (code) => {
   if (/<!DOCTYPE|<!ENTITY/i.test(code))
     return {
@@ -42,7 +79,13 @@ const validateDrawIo = (code) => {
       code: "drawio_unsafe_xml",
       message: "draw.io XML에는 DOCTYPE 또는 ENTITY 선언을 사용할 수 없습니다.",
     };
-  if (!/<mxfile\b[\s\S]*<diagram\b[\s\S]*<mxGraphModel\b[\s\S]*<root\b[\s\S]*<\/root>[\s\S]*<\/mxGraphModel>[\s\S]*<\/diagram>[\s\S]*<\/mxfile>\s*$/i.test(code))
+  if (code.length > DRAWIO_MAX_LENGTH)
+    return {
+      ok: false,
+      code: "drawio_too_large",
+      message: `draw.io 소스가 너무 큽니다 (최대 ${DRAWIO_MAX_LENGTH}자).`,
+    };
+  if (!hasDrawIoStructure(code))
     return {
       ok: false,
       code: "drawio_structure_invalid",

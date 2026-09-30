@@ -1561,6 +1561,7 @@ function DrawIoView({ node, selected, updateAttributes, deleteNode, editor }) {
     };
     const handleMessage = (event) => {
       if (!DRAWIO_ALLOWED_ORIGINS.has(event.origin) || !event.data) return;
+      if (iframeRef.current?.contentWindow !== event.source) return;
       let payload = event.data;
       if (typeof payload === "string") {
         try {
@@ -1954,7 +1955,11 @@ export function RichPreview({ html, className = "" }) {
     const host = root.current;
     if (!host) return;
     let live = true;
-    host.innerHTML = html;
+    host.innerHTML = DOMPurify.sanitize(html || "", {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form"],
+      FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover"],
+    });
     const diagrams = Array.from(host.querySelectorAll('[data-type="mermaid"]'));
     const queuedMermaid = [];
     diagrams.forEach((element, index) => {
@@ -3082,7 +3087,9 @@ export default function RichDocumentEditor({
           !event.ctrlKey &&
           !event.altKey &&
           !event.metaKey &&
-          !event.shiftKey
+          !event.shiftKey &&
+          !event.isComposing &&
+          !view.composing
         ) {
           const { $from, empty } = view.state.selection;
           if (
@@ -3165,7 +3172,7 @@ export default function RichDocumentEditor({
       const incoming = asHtml(content);
       setPreviewHtml(incoming);
       if (editor.getHTML() !== incoming)
-        editor.commands.setContent(incoming, false);
+        editor.commands.setContent(incoming, { emitUpdate: false });
       if (
         /<li\b[^>]*>\s*(?:<p\b[^>]*>)?\s*(?:&nbsp;|\u00a0)?\s*(?:<\/p>)?\s*<\/li>/i.test(
           content || "",

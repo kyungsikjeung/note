@@ -8,3 +8,4 @@ electron/codex-app-server-schema/
 .DS_Store
 
 packaged-mcp-test/
+.openchrome/

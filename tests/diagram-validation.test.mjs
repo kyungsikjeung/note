@@ -107,3 +107,20 @@ test("rejects unsafe and empty draw.io documents", () => {
     "drawio_no_vertices",
   );
 });
+
+test("hostile repeated draw.io structures reject quickly (ReDoS regression)", () => {
+  const hostile = "<mxfile></mxfile>".repeat(4000) + "x";
+  const started = Date.now();
+  const result = validateDiagramSource("drawio", hostile);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "drawio_structure_invalid");
+  assert.ok(Date.now() - started < 1000, "validation must stay linear");
+});
+
+test("oversized draw.io sources are rejected by size", () => {
+  const oversized = `<mxfile>${"x".repeat(1_100_000)}</mxfile>`;
+  assert.equal(
+    validateDiagramSource("drawio", oversized).code,
+    "drawio_too_large",
+  );
+});

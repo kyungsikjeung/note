@@ -2,15 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { findBlockById, findDiagramBlock, findHeadingSection, listEmptyDiagramBlocks, listHeadings, listTaskItems, sliceTextLines } from "../mcp/note-html.mjs";
 
-test("findDiagramBlock returns an exact diagram block", () => {
+test("findDiagramBlock returns an exact diagram block with decoded code", () => {
   const html = '<p data-block-id="p1">hello</p><div data-code="flowchart LR\n A--&gt;B" data-block-id="d1" data-type="mermaid"></div>';
   assert.deepEqual(findDiagramBlock(html, "d1"), {
     blockId: "d1",
     format: "mermaid",
-    code: "flowchart LR\n A--&gt;B",
+    code: "flowchart LR\n A-->B",
     start: html.indexOf("<div"),
     end: html.length,
     html: html.slice(html.indexOf("<div")),
+  });
+});
+
+test("findDiagramBlock tolerates literal > inside quoted data-code", () => {
+  const html = `<div data-code="flowchart TD\n A-->B" data-block-id="d1" data-type="mermaid"></div><p>tail</p>`;
+  assert.deepEqual(findDiagramBlock(html, "d1"), {
+    blockId: "d1",
+    format: "mermaid",
+    code: "flowchart TD\n A-->B",
+    start: 0,
+    end: html.indexOf("<p>tail"),
+    html: html.slice(0, html.indexOf("<p>tail")),
   });
 });
 

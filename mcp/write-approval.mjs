@@ -3,6 +3,10 @@ const MCP_WRITE_TYPES = new Set([
   "diagram_insert",
   "diagram_delete",
   "text_insert",
+  "note_patch",
+  "note_move",
+  "task_update",
+  "history_restore",
 ]);
 
 export const isMcpWriteOperation = (operation) =>

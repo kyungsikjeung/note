@@ -81,6 +81,15 @@ test("pending operations stay out of history", () => {
   );
 });
 
+test("history surfaces apply-time error codes written as errorCode", () => {
+  const list = buildHistoryList({
+    revisions: [],
+    operations: [{ ...operations[1], errorCode: "revision_conflict" }],
+  });
+  assert.equal(list.entries[0].kind, "mcp-operation");
+  assert.equal(list.entries[0].code, "revision_conflict");
+});
+
 test("history paginates with total preserved", () => {
   const first = buildHistoryList({ revisions, operations, limit: 2, offset: 0 });
   const second = buildHistoryList({ revisions, operations, limit: 2, offset: 2 });

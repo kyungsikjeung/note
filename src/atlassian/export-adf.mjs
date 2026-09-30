@@ -5,10 +5,10 @@ const decodeEntities = (value) =>
   String(value || "")
     .replace(/&#10;/g, "\n")
     .replace(/&quot;/g, '"')
-    .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ");
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&");
 
 const readAttribute = (attributes, name) => {
   const match = String(attributes || "").match(
@@ -35,7 +35,7 @@ const warn = (warnings, code, message) => {
 const scanTopLevelBlocks = (html) => {
   const source = String(html || "");
   const blocks = [];
-  const pattern = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)\b([^<>]*)(\/?)>/g;
+  const pattern = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)\b((?:"[^"]*"|'[^']*'|[^<>])*)(\/?)>/g;
   let match;
   let current = null;
   let lastIndex = 0;

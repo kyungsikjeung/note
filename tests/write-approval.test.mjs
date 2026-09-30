@@ -12,8 +12,14 @@ test("MCP note mutations require explicit user approval", () => {
     "diagram_insert",
     "diagram_delete",
     "text_insert",
-  ])
+    "note_patch",
+    "note_move",
+    "task_update",
+    "history_restore",
+  ]) {
     assert.equal(requiresMcpUserApproval({ type, status: "pending" }), true);
+    assert.equal(isMcpWriteOperation({ type }), true);
+  }
   assert.equal(
     requiresMcpUserApproval({ type: "note_get", status: "pending" }),
     false,
