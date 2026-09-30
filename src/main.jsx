@@ -1569,7 +1569,9 @@ function App() {
           provider: "codex",
           isDefault: Boolean(model.isDefault),
           defaultReasoningEffort: model.defaultReasoningEffort,
-          supportedReasoningEfforts: model.supportedReasoningEfforts || [],
+          supportedReasoningEfforts: Array.isArray(model.supportedReasoningEfforts)
+            ? model.supportedReasoningEfforts.filter((effort) => typeof effort === "string" && effort)
+            : [],
         }));
         const claudeModels = AI_MODELS.filter(
           (model) => model.provider === "claude",

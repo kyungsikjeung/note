@@ -248,7 +248,8 @@ const extractExternalLinks = (value) =>
   ).slice(0, 20);
 
 const parseAtlassianTargets = (values) =>
-  values.map((value) => {
+  values.map((raw) => {
+    const value = String(raw || "");
     if (!/^https?:/i.test(value)) {
       return {
         type: "jira",
@@ -5161,11 +5162,16 @@ export default function RichDocumentEditor({
                   </button>
                   {(() => {
                     const entry = availableModels.find((model) => model.id === aiModel);
-                    const efforts = entry?.supportedReasoningEfforts?.length
+                    const rawEfforts = Array.isArray(entry?.supportedReasoningEfforts)
                       ? entry.supportedReasoningEfforts
-                      : entry?.apiKind
-                        ? ["low", "medium", "high", "xhigh"]
-                        : [];
+                      : [];
+                    const efforts = (
+                      rawEfforts.length
+                        ? rawEfforts
+                        : entry?.apiKind
+                          ? ["low", "medium", "high", "xhigh"]
+                          : []
+                    ).filter((effort) => typeof effort === "string" && effort.length);
                     if (!efforts.length) return null;
                     return (
                       <select
@@ -5177,7 +5183,7 @@ export default function RichDocumentEditor({
                         <option value="auto">Auto</option>
                         {efforts.map((effort) => (
                           <option key={effort} value={effort}>
-                            {effort === "xhigh" ? "Xhigh" : effort[0].toUpperCase() + effort.slice(1)}
+                            {effort === "xhigh" ? "Xhigh" : String(effort[0] || "").toUpperCase() + effort.slice(1)}
                           </option>
                         ))}
                       </select>
