@@ -4,7 +4,10 @@ import { marked } from "marked";
 import mermaid from "mermaid";
 import hljs from "highlight.js";
 import { buildKsNoteTargetRef } from "../mcp/target-ref.mjs";
-import { findDiagramBlock } from "../mcp/note-html.mjs";
+import { findBlockById, findDiagramBlock } from "../mcp/note-html.mjs";
+import { buildOperationDiff } from "../mcp/operation-diff.mjs";
+import { contentRevision, isRevisionConflict, noteRevision } from "../mcp/revision.mjs";
+import { convertNoteToAdf, validateAdf } from "./atlassian/export-adf.mjs";
 import {
   isApprovedMcpOperation,
   requiresMcpUserApproval,
@@ -82,10 +85,12 @@ import "./settings.css";
 import "./settings-agent.css";
 import "./developer-logs.css";
 import "./table.css";
+import "./publish.css";
 import RichDocumentEditor, { RichPreview } from "./RichDocumentEditor";
 import "./editor-migration.css";
 import "./project-manager.css";
 import "./workspace-menu.css";
+import "./diagram-picker.css";
 import "./page-actions.css";
 import "./page-management.css";
 import "./shortcuts.css";
@@ -106,18 +111,10 @@ const AI_MODELS = [
 ];
 
 const DEFAULT_AI_MODEL = AI_MODELS[0].id;
-const getAiModel = (id) =>
-  AI_MODELS.find((model) => model.id === id) || AI_MODELS[0];
-
-const contentRevision = (value) => {
-  let hash = 2166136261;
-  const input = String(value || "");
-  for (let index = 0; index < input.length; index += 1) {
-    hash ^= input.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `r${(hash >>> 0).toString(16)}`;
-};
+const getAiModel = (id, models = AI_MODELS) =>
+  (models || []).find((model) => model.id === id) ||
+  AI_MODELS.find((model) => model.id === id) ||
+  AI_MODELS[0];
 
 const MANAGED_MCP_SERVERS = [
   {
@@ -286,6 +283,12 @@ const isBackgroundApplicableMcpOperation = (operation) => {
   if (operation?.type === "history_restore")
     return (
       typeof operation.content === "string" && Boolean(operation.content)
+    );
+  if (operation?.type === "note_patch")
+    return (
+      Boolean(target.blockId) &&
+      typeof operation.html === "string" &&
+      Boolean(operation.html)
     );
   return false;
 };
@@ -777,6 +780,7 @@ function App() {
   const [leftOpen, setLeftOpen] = useState(true);
   const [search, setSearch] = useState("");
   const [saved, setSaved] = useState(true);
+  const [saveError, setSaveError] = useState("");
   const [toast, setToast] = useState(null);
   const [mcpApproval, setMcpApproval] = useState(null);
   const [mcpApprovalBusy, setMcpApprovalBusy] = useState(false);
@@ -796,6 +800,7 @@ function App() {
   const [tableOpen, setTableOpen] = useState(false);
   const tableInsertPos = useRef(null);
   const [projectDialog, setProjectDialog] = useState(null);
+  const [publishDialog, setPublishDialog] = useState(null);
   const [projectMenu, setProjectMenu] = useState(null);
   const [noteMenu, setNoteMenu] = useState(null);
   const [entityMenuPosition, setEntityMenuPosition] = useState(null);
@@ -826,6 +831,7 @@ function App() {
   const [agents, setAgents] = useState(() => {
     const defaults = {
       defaultModel: DEFAULT_AI_MODEL,
+      hiddenModelIds: [],
       codex: { enabled: true, command: "codex" },
       claude: { enabled: false, command: "claude" },
     };
@@ -835,6 +841,9 @@ function App() {
       return {
         ...defaults,
         ...saved,
+        hiddenModelIds: Array.isArray(saved.hiddenModelIds)
+          ? saved.hiddenModelIds
+          : [],
         defaultModel:
           saved.defaultModel ||
           (saved.defaultProvider === "claude" ? "sonnet" : DEFAULT_AI_MODEL),
@@ -886,6 +895,31 @@ function App() {
   const [revisions, setRevisions] = useState([]);
   const [diagnostics, setDiagnostics] = useState({});
   const [availableAiModels, setAvailableAiModels] = useState(AI_MODELS);
+  const [modelProviders, setModelProviders] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("ksnote-model-providers")) || [];
+    } catch {
+      return [];
+    }
+  });
+  const apiModelsOf = (providers) =>
+    (providers || [])
+      .filter((provider) => provider && provider.enabled !== false)
+      .flatMap((provider) =>
+        (provider.models || [])
+          .filter((model) => model && model.enabled !== false && model.id)
+          .map((model) => ({
+            id: `${provider.id}:${model.id}`,
+            rawId: model.id,
+            label: model.label || model.id,
+            provider: provider.id,
+            providerName: provider.name || provider.id,
+            apiKind: provider.kind || "openrouter",
+            baseUrl: provider.baseUrl || "",
+            supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+            defaultReasoningEffort: "auto",
+          })),
+      );
   const [aiDebugLogs, setAiDebugLogs] = useState(() => {
     try { return JSON.parse(localStorage.getItem("ksnote-ai-debug-logs")) || []; }
     catch { return []; }
@@ -993,10 +1027,17 @@ function App() {
   }, [projectId, noteId]);
   useEffect(() => {
     setSaved(false);
+    setSaveError("");
     const t = setTimeout(() => {
       localStorage.setItem("mori-data", JSON.stringify(data));
-      if (storageReady.current) window.ksnoteStorage?.save(data);
-      setSaved(true);
+      if (storageReady.current) {
+        Promise.resolve(window.ksnoteStorage?.save(data)).then(
+          () => setSaved(true),
+          (error) => setSaveError(error?.message || "SQLite 저장에 실패했습니다."),
+        );
+      } else {
+        setSaved(true);
+      }
     }, 350);
     return () => clearTimeout(t);
   }, [data]);
@@ -1063,6 +1104,168 @@ function App() {
         showToast(`'${createdNote.title}' 페이지를 MCP로 생성했습니다.`, "diagram");
         return;
       }
+      const moveOperation = operations.find(
+        (item) =>
+          item?.id &&
+          item.type === "note_move" &&
+          isApprovedMcpOperation(item) &&
+          !mcpRoutedOperationIds.current.has(item.id),
+      );
+      if (moveOperation) {
+        mcpRoutedOperationIds.current.add(moveOperation.id);
+        const claimed = await window.ksnoteMcp.claim({
+          id: moveOperation.id,
+          noteId: moveOperation.noteId,
+        });
+        if (claimed?.status === "applying") {
+          const movingNote = data.notes.find(
+            (item) => item.id === claimed.noteId && !item.trashed,
+          );
+          const targetProject = data.projects.find(
+            (item) => item.id === claimed.targetProjectId,
+          );
+          if (!movingNote || !targetProject) {
+            await window.ksnoteMcp.complete({
+              id: claimed.id,
+              status: "error",
+              code: !movingNote ? "note_not_found" : "project_not_found",
+              message: !movingNote
+                ? "대상 페이지가 삭제되었거나 휴지통에 있습니다."
+                : "대상 프로젝트를 찾을 수 없습니다.",
+            });
+          } else if (isRevisionConflict(claimed.expectedRevision, noteRevision(movingNote))) {
+            await window.ksnoteMcp.complete({
+              id: claimed.id,
+              status: "error",
+              code: "revision_conflict",
+              message: "노트가 MCP 요청 이후 변경되었습니다.",
+              currentRevision: noteRevision(movingNote),
+              expectedRevision: claimed.expectedRevision,
+            });
+          } else {
+            const nextData = {
+              ...data,
+              notes: data.notes.map((item) =>
+                item.id === movingNote.id
+                  ? {
+                      ...item,
+                      projectId: targetProject.id,
+                      updatedAt: Date.now(),
+                    }
+                  : item,
+              ),
+            };
+            await window.ksnoteStorage?.save?.(nextData);
+            setData(nextData);
+            if (movingNote.id === note?.id) setProjectId(targetProject.id);
+            await window.ksnoteMcp.complete({
+              id: claimed.id,
+              status: "completed",
+              noteId: movingNote.id,
+              targetProjectId: targetProject.id,
+              appliedRevision: contentRevision(movingNote.content),
+            });
+            showToast(
+              `'${movingNote.title}' 페이지를 '${targetProject.name}'(으)로 이동했습니다.`,
+              "note",
+            );
+          }
+        }
+        return;
+      }
+      const taskOperation = operations.find(
+        (item) =>
+          item?.id &&
+          item.type === "task_update" &&
+          isApprovedMcpOperation(item) &&
+          !mcpRoutedOperationIds.current.has(item.id),
+      );
+      if (taskOperation) {
+        mcpRoutedOperationIds.current.add(taskOperation.id);
+        const claimed = await window.ksnoteMcp.claim({
+          id: taskOperation.id,
+          noteId: taskOperation.noteId,
+        });
+        if (claimed?.status === "applying") {
+          const taskNote = data.notes.find(
+            (item) => item.id === claimed.noteId && !item.trashed,
+          );
+          if (!taskNote) {
+            await window.ksnoteMcp.complete({
+              id: claimed.id,
+              status: "error",
+              code: "note_not_found",
+              message: "대상 페이지가 삭제되었거나 휴지통에 있습니다.",
+            });
+          } else if (isRevisionConflict(claimed.expectedRevision, noteRevision(taskNote))) {
+            await window.ksnoteMcp.complete({
+              id: claimed.id,
+              status: "error",
+              code: "revision_conflict",
+              message: "노트가 MCP 요청 이후 변경되었습니다.",
+              currentRevision: noteRevision(taskNote),
+              expectedRevision: claimed.expectedRevision,
+            });
+          } else {
+            const documentNode = new DOMParser().parseFromString(
+              taskNote.content || "",
+              "text/html",
+            );
+            const items = Array.from(
+              documentNode.querySelectorAll('li[data-type="taskItem"], li[data-checked]'),
+            );
+            const item = items[claimed.taskIndex];
+            if (!item) {
+              await window.ksnoteMcp.complete({
+                id: claimed.id,
+                status: "error",
+                code: "task_not_found",
+                message: "지정한 인덱스의 할 일을 찾을 수 없습니다.",
+                taskIndex: claimed.taskIndex,
+              });
+            } else {
+              const patch = claimed.patch || {};
+              if (patch.checked !== undefined)
+                item.setAttribute("data-checked", patch.checked ? "true" : "false");
+              if (patch.dueDate !== undefined) {
+                if (patch.dueDate) item.setAttribute("data-due-date", patch.dueDate);
+                else item.removeAttribute("data-due-date");
+              }
+              if (patch.assignee !== undefined) {
+                if (patch.assignee) item.setAttribute("data-assignee", patch.assignee);
+                else item.removeAttribute("data-assignee");
+              }
+              if (["low", "normal", "high"].includes(patch.priority))
+                item.setAttribute("data-priority", patch.priority);
+              const nextContent = documentNode.body.innerHTML;
+              const appliedRevision = contentRevision(nextContent);
+              const nextData = {
+                ...data,
+                notes: data.notes.map((entry) =>
+                  entry.id === taskNote.id
+                    ? { ...entry, content: nextContent, updatedAt: Date.now() }
+                    : entry,
+                ),
+              };
+              await window.ksnoteStorage?.save?.(nextData);
+              setData(nextData);
+              await window.ksnoteMcp.complete({
+                id: claimed.id,
+                status: "completed",
+                noteId: taskNote.id,
+                taskIndex: claimed.taskIndex,
+                taskId: `${taskNote.id}-${claimed.taskIndex}`,
+                appliedRevision,
+              });
+              showToast(
+                `'${taskNote.title}' 페이지의 할 일을 변경했습니다.`,
+                "note",
+              );
+            }
+          }
+        }
+        return;
+      }
       const operation = operations.find(
         (item) =>
           item?.id &&
@@ -1117,10 +1320,7 @@ function App() {
         return true;
       };
       const currentRevision = contentRevision(targetNote.content || "");
-      if (
-        claimed.expectedRevision &&
-        claimed.expectedRevision !== currentRevision
-      )
+      if (isRevisionConflict(claimed.expectedRevision, currentRevision))
         return failBackgroundApply(
           "revision_conflict",
           "노트가 MCP 요청 이후 변경되었습니다.",
@@ -1165,6 +1365,18 @@ function App() {
             "복원할 History 스냅샷이 없습니다.",
           );
         nextContent = claimed.content;
+      } else if (claimed.type === "note_patch") {
+        const block = findBlockById(nextContent, claimed.blockId);
+        if (!block)
+          return failBackgroundApply(
+            "patch_block_not_found",
+            "지정한 block ID에 해당하는 블록을 찾을 수 없습니다.",
+            { blockId: claimed.blockId },
+          );
+        nextContent =
+          nextContent.slice(0, block.start) +
+          String(claimed.html || "") +
+          nextContent.slice(block.end);
       } else {
         return false;
       }
@@ -1201,8 +1413,10 @@ function App() {
                     ? "삽입된 텍스트"
                     : claimed.type === "history_restore"
                       ? "복원된 스냅샷"
-                      : "삽입된 다이어그램 소스",
-              code: claimed.text || claimed.code || "",
+                      : claimed.type === "note_patch"
+                        ? "교체된 블록 소스"
+                        : "삽입된 다이어그램 소스",
+              code: claimed.text || claimed.code || claimed.html || claimed.content || "",
             }),
         },
       );
@@ -1276,7 +1490,11 @@ function App() {
         const claudeModels = AI_MODELS.filter(
           (model) => model.provider === "claude",
         );
-        setAvailableAiModels([...codexModels, ...claudeModels]);
+        setAvailableAiModels((current) => [
+          ...codexModels,
+          ...claudeModels,
+          ...current.filter((model) => model.apiKind),
+        ]);
         setAgents((current) => {
           const selectedExists = codexModels.some(
             (model) => model.id === current.defaultModel,
@@ -1306,6 +1524,126 @@ function App() {
   useEffect(() => {
     localStorage.setItem("mori-mcp", JSON.stringify(mcpServers));
   }, [mcpServers]);
+  useEffect(() => {
+    localStorage.setItem(
+      "ksnote-model-providers",
+      JSON.stringify(modelProviders),
+    );
+    const api = apiModelsOf(modelProviders);
+    setAvailableAiModels((current) => [
+      ...current.filter((model) => !model.apiKind),
+      ...api,
+    ]);
+  }, [modelProviders]);
+  const visibleAiModels = availableAiModels.filter(
+    (model) => !(agents.hiddenModelIds || []).includes(model.id),
+  );
+  const [modelSearch, setModelSearch] = useState("");
+  const [providerDialog, setProviderDialog] = useState(null);
+  const [providerStatus, setProviderStatus] = useState({});
+  const toggleHiddenModel = (modelId) => {
+    setAgents((current) => {
+      const hidden = current.hiddenModelIds || [];
+      return {
+        ...current,
+        hiddenModelIds: hidden.includes(modelId)
+          ? hidden.filter((id) => id !== modelId)
+          : [...hidden, modelId],
+      };
+    });
+  };
+  const toggleProviderModel = (providerId, modelId) => {
+    setModelProviders((current) =>
+      current.map((provider) =>
+        provider.id !== providerId
+          ? provider
+          : {
+              ...provider,
+              models: (provider.models || []).map((model) =>
+                model.id !== modelId
+                  ? model
+                  : { ...model, enabled: model.enabled === false },
+              ),
+            },
+      ),
+    );
+  };
+  const setProviderEnabled = (providerId, enabled) => {
+    setModelProviders((current) =>
+      current.map((provider) =>
+        provider.id !== providerId ? provider : { ...provider, enabled },
+      ),
+    );
+  };
+  const deleteModelProvider = async (providerId) => {
+    setModelProviders((current) =>
+      current.filter((provider) => provider.id !== providerId),
+    );
+    await window.ksnoteModels?.saveKey?.({ providerId, apiKey: "" }).catch(() => {});
+  };
+  const testModelProvider = async (provider) => {
+    setProviderStatus((current) => ({
+      ...current,
+      [provider.id]: { loading: true, message: "연결 확인 중…" },
+    }));
+    try {
+      const result = await window.ksnoteModels?.testRemote?.({ provider });
+      setProviderStatus((current) => ({
+        ...current,
+        [provider.id]: {
+          ok: true,
+          loading: false,
+          message: `연결됨 · 모델 ${result?.modelCount ?? "?"}개`,
+        },
+      }));
+    } catch (error) {
+      setProviderStatus((current) => ({
+        ...current,
+        [provider.id]: { ok: false, loading: false, message: error.message },
+      }));
+    }
+  };
+  const saveModelProvider = async () => {
+    const dialog = providerDialog;
+    if (!dialog) return;
+    setProviderDialog({ ...dialog, busy: true, error: "" });
+    try {
+      const id = dialog.id || uid("provider");
+      const base = {
+        id,
+        kind: dialog.kind === "openai-compatible" ? "openai-compatible" : "openrouter",
+        name: dialog.name.trim() ||
+          (dialog.kind === "openai-compatible" ? "OpenAI 호환" : "OpenRouter"),
+        baseUrl: dialog.baseUrl.trim(),
+        enabled: true,
+      };
+      if (!base.baseUrl) throw new Error("Base URL을 입력해 주세요.");
+      if (dialog.apiKey)
+        await window.ksnoteModels?.saveKey?.({ providerId: id, apiKey: dialog.apiKey });
+      const fetched = await window.ksnoteModels?.fetchRemote?.({
+        provider: base,
+        baseUrl: base.baseUrl,
+        ...(dialog.apiKey ? { apiKey: dialog.apiKey } : {}),
+      });
+      const previous = modelProviders.find((item) => item.id === id);
+      const next = {
+        ...base,
+        models: (fetched?.models || []).map((model) => {
+          const kept = previous?.models?.find((item) => item.id === model.id);
+          return kept ? { ...model, enabled: kept.enabled } : model;
+        }),
+        fetchedAt: fetched?.fetchedAt || Date.now(),
+      };
+      setModelProviders((current) =>
+        current.some((item) => item.id === id)
+          ? current.map((item) => (item.id === id ? next : item))
+          : [...current, next],
+      );
+      setProviderDialog(null);
+    } catch (error) {
+      setProviderDialog({ ...dialog, busy: false, error: error.message });
+    }
+  };
   useEffect(() => {
     if (!settingsOpen || settingsTab !== "mcp") return;
     window.ksnoteMcp?.info?.().then(setMcpInfo).catch(() => setMcpInfo(null));
@@ -1460,10 +1798,16 @@ function App() {
     dataRef.current = next;
     setData(next);
     setSaved(false);
+    setSaveError("");
     localStorage.setItem("mori-data", JSON.stringify(next));
     if (!storageReady.current || !window.ksnoteStorage?.save)
       throw new Error("SQLite 저장소가 아직 준비되지 않았습니다.");
-    await window.ksnoteStorage.save(next);
+    try {
+      await window.ksnoteStorage.save(next);
+    } catch (error) {
+      setSaveError(error?.message || "SQLite 저장에 실패했습니다.");
+      throw error;
+    }
     setSaved(true);
     return contentRevision(content);
   };
@@ -1650,7 +1994,7 @@ function App() {
   const showToast = (message, icon, options = {}) => {
     setToast({ message, icon, ...options });
     const visibleMs =
-      options.onGoToTarget || options.onShowSource ? 8000 : 2600;
+      options.onGoToTarget || options.onShowSource ? 8000 : 4500;
     setTimeout(() => setToast(null), visibleMs);
   };
   const [sourceView, setSourceView] = useState(null);
@@ -2000,6 +2344,162 @@ function App() {
     updateNote({ title: imported.name || note.title, content: markdownToRich(imported.markdown) });
     setMoreOpen(false);
   };
+  const publishErrorText = (result) => {
+    const map = {
+      rovo_not_configured: "Atlassian MCP가 구성되지 않았습니다. Codex에 Atlassian Rovo를 먼저 연결해 주세요.",
+      rovo_oauth_required: "Atlassian OAuth 인증이 필요합니다. Rovo 연결을 승인해 주세요.",
+      rovo_permission_denied: "Atlassian 접근 권한이 없습니다. 공간 권한을 확인해 주세요.",
+      rovo_not_found: "대상 공간 또는 상위 페이지를 찾을 수 없습니다.",
+      publish_no_create_tool: "Rovo 도구에서 Confluence 생성 도구를 찾지 못했습니다.",
+      publish_no_space_tool: "공간 조회 도구가 없어 직접 입력해 주세요.",
+      publish_args_incomplete: "도구 인자가 부족합니다.",
+      publish_target_invalid: "제목, cloudId, spaceId를 모두 입력해 주세요.",
+      publish_duplicate: "같은 revision이 이미 게시되었습니다.",
+      publish_busy: "다른 게시가 진행 중입니다.",
+      publish_declined: "승인이 거절되어 게시하지 않았습니다.",
+      publish_cancelled: "게시 취소를 요청했습니다.",
+      publish_timeout: "게시 요청 시간이 초과되었습니다.",
+      publish_thread_failed: "게시용 스레드를 시작하지 못했습니다.",
+      app_server_unavailable: "Codex App Server에 연결할 수 없습니다.",
+      adf_invalid: "ADF 문서 구조가 유효하지 않습니다.",
+    };
+    return map[result?.code] || result?.message || "게시 중 오류가 발생했습니다.";
+  };
+  const openPublishDialog = async () => {
+    setMoreOpen(false);
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem("ksnote-publish-targets") || "{}"); } catch {}
+    setPublishDialog({
+      stage: "checking",
+      noteId: note.id,
+      title: note.title || "",
+      cloudId: saved.cloudId || "",
+      spaceId: saved.spaceId || "",
+      parentId: saved.parentId || "",
+      discover: null,
+      spaces: null,
+      conversion: null,
+      result: null,
+      error: null,
+      approval: null,
+      requestId: "",
+    });
+    try {
+      const discover = await window.ksnotePublish?.discover({ command: agents.codex.command });
+      if (!discover?.ok) {
+        setPublishDialog((current) => current ? { ...current, stage: "failed", error: discover } : current);
+        return;
+      }
+      setPublishDialog((current) => current ? { ...current, stage: "selecting", discover } : current);
+    } catch (error) {
+      setPublishDialog((current) => current ? { ...current, stage: "failed", error: { code: "publish_failed", message: error.message } } : current);
+    }
+  };
+  const loadPublishSpaces = async () => {
+    setPublishDialog((current) => current ? { ...current, spaces: { loading: true } } : current);
+    try {
+      const spaces = await window.ksnotePublish?.spaces({ command: agents.codex.command });
+      setPublishDialog((current) => current ? { ...current, spaces } : current);
+    } catch (error) {
+      setPublishDialog((current) => current ? { ...current, spaces: { ok: false, code: "publish_failed", message: error.message } } : current);
+    }
+  };
+  const buildPublishPreview = () => {
+    setPublishDialog((current) => {
+      if (!current) return current;
+      const sourceRevision = contentRevision(note.content);
+      const conversion = convertNoteToAdf(note.content, { sourceRevision });
+      const validation = validateAdf(conversion.document);
+      return {
+        ...current,
+        stage: "previewing",
+        sourceRevision,
+        conversion: { ...conversion, validation },
+      };
+    });
+  };
+  const confirmPublish = async () => {
+    const snapshot = publishDialog;
+    if (!snapshot || snapshot.stage !== "previewing") return;
+    const requestId = `publish-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    try {
+      localStorage.setItem("ksnote-publish-targets", JSON.stringify({
+        cloudId: snapshot.cloudId,
+        spaceId: snapshot.spaceId,
+        parentId: snapshot.parentId,
+      }));
+    } catch {}
+    setPublishDialog({ ...snapshot, stage: "publishing", requestId, result: null, error: null, approval: null });
+    try {
+      const result = await window.ksnotePublish?.publish({
+        command: agents.codex.command,
+        noteId: snapshot.noteId,
+        title: snapshot.title.trim(),
+        cloudId: snapshot.cloudId.trim(),
+        spaceId: snapshot.spaceId.trim(),
+        parentId: snapshot.parentId.trim(),
+        adf: snapshot.conversion.document,
+        sourceRevision: snapshot.sourceRevision,
+        contentHash: snapshot.conversion.contentHash,
+        requestId,
+      });
+      setPublishDialog((current) => {
+        if (!current || current.requestId !== requestId) return current;
+        if (result?.ok) {
+          showToast("Confluence에 게시했습니다.", "diagram");
+          return { ...current, stage: "succeeded", result, approval: null };
+        }
+        return { ...current, stage: result?.code === "publish_cancelled" ? "cancelled" : "failed", error: result, approval: null };
+      });
+    } catch (error) {
+      setPublishDialog((current) => current && current.requestId === requestId
+        ? { ...current, stage: "failed", error: { code: "publish_failed", message: error.message }, approval: null }
+        : current);
+    }
+  };
+  const resolvePublishApproval = async (approved) => {
+    const snapshot = publishDialog;
+    if (!snapshot?.approval) return;
+    try {
+      await window.ksnotePublish?.resolveApproval({
+        command: agents.codex.command,
+        approvalId: snapshot.approval.approvalId,
+        decision: approved ? "approved" : "declined",
+      });
+      setPublishDialog((current) => current ? { ...current, stage: "publishing", approval: null } : current);
+    } catch (error) {
+      setPublishDialog((current) => current ? { ...current, error: { code: "publish_failed", message: error.message } } : current);
+    }
+  };
+  const cancelPublish = async () => {
+    const snapshot = publishDialog;
+    if (!snapshot?.requestId) {
+      setPublishDialog(null);
+      return;
+    }
+    try {
+      await window.ksnotePublish?.cancel({ requestId: snapshot.requestId });
+    } catch {}
+    setPublishDialog((current) => current ? { ...current, stage: "cancelled", approval: null } : current);
+  };
+  useEffect(() => {
+    if (!publishDialog?.requestId) return undefined;
+    const requestId = publishDialog.requestId;
+    const detach = window.ksnotePublish?.onApproval?.((event) => {
+      if (!event || event.requestId !== requestId) return;
+      setPublishDialog((current) => current && current.requestId === requestId
+        ? { ...current, stage: "awaitingApproval", approval: event }
+        : current);
+    });
+    return () => { try { detach?.(); } catch {} };
+  }, [publishDialog?.requestId]);
+  const openPublishRef = useRef(null);
+  openPublishRef.current = openPublishDialog;
+  useEffect(() => {
+    const handler = () => openPublishRef.current?.();
+    window.addEventListener("ksnote-open-publish", handler);
+    return () => window.removeEventListener("ksnote-open-publish", handler);
+  }, []);
   if (!note)
     return (
       <div className="empty">
@@ -2330,7 +2830,7 @@ function App() {
                     <span>
                       <b>AI Agent</b>
                       <small>
-                        {getAiModel(agents.defaultModel).label} 기본 사용
+                        {getAiModel(agents.defaultModel, availableAiModels).label} 기본 사용
                       </small>
                     </span>
                   </button>
@@ -2481,7 +2981,7 @@ function App() {
                     <span>
                       <b>AI Agent</b>
                       <small>
-                        {getAiModel(agents.defaultModel).label} 기본 사용
+                        {getAiModel(agents.defaultModel, availableAiModels).label} 기본 사용
                       </small>
                     </span>
                   </button>
@@ -2563,18 +3063,25 @@ function App() {
                     </span>
                   </button>
                   <button
-                    onClick={() =>
+                    onClick={() => {
                       window.mori?.exportNote({
                         title: note.title,
                         content: note.content,
                         format: "docx",
-                      })
-                    }
+                      });
+                    }}
                   >
                     <Download />
                     <span>
                       <b>Word로 내보내기</b>
                       <small>DOCX 문서</small>
+                    </span>
+                  </button>
+                  <button onClick={openPublishDialog}>
+                    <ExternalLink />
+                    <span>
+                      <b>Confluence에 게시</b>
+                      <small>Rovo로 새 페이지 생성</small>
                     </span>
                   </button>
                   <button
@@ -2609,6 +3116,12 @@ function App() {
               })}{" "}
               수정
             </span>
+            <span>•</span>
+            {saveError ? (
+              <span className="save-status error" title={saveError}>저장 실패</span>
+            ) : (
+              <span className="save-status">{saved ? "저장됨" : "저장 중…"}</span>
+            )}
           </div>
         </section>
         {mode !== "preview" && (
@@ -2739,7 +3252,7 @@ function App() {
           content={note.content}
           mode={mode}
           preferredModel={agents.defaultModel}
-          availableModels={availableAiModels}
+          availableModels={visibleAiModels}
           agentCommands={{
             codex: agents.codex.command,
             claude: agents.claude.command,
@@ -2932,7 +3445,29 @@ function App() {
                 <RichPreview html={mcpOperationPreviewHtml(mcpApproval)} />
               </div>
             )}
-            <details open>
+            {(() => {
+              const targetNote = (data.notes || []).find((item) => item.id === mcpApproval.noteId) || note;
+              const projectName = (data.projects || []).find((item) => item.id === (targetNote?.projectId || mcpApproval.projectId))?.name;
+              const targetProjectName = (data.projects || []).find((item) => item.id === mcpApproval.targetProjectId)?.name;
+              const diff = buildOperationDiff(mcpApproval, {
+                noteContent: targetNote?.content || "",
+                projectName,
+                targetProjectName,
+              });
+              return (
+                <div className="mcp-review-diff">
+                  <section>
+                    <b>{diff.beforeLabel}</b>
+                    <RichPreview className="mcp-review-diff-pane" html={diff.beforeHtml} />
+                  </section>
+                  <section>
+                    <b>{diff.afterLabel}</b>
+                    <RichPreview className="mcp-review-diff-pane" html={diff.afterHtml} />
+                  </section>
+                </div>
+              );
+            })()}
+            <details>
               <summary>적용할 원본 내용</summary>
               <pre>{
                 mcpApproval.code ||
@@ -3219,6 +3754,13 @@ function App() {
                   AI Agent
                 </button>
                 <button
+                  className={settingsTab === "models" ? "active" : ""}
+                  onClick={() => setSettingsTab("models")}
+                >
+                  <SlidersHorizontal />
+                  모델
+                </button>
+                <button
                   className={settingsTab === "mcp" ? "active" : ""}
                   onClick={() => setSettingsTab("mcp")}
                 >
@@ -3410,15 +3952,22 @@ function App() {
                         }
                       >
                         <optgroup label="OpenAI">
-                          {availableAiModels.filter((model) => model.provider === "codex").map((model) => (
+                          {visibleAiModels.filter((model) => model.provider === "codex").map((model) => (
                             <option key={model.id} value={model.id}>{model.label}</option>
                           ))}
                         </optgroup>
                         <optgroup label="Anthropic">
-                          {availableAiModels.filter((model) => model.provider === "claude").map((model) => (
+                          {visibleAiModels.filter((model) => model.provider === "claude").map((model) => (
                             <option key={model.id} value={model.id}>{model.label}</option>
                           ))}
                         </optgroup>
+                        {visibleAiModels.some((model) => model.apiKind) && (
+                          <optgroup label="API">
+                            {visibleAiModels.filter((model) => model.apiKind).map((model) => (
+                              <option key={model.id} value={model.id}>{model.label}</option>
+                            ))}
+                          </optgroup>
+                        )}
                       </select>
                     </div>
                     {[
@@ -3538,6 +4087,249 @@ function App() {
                         </small>
                       </span>
                     </div>
+                  </>
+                )}
+                {settingsTab === "models" && (
+                  <>
+                    <div className="setting-title with-action">
+                      <span>
+                        <h3>모델 관리</h3>
+                        <p>모델 선택기에 표시할 모델 사용자 지정</p>
+                      </span>
+                      <button
+                        onClick={() =>
+                          setProviderDialog({
+                            kind: "openrouter",
+                            name: "",
+                            baseUrl: "https://openrouter.ai/api/v1",
+                            apiKey: "",
+                            busy: false,
+                            error: "",
+                          })
+                        }
+                      >
+                        <Plus /> 공급자 연결
+                      </button>
+                    </div>
+                    <input
+                      className="model-search"
+                      value={modelSearch}
+                      onChange={(e) => setModelSearch(e.target.value)}
+                      placeholder="모델 검색"
+                      aria-label="모델 검색"
+                    />
+                    {[
+                      ["codex", "Codex 구독"],
+                      ["claude", "Claude 구독"],
+                    ].map(([providerId, providerName]) => {
+                      const models = availableAiModels.filter(
+                        (model) =>
+                          model.provider === providerId &&
+                          (model.label || model.id)
+                            .toLowerCase()
+                            .includes(modelSearch.trim().toLowerCase()),
+                      );
+                      if (!models.length) return null;
+                      return (
+                        <div key={providerId}>
+                          <div className="model-provider-head">
+                            <b>{providerName}</b>
+                            <small>공식 CLI 로그인 사용</small>
+                          </div>
+                          {models.map((model) => {
+                            const hidden = (agents.hiddenModelIds || []).includes(model.id);
+                            return (
+                              <div
+                                key={model.id}
+                                className={`model-row${hidden ? " model-row-off" : ""}`}
+                              >
+                                <span>
+                                  <b>{model.label}</b>
+                                  <small>{model.id}</small>
+                                </span>
+                                <label className="switch">
+                                  <input
+                                    type="checkbox"
+                                    checked={!hidden}
+                                    onChange={() => toggleHiddenModel(model.id)}
+                                  />
+                                  <i />
+                                </label>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+                    {modelProviders.map((provider) => {
+                      const query = modelSearch.trim().toLowerCase();
+                      const models = (provider.models || []).filter(
+                        (model) =>
+                          !query ||
+                          (model.label || model.id).toLowerCase().includes(query) ||
+                          model.id.toLowerCase().includes(query),
+                      );
+                      if (query && !models.length) return null;
+                      const status = providerStatus[provider.id];
+                      return (
+                        <div key={provider.id}>
+                          <div className="model-provider-head">
+                            <b>{provider.name}</b>
+                            <small>{provider.baseUrl}</small>
+                            <button
+                              className="diagnostic-button"
+                              disabled={status?.loading}
+                              onClick={() => testModelProvider(provider)}
+                            >
+                              연결 확인
+                            </button>
+                            <button
+                              className="diagnostic-button"
+                              onClick={() => deleteModelProvider(provider.id)}
+                            >
+                              삭제
+                            </button>
+                            <label className="switch">
+                              <input
+                                type="checkbox"
+                                checked={provider.enabled !== false}
+                                onChange={(e) =>
+                                  setProviderEnabled(provider.id, e.target.checked)
+                                }
+                              />
+                              <i />
+                            </label>
+                          </div>
+                          {status && (
+                            <small className={`diagnostic-result ${status.ok ? "ok" : "fail"}`}>
+                              {status.message}
+                            </small>
+                          )}
+                          {models.map((model) => {
+                            const off = model.enabled === false;
+                            return (
+                              <div
+                                key={model.id}
+                                className={`model-row${off ? " model-row-off" : ""}`}
+                              >
+                                <span>
+                                  <b>{model.label}</b>
+                                  <small>{model.id}</small>
+                                </span>
+                                <label className="switch">
+                                  <input
+                                    type="checkbox"
+                                    checked={!off}
+                                    onChange={() =>
+                                      toggleProviderModel(provider.id, model.id)
+                                    }
+                                  />
+                                  <i />
+                                </label>
+                              </div>
+                            );
+                          })}
+                          {!models.length && (
+                            <small className="diagnostic-result">
+                              모델이 없습니다. 공급자를 다시 연결해 목록을 가져오세요.
+                            </small>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {providerDialog && (
+                      <div
+                        className="diagram-picker-backdrop"
+                        onMouseDown={(e) => {
+                          if (e.target === e.currentTarget && !providerDialog.busy)
+                            setProviderDialog(null);
+                        }}
+                      >
+                        <section className="diagram-picker">
+                          <header>
+                            <span>
+                              <Plug />
+                              <span>
+                                <b>공급자 연결</b>
+                                <small>API 키는 기기에 암호화 저장됩니다</small>
+                              </span>
+                            </span>
+                            <button
+                              onClick={() => !providerDialog.busy && setProviderDialog(null)}
+                            >
+                              <X />
+                            </button>
+                          </header>
+                          <div className="provider-dialog-form">
+                            <label>
+                              종류
+                              <select
+                                value={providerDialog.kind}
+                                onChange={(e) =>
+                                  setProviderDialog({
+                                    ...providerDialog,
+                                    kind: e.target.value,
+                                    baseUrl:
+                                      e.target.value === "openai-compatible"
+                                        ? providerDialog.kind === "openai-compatible"
+                                          ? providerDialog.baseUrl
+                                          : "https://"
+                                        : "https://openrouter.ai/api/v1",
+                                  })
+                                }
+                              >
+                                <option value="openrouter">OpenRouter</option>
+                                <option value="openai-compatible">OpenAI 호환</option>
+                              </select>
+                            </label>
+                            <label>
+                              이름
+                              <input
+                                value={providerDialog.name}
+                                onChange={(e) =>
+                                  setProviderDialog({ ...providerDialog, name: e.target.value })
+                                }
+                                placeholder="OpenRouter"
+                              />
+                            </label>
+                            <label>
+                              Base URL
+                              <input
+                                value={providerDialog.baseUrl}
+                                onChange={(e) =>
+                                  setProviderDialog({ ...providerDialog, baseUrl: e.target.value })
+                                }
+                                placeholder="https://openrouter.ai/api/v1"
+                              />
+                            </label>
+                            <label>
+                              API 키
+                              <input
+                                type="password"
+                                value={providerDialog.apiKey}
+                                onChange={(e) =>
+                                  setProviderDialog({ ...providerDialog, apiKey: e.target.value })
+                                }
+                                placeholder="sk-or-..."
+                              />
+                            </label>
+                            {providerDialog.error && (
+                              <span className="provider-dialog-error">
+                                {providerDialog.error}
+                              </span>
+                            )}
+                          </div>
+                          <footer>
+                            <button
+                              disabled={providerDialog.busy}
+                              onClick={saveModelProvider}
+                            >
+                              {providerDialog.busy ? "연결 중…" : "연결하고 모델 가져오기"}
+                            </button>
+                          </footer>
+                        </section>
+                      </div>
+                    )}
                   </>
                 )}
                 {settingsTab === "mcp" && (
@@ -3943,6 +4735,131 @@ function App() {
             <footer>
               <span>설정은 이 기기에만 저장됩니다.</span>
               <button onClick={() => setSettingsOpen(false)}>완료</button>
+            </footer>
+          </section>
+        </div>
+      )}
+      {publishDialog && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget && !["publishing", "awaitingApproval"].includes(publishDialog.stage))
+              setPublishDialog(null);
+          }}
+        >
+          <section className="publish-modal">
+            <header>
+              <span>
+                <ExternalLink />
+                <span>
+                  <h2>Confluence에 게시</h2>
+                  <p>현재 노트를 새 페이지로 만듭니다. 로컬 이미지는 제외됩니다.</p>
+                </span>
+              </span>
+              <button
+                onClick={() => !["publishing", "awaitingApproval"].includes(publishDialog.stage) && setPublishDialog(null)}
+              >
+                <X />
+              </button>
+            </header>
+            <div>
+              {publishDialog.stage === "checking" && <p>게시 도구를 확인하고 있습니다…</p>}
+              {publishDialog.stage === "selecting" && (
+                <>
+                  <p className="publish-tool-line">
+                    서버 {publishDialog.discover.server} · 도구 {publishDialog.discover.createTool.name} · {publishDialog.discover.toolCount}개 도구 확인
+                  </p>
+                  <label>제목
+                    <input
+                      value={publishDialog.title}
+                      onChange={(e) => setPublishDialog({ ...publishDialog, title: e.target.value })}
+                    />
+                  </label>
+                  <label>Cloud ID
+                    <input
+                      value={publishDialog.cloudId}
+                      placeholder="예: abc123.atlassian.net의 cloud id"
+                      onChange={(e) => setPublishDialog({ ...publishDialog, cloudId: e.target.value })}
+                    />
+                  </label>
+                  <label>Space Key
+                    <input
+                      value={publishDialog.spaceId}
+                      placeholder="예: TEAM"
+                      onChange={(e) => setPublishDialog({ ...publishDialog, spaceId: e.target.value })}
+                    />
+                  </label>
+                  <label>상위 페이지 ID (선택)
+                    <input
+                      value={publishDialog.parentId}
+                      onChange={(e) => setPublishDialog({ ...publishDialog, parentId: e.target.value })}
+                    />
+                  </label>
+                  {publishDialog.discover.spaceListTool && (
+                    <button type="button" onClick={loadPublishSpaces}>공간 목록 불러오기</button>
+                  )}
+                  {publishDialog.spaces && (
+                    <pre className="publish-raw">{JSON.stringify(publishDialog.spaces, null, 1).slice(0, 2000)}</pre>
+                  )}
+                </>
+              )}
+              {publishDialog.stage === "previewing" && publishDialog.conversion && (
+                <>
+                  <p>제목: {publishDialog.title} · revision {publishDialog.sourceRevision} · 블록 {publishDialog.conversion.document.content.length}개</p>
+                  {!publishDialog.conversion.validation.ok && (
+                    <p className="publish-error">ADF 검증 실패: {publishDialog.conversion.validation.issues?.[0]?.message}</p>
+                  )}
+                  {publishDialog.conversion.warnings.length > 0 && (
+                    <ul>{publishDialog.conversion.warnings.map((warning, index) => <li key={index}>{warning.message}</li>)}</ul>
+                  )}
+                  {publishDialog.conversion.omittedAssets.length > 0 && (
+                    <p>제외된 이미지 {publishDialog.conversion.omittedAssets.length}개: {publishDialog.conversion.omittedAssets.slice(0, 3).map((asset) => asset.src).join(", ")}</p>
+                  )}
+                  <p className="publish-tool-line">사용될 도구: {publishDialog.discover?.createTool?.name}</p>
+                </>
+              )}
+              {(publishDialog.stage === "publishing" || publishDialog.stage === "awaitingApproval") && (
+                <p>{publishDialog.approval ? "Codex에서 도구 승인을 요청했습니다." : "게시하고 있습니다…"}</p>
+              )}
+              {publishDialog.approval && (
+                <div className="publish-approval">
+                  <p>{publishDialog.approval.method}</p>
+                  <pre className="publish-raw">{JSON.stringify(publishDialog.approval.params, null, 1).slice(0, 1500)}</pre>
+                  <div>
+                    <button type="button" onClick={() => resolvePublishApproval(true)}>승인</button>
+                    <button type="button" onClick={() => resolvePublishApproval(false)}>거절</button>
+                  </div>
+                </div>
+              )}
+              {publishDialog.stage === "succeeded" && publishDialog.result && (
+                <>
+                  <p>게시 성공 · revision {publishDialog.result.sourceRevision}</p>
+                  {publishDialog.result.pageId && <p>페이지 ID: {publishDialog.result.pageId}</p>}
+                  {publishDialog.result.url && <p><a href={publishDialog.result.url} target="_blank" rel="noreferrer">{publishDialog.result.url}</a></p>}
+                </>
+              )}
+              {(publishDialog.stage === "failed" || publishDialog.stage === "cancelled") && publishDialog.error && (
+                <p className="publish-error">{publishDialog.stage === "cancelled" ? "취소됨: " : ""}{publishErrorText(publishDialog.error)} ({publishDialog.error.code})</p>
+              )}
+            </div>
+            <footer>
+              {publishDialog.stage === "selecting" && (
+                <button
+                  onClick={buildPublishPreview}
+                  disabled={!publishDialog.title.trim() || !publishDialog.cloudId.trim() || !publishDialog.spaceId.trim()}
+                >
+                  미리보기
+                </button>
+              )}
+              {publishDialog.stage === "previewing" && publishDialog.conversion?.validation.ok && (
+                <button onClick={confirmPublish}>위 내용으로 게시</button>
+              )}
+              {(publishDialog.stage === "publishing" || publishDialog.stage === "awaitingApproval") && (
+                <button onClick={cancelPublish}>취소</button>
+              )}
+              {["succeeded", "failed", "cancelled"].includes(publishDialog.stage) && (
+                <button onClick={() => setPublishDialog(null)}>닫기</button>
+              )}
             </footer>
           </section>
         </div>

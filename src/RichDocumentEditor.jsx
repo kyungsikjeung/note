@@ -51,7 +51,19 @@ import {
   stepDrawioZoom,
 } from "../mcp/drawio-preview.mjs";
 import { isApprovedMcpOperation } from "../mcp/write-approval.mjs";
+import { contentRevision, isRevisionConflict } from "../mcp/revision.mjs";
 import { validateAIPatch } from "../mcp/patch-schema.mjs";
+import {
+  buildRovoIssueInstruction,
+  buildRovoPageInstruction,
+  buildRovoSearchInstruction,
+  buildRovoStatusInstruction,
+  extractCitedSources,
+  linkCitationMarkers,
+  normalizeRovoPayload,
+  parseRovoPayload,
+  rovoToQuoteHtml,
+} from "./atlassian/rovo-read.mjs";
 import {
   Bold,
   Italic,
@@ -291,16 +303,6 @@ const parseAtlassianTargets = (values) =>
     }
   });
 
-const contentRevision = (value) => {
-  let hash = 2166136261;
-  const input = String(value || "");
-  for (let index = 0; index < input.length; index += 1) {
-    hash ^= input.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `r${(hash >>> 0).toString(16)}`;
-};
-
 const detectEncodingDamage = (value) => {
   const text = String(value || "");
   if (!text) return null;
@@ -380,13 +382,20 @@ const serializeEditorRange = (editor, range, fallback = "") => {
 const getActiveBlockContext = (editor) => {
   const { selection } = editor.state;
   const { from, to, $from } = selection;
-  if (from !== to)
+  if (from !== to) {
+    const start = blockAnchorAt(editor.state.doc, $from, from);
+    const end = blockAnchorAt(editor.state.doc, $to, to);
     return {
       target: "selection",
       range: { from, to },
       nodeType: "selection",
       label: "선택 영역",
+      blockId: start.blockId,
+      blockOffset: start.offset,
+      toBlockId: end.blockId,
+      toBlockOffset: end.offset,
     };
+  }
   for (let depth = $from.depth; depth > 0; depth -= 1) {
     const node = $from.node(depth);
     if (!node.isTextblock) continue;
@@ -2336,8 +2345,13 @@ export default function RichDocumentEditor({
     [aiDiagramFormat, setAiDiagramFormat] = useState("auto"),
     [aiPrompt, setAiPrompt] = useState(""),
     [aiModel, setAiModel] = useState(preferredModel),
+    [aiEffort, setAiEffort] = useState("auto"),
+    [aiModelOpen, setAiModelOpen] = useState(false),
+    [aiModelQuery, setAiModelQuery] = useState(""),
     [aiLoading, setAiLoading] = useState(false),
     [aiResult, setAiResult] = useState(null),
+    [aiExpanded, setAiExpanded] = useState(false),
+    [confirmRequest, setConfirmRequest] = useState(null),
     [aiError, setAiError] = useState(""),
     [aiStream, setAiStream] = useState(""),
     [aiProgress, setAiProgress] = useState({ stage: "idle", startedAt: 0 }),
@@ -2354,6 +2368,17 @@ export default function RichDocumentEditor({
       catch { return []; }
     });
   const aiTargetRef = useRef(null);
+  const confirmResolveRef = useRef(null);
+  const confirmAsync = (message, { title = "확인", okLabel = "계속", cancelLabel = "취소" } = {}) =>
+    new Promise((resolve) => {
+      confirmResolveRef.current = resolve;
+      setConfirmRequest({ title, message, okLabel, cancelLabel });
+    });
+  const resolveConfirm = (value) => {
+    setConfirmRequest(null);
+    confirmResolveRef.current?.(value);
+    confirmResolveRef.current = null;
+  };
   const aiRequestRef = useRef(null);
   const writeAiDebugLog = (requestId, patch) => {
     if (!preferences.developerMode) return;
@@ -2389,6 +2414,11 @@ export default function RichDocumentEditor({
     } catch {}
   };
   useEffect(() => setAiModel(preferredModel), [preferredModel]);
+  useEffect(() => {
+    setAiEffort("auto");
+    setAiModelOpen(false);
+    setAiModelQuery("");
+  }, [aiModel]);
   useEffect(() => {
     let live = true;
     window.ksnoteDiagram?.capabilities?.({ jarPath: preferences.plantumlJar })
@@ -2930,17 +2960,15 @@ export default function RichDocumentEditor({
         const text = event.clipboardData?.getData("text/plain")?.trim() || "";
         const html = event.clipboardData?.getData("text/html") || "";
         if (!files.length && /^@startuml[\s\S]*@enduml\s*$/i.test(text)) {
-          if (!window.confirm("PlantUML 다이어그램 블록으로 변환할까요?\n취소하면 일반 텍스트로 붙여 넣습니다.")) return false;
           event.preventDefault();
-          editor
-            ?.chain()
-            .focus()
-            .insertContent(
-              editableDiagramBlock("plantUmlBlock", { code: text }),
-            )
-            .createParagraphNear()
-            .scrollIntoView()
-            .run();
+          void (async () => {
+            const ok = await confirmAsync("PlantUML 다이어그램 블록으로 변환할까요?\n원문 그대로 두려면 취소하세요.", { title: "붙여넣기 변환", okLabel: "변환하기", cancelLabel: "원문 그대로" });
+            if (ok)
+              editor?.chain().focus().insertContent(
+                editableDiagramBlock("plantUmlBlock", { code: text }),
+              ).createParagraphNear().scrollIntoView().run();
+            else editor?.chain().focus().insertContent(text).run();
+          })();
           return true;
         }
         const mermaidPaste = !files.length
@@ -2950,34 +2978,33 @@ export default function RichDocumentEditor({
           const prompt = mermaidPaste.fenceRemoved
             ? "복사된 Mermaid 코드 펜스를 제거하고 다이어그램 블록으로 변환할까요?"
             : "Mermaid 다이어그램 블록으로 변환할까요?";
-          if (!window.confirm(`${prompt}\n취소하면 일반 텍스트로 붙여 넣습니다.`)) return false;
           event.preventDefault();
-          editor
-            ?.chain()
-            .focus()
-            .insertContent(
-              editableDiagramWithTrailingParagraph("mermaidBlock", {
-                code: mermaidPaste.code,
-              }),
-            )
-            .scrollIntoView()
-            .run();
+          void (async () => {
+            const ok = await confirmAsync(`${prompt}\n원문 그대로 두려면 취소하세요.`, { title: "붙여넣기 변환", okLabel: "변환하기", cancelLabel: "원문 그대로" });
+            if (ok)
+              editor?.chain().focus().insertContent(
+                editableDiagramWithTrailingParagraph("mermaidBlock", {
+                  code: mermaidPaste.code,
+                }),
+              ).scrollIntoView().run();
+            else editor?.chain().focus().insertContent(text).run();
+          })();
           return true;
         }
         if (!files.length && (text.startsWith("{") || text.startsWith("["))) {
           try {
             const formatted = JSON.stringify(JSON.parse(text), null, 2);
-            if (!window.confirm("JSON 코드 블록으로 정리해서 붙여 넣을까요?\n취소하면 원문을 붙여 넣습니다.")) return false;
             event.preventDefault();
-            editor
-              ?.chain()
-              .focus()
-              .insertContent({
-                type: "codeBlock",
-                attrs: { language: "json" },
-                content: [{ type: "text", text: formatted }],
-              })
-              .run();
+            void (async () => {
+              const ok = await confirmAsync("JSON 코드 블록으로 정리해서 붙여 넣을까요?\n원문 그대로 두려면 취소하세요.", { title: "붙여넣기 변환", okLabel: "변환하기", cancelLabel: "원문 그대로" });
+              if (ok)
+                editor?.chain().focus().insertContent({
+                  type: "codeBlock",
+                  attrs: { language: "json" },
+                  content: [{ type: "text", text: formatted }],
+                }).run();
+              else editor?.chain().focus().insertContent(text).run();
+            })();
             return true;
           } catch {}
         }
@@ -2985,13 +3012,13 @@ export default function RichDocumentEditor({
           ? normalizeMarkdownTablePaste(text)
           : null;
         if (markdownTablePaste) {
-          if (!window.confirm("Markdown 표를 편집 가능한 표로 변환할까요?\n취소하면 원문을 붙여 넣습니다.")) return false;
           event.preventDefault();
-          editor
-            ?.chain()
-            .focus()
-            .insertContent(marked.parse(markdownTablePaste.markdown))
-            .run();
+          void (async () => {
+            const ok = await confirmAsync("Markdown 표를 편집 가능한 표로 변환할까요?\n원문 그대로 두려면 취소하세요.", { title: "붙여넣기 변환", okLabel: "변환하기", cancelLabel: "원문 그대로" });
+            editor?.chain().focus().insertContent(
+              ok ? marked.parse(markdownTablePaste.markdown) : text,
+            ).run();
+          })();
           return true;
         }
         const lines = text.split(/\r?\n/).filter((line) => line.length);
@@ -3002,30 +3029,36 @@ export default function RichDocumentEditor({
               ? ","
               : null;
         if (!files.length && delimiter) {
-          if (!window.confirm("편집 가능한 표로 변환할까요?\n취소하면 원문을 붙여 넣습니다.")) return false;
           event.preventDefault();
-          const rows = lines.map((line) =>
-            line.split(delimiter).map((cell) => cell.trim()),
-          );
-          editor
-            ?.chain()
-            .focus()
-            .insertContent({
-              type: "table",
-              content: rows.map((row, rowIndex) => ({
-                type: "tableRow",
-                content: row.map((value) => ({
-                  type: rowIndex === 0 ? "tableHeader" : "tableCell",
-                  content: [
-                    {
-                      type: "paragraph",
-                      content: value ? [{ type: "text", text: value }] : [],
-                    },
-                  ],
+          void (async () => {
+            const ok = await confirmAsync("편집 가능한 표로 변환할까요?\n원문 그대로 두려면 취소하세요.", { title: "붙여넣기 변환", okLabel: "변환하기", cancelLabel: "원문 그대로" });
+            if (!ok) {
+              editor?.chain().focus().insertContent(text).run();
+              return;
+            }
+            const rows = lines.map((line) =>
+              line.split(delimiter).map((cell) => cell.trim()),
+            );
+            editor
+              ?.chain()
+              .focus()
+              .insertContent({
+                type: "table",
+                content: rows.map((row, rowIndex) => ({
+                  type: "tableRow",
+                  content: row.map((value) => ({
+                    type: rowIndex === 0 ? "tableHeader" : "tableCell",
+                    content: [
+                      {
+                        type: "paragraph",
+                        content: value ? [{ type: "text", text: value }] : [],
+                      },
+                    ],
+                  })),
                 })),
-              })),
-            })
-            .run();
+              })
+              .run();
+          })();
           return true;
         }
         if (
@@ -3033,9 +3066,11 @@ export default function RichDocumentEditor({
           !html &&
           /^#{1,6}\s|^[-*+]\s|^>\s|```|\[[ xX]\]/m.test(text)
         ) {
-          if (!window.confirm("Markdown 서식을 적용해서 붙여 넣을까요?\n취소하면 원문을 붙여 넣습니다.")) return false;
           event.preventDefault();
-          editor?.chain().focus().insertContent(marked.parse(text)).run();
+          void (async () => {
+            const ok = await confirmAsync("Markdown 서식을 적용해서 붙여 넣을까요?\n원문 그대로 두려면 취소하세요.", { title: "붙여넣기 변환", okLabel: "변환하기", cancelLabel: "원문 그대로" });
+            editor?.chain().focus().insertContent(ok ? marked.parse(text) : text).run();
+          })();
           return true;
         }
         if (
@@ -3045,16 +3080,16 @@ export default function RichDocumentEditor({
             text,
           )
         ) {
-          if (!window.confirm("코드 블록으로 변환할까요?\n취소하면 원문을 붙여 넣습니다.")) return false;
           event.preventDefault();
-          editor
-            ?.chain()
-            .focus()
-            .insertContent({
-              type: "codeBlock",
-              content: [{ type: "text", text }],
-            })
-            .run();
+          void (async () => {
+            const ok = await confirmAsync("코드 블록으로 변환할까요?\n원문 그대로 두려면 취소하세요.", { title: "붙여넣기 변환", okLabel: "변환하기", cancelLabel: "원문 그대로" });
+            if (ok)
+              editor?.chain().focus().insertContent({
+                type: "codeBlock",
+                content: [{ type: "text", text }],
+              }).run();
+            else editor?.chain().focus().insertContent(text).run();
+          })();
           return true;
         }
         if (!files.length) return false;
@@ -3276,6 +3311,14 @@ export default function RichDocumentEditor({
       if (!operation?.id || externalOperationIds.current.has(operation.id))
         return;
       if (!isApprovedMcpOperation(operation)) return;
+      const editorSupportedTypes = new Set([
+        "diagram_insert",
+        "diagram_delete",
+        "text_insert",
+        "history_restore",
+        "note_patch",
+      ]);
+      if (!editorSupportedTypes.has(operation.type)) return;
       const claimed = await window.ksnoteMcp?.claim?.({
         id: operation.id,
         noteId,
@@ -3284,11 +3327,8 @@ export default function RichDocumentEditor({
       externalOperationIds.current.add(operation.id);
       try {
         const currentRevision = contentRevision(editor.getHTML());
-        if (
-          claimed.expectedRevision &&
-          claimed.expectedRevision !== currentRevision
-        ) {
-        await window.ksnoteMcp?.complete?.({
+        if (isRevisionConflict(claimed.expectedRevision, currentRevision)) {
+          await window.ksnoteMcp?.complete?.({
             id: claimed.id,
             status: "error",
             code: "revision_conflict",
@@ -3368,6 +3408,44 @@ export default function RichDocumentEditor({
             targetNoteId: noteId,
             source: claimed.content,
             sourceTitle: "복원된 스냅샷",
+          });
+          return;
+        }
+        const isNotePatch = claimed.type === "note_patch";
+        if (isNotePatch) {
+          const patchTarget = resolveBlockNode(editor.state.doc, claimed.blockId);
+          if (!patchTarget) {
+            const error = new Error("지정한 block ID에 해당하는 블록을 현재 편집기에서 찾을 수 없습니다.");
+            error.code = "patch_block_not_found";
+            throw error;
+          }
+          editor
+            .chain()
+            .focus()
+            .deleteRange({
+              from: patchTarget.pos,
+              to: patchTarget.pos + patchTarget.node.nodeSize,
+            })
+            .insertContentAt(patchTarget.pos, claimed.html || "")
+            .run();
+          const appliedRevision = contentRevision(editor.getHTML());
+          if (!onPersistContent)
+            throw new Error("SQLite 저장 브리지가 준비되지 않았습니다.");
+          await onPersistContent(editor.getHTML());
+          await window.ksnoteMcp?.complete?.({
+            id: claimed.id,
+            status: "completed",
+            appliedRevision,
+            patchedBlockId: claimed.blockId,
+          });
+          onExternalOperation?.({
+            status: "completed",
+            undoable: true,
+            undo: () => editor.chain().focus().undo().run(),
+            message: "MCP 작업 완료: 지정한 블록을 교체했습니다.",
+            targetNoteId: noteId,
+            source: claimed.html || "",
+            sourceTitle: "교체된 블록 소스",
           });
           return;
         }
@@ -3910,6 +3988,10 @@ export default function RichDocumentEditor({
           : target === "note"
             ? "전체 노트"
             : activeContext.label,
+      blockId: activeContext.blockId,
+      toBlockId: target === "selection" ? activeContext.toBlockId : undefined,
+      blockOffset: activeContext.blockOffset ?? activeContext.cursorOffset ?? null,
+      toBlockOffset: activeContext.toBlockOffset ?? null,
       cursorOffset: activeContext.cursorOffset ?? null,
       ancestors: activeContext.ancestors || [],
       html: target === "note" ? originalHtml : selectionHtml,
@@ -3932,16 +4014,22 @@ export default function RichDocumentEditor({
       originalHtml,
       operation,
       label: editContext.label,
+      blockId: editContext.blockId,
+      toBlockId: editContext.toBlockId,
+      blockOffset: editContext.blockOffset ?? null,
+      toBlockOffset: editContext.toBlockOffset ?? null,
     };
     let researchApprovedAt = null;
     if (aiMode === "research") {
-      if (!window.confirm(`Atlassian Rovo 조사 모드로 실행합니다.\n\n전송 범위: 프롬프트, 현재 노트, 선택 영역\n감지된 대상: ${externalLinks.join(", ") || "링크 또는 이슈 키 없음"}\n\n읽기 전용 조회를 계속할까요?`)) return;
+      const approved = await confirmAsync(`Atlassian Rovo 조사 모드로 실행합니다.\n\n전송 범위: 프롬프트, 현재 노트, 선택 영역\n감지된 대상: ${externalLinks.join(", ") || "링크 또는 이슈 키 없음"}\n\n읽기 전용 조회를 계속할까요?`, { title: "Rovo 조사", okLabel: "조회 계속", cancelLabel: "취소" });
+      if (!approved) return;
       researchApprovedAt = Date.now();
     }
     setAiOpen(true);
     setAiLoading(true);
     setAiError("");
     setAiResult(null);
+    setAiExpanded(false);
     setAiStream("");
     setAiProgress({ stage: "preparing", startedAt: Date.now() });
     const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -3960,7 +4048,18 @@ export default function RichDocumentEditor({
         projectId,
         sessionId: activeAiSessionId,
         provider,
-        model: selectedModel?.id,
+        model: selectedModel?.rawId || selectedModel?.id,
+        ...(selectedModel?.apiKind
+          ? {
+              api: {
+                providerId: selectedModel.provider,
+                baseUrl: selectedModel.baseUrl || "",
+                kind: selectedModel.apiKind,
+              },
+            }
+          : {}),
+        reasoningEffort:
+          aiEffort && aiEffort !== "auto" ? aiEffort : undefined,
         command: agentCommands[provider],
         mode: aiMode,
         diagramFormat: aiMode === "edit" ? aiDiagramFormat : "auto",
@@ -3995,19 +4094,32 @@ export default function RichDocumentEditor({
       if (patch) patch.operation = operation;
       if (patch && target === "table")
         patch.html = preserveTableFormatting(selectionHtml, patch.html);
+      const rovoParsed = aiMode === "research" ? parseRovoPayload(rawOutput) : { ok: false };
+      const rovo = rovoParsed.ok ? normalizeRovoPayload(rovoParsed) : null;
+      const queriedAt = rovo ? new Date().toLocaleString("ko-KR") : "";
+      const rovoQuote = rovo ? rovoToQuoteHtml(rovo, queriedAt) : "";
       const output = normalizeRichHtml(
-        patch ? patch.html : rawOutput,
+        patch ? patch.html : rovoQuote || rawOutput,
         { allowImages: false },
       );
       if (!output)
         throw new Error("AI 응답에 삽입할 수 있는 내용이 없습니다.");
       const sources = aiMode === "research"
-        ? extractExternalLinks(`${rawOutput}\n${externalLinks.join("\n")}`)
+        ? Array.from(new Set([
+            ...(rovo?.url ? [rovo.url] : []),
+            ...(rovo?.kind === "search" ? rovo.results.map((item) => item.url).filter(Boolean) : []),
+            ...(rovo?.kind === "status" ? rovo.sites.map((site) => site.url).filter(Boolean) : []),
+            ...extractExternalLinks(`${rawOutput}\n${externalLinks.join("\n")}`),
+          ])).slice(0, 20)
         : [];
+      const cited = aiMode === "research" && !rovo ? extractCitedSources(rawOutput) : [];
+      const linkedOutput = cited.length ? linkCitationMarkers(output, cited) : output;
       setAiResult({
-        output,
+        output: linkedOutput,
         patch,
         sources,
+        cited,
+        rovo: rovo ? { ...rovo, queriedAt } : null,
         instruction,
         mode: aiMode,
         target,
@@ -4023,7 +4135,7 @@ export default function RichDocumentEditor({
         responseVisible: true,
       });
       writeAiAuditLog({ requestId, status: "responded", sourceRevision, sources });
-      setAiSessions((sessions) => [{ ...sessionBase, output, patch, sources, status: "done", respondedAt: Date.now() }, ...sessions].slice(0, 100));
+      setAiSessions((sessions) => [{ ...sessionBase, output: linkedOutput, patch, sources, cited, rovo: rovo ? { ...rovo, queriedAt } : null, status: "done", respondedAt: Date.now() }, ...sessions].slice(0, 100));
     } catch (err) {
       const message = err.message || "AI 실행에 실패했습니다.";
       setAiError(message);
@@ -4048,7 +4160,7 @@ export default function RichDocumentEditor({
     setActiveAiSessionId(session.sessionId || session.id);
     setAiPrompt(session.instruction); setAiMode(session.mode); setAiModel(session.model || (session.provider === "claude" ? "sonnet" : preferredModel));
     setAiError(session.error || "");
-    setAiResult(session.output ? { output: session.output, patch: session.patch, sources: session.sources || session.externalLinks || [], instruction: session.instruction, mode: session.mode, target: session.target, sourceRevision: session.sourceRevision, requestId: session.id, replay: true } : null);
+    setAiResult(session.output ? { output: session.output, patch: session.patch, sources: session.sources || session.externalLinks || [], cited: session.cited || [], rovo: session.rovo || null, instruction: session.instruction, mode: session.mode, target: session.target, sourceRevision: session.sourceRevision, requestId: session.id, replay: true } : null);
     aiTargetRef.current = { target: session.target, range: null };
     setAiHistoryOpen(false);
   };
@@ -4073,7 +4185,7 @@ export default function RichDocumentEditor({
     }
     setAiMode(nextMode);
   };
-  const applyAI = (action = "replace") => {
+  const applyAI = async (action = "replace") => {
     if (!aiResult) return;
     const target = aiTargetRef.current;
     const output = cleanAIHtml(aiResult.output);
@@ -4095,17 +4207,34 @@ export default function RichDocumentEditor({
       else if (operation === "insert_after")
         editor.chain().focus("end").insertContent(output).run();
       else {
-        if (!window.confirm("AI 결과로 전체 노트를 교체합니다. 변경 내용은 Undo로 되돌릴 수 있습니다. 계속할까요?")) return;
+        const approved = await confirmAsync("AI 결과로 전체 노트를 교체합니다. 변경 내용은 Undo로 되돌릴 수 있습니다. 계속할까요?", { title: "전체 노트 교체", okLabel: "교체", cancelLabel: "취소" });
+        if (!approved) return;
         editor.commands.setContent(output);
       }
     } else if (target?.range) {
-      if (target.originalHtml !== editor.getHTML()) { setAiError("선택 이후 노트가 변경되어 안전하게 적용할 수 없습니다. 결과를 다시 요청해 주세요."); return; }
       const operation = aiResult.patch?.operation || target.operation || "replace";
+      let applyRange = target.range;
+      if (target.target === "block" && target.blockId) {
+        const resolved = resolveBlockNode(editor.state.doc, target.blockId);
+        if (!resolved) { setAiError("대상 블록이 삭제되었거나 이동되어 안전하게 적용할 수 없습니다. 결과를 다시 요청해 주세요."); return; }
+        applyRange = { from: resolved.pos, to: resolved.pos + resolved.node.nodeSize };
+      } else if (target.target === "selection" && (target.blockId || target.toBlockId)) {
+        const resolvedFrom = target.blockId
+          ? resolveBlockOffset(editor.state.doc, target.blockId, target.blockOffset ?? 0)
+          : undefined;
+        const resolvedTo = target.toBlockId
+          ? resolveBlockOffset(editor.state.doc, target.toBlockId, target.toBlockOffset ?? 0)
+          : undefined;
+        const from = Number.isFinite(resolvedFrom) ? resolvedFrom : target.range.from;
+        const to = Number.isFinite(resolvedTo) ? resolvedTo : target.range.to;
+        if (target.blockId && !Number.isFinite(resolvedFrom)) { setAiError("대상 블록을 현재 문서에서 찾을 수 없습니다. 결과를 다시 요청해 주세요."); return; }
+        applyRange = { from, to: Math.max(from, to) };
+      } else if (target.originalHtml !== editor.getHTML()) { setAiError("선택 이후 노트가 변경되어 안전하게 적용할 수 없습니다. 결과를 다시 요청해 주세요."); return; }
       if (operation === "insert_before")
-        editor.chain().focus().insertContentAt(target.range.from, output).run();
+        editor.chain().focus().insertContentAt(applyRange.from, output).run();
       else if (operation === "insert_after")
-        editor.chain().focus().insertContentAt(target.range.to, output).run();
-      else editor.chain().focus().insertContentAt(target.range, output).run();
+        editor.chain().focus().insertContentAt(applyRange.to, output).run();
+      else editor.chain().focus().insertContentAt(applyRange, output).run();
     }
     setAiResult(null);
     setAiPrompt("");
@@ -4767,7 +4896,8 @@ export default function RichDocumentEditor({
                         ));
                       }}><FilePenLine /></button>
                       <button className="ai-session-action" title="지금 요약하고 새 컨텍스트로 분기" onClick={async () => {
-                        if (!window.confirm("현재 대화를 요약한 뒤 더 가벼운 새 컨텍스트로 이어갈까요? 원래 대화 기록은 보존됩니다.")) return;
+                        const approved = await confirmAsync("현재 대화를 요약한 뒤 더 가벼운 새 컨텍스트로 이어갈까요? 원래 대화 기록은 보존됩니다.", { title: "컨텍스트 요약", okLabel: "요약하고 분기", cancelLabel: "취소" });
+                        if (!approved) return;
                         try {
                           await window.ksnoteAI?.compactSession?.(session.sessionId);
                           setAiUsageBySession((current) => ({
@@ -4777,7 +4907,8 @@ export default function RichDocumentEditor({
                         } catch (error) { setAiError(error.message); }
                       }}><RotateCcw /></button>
                       <button className="ai-session-action warning" title="컨텍스트 초기화" onClick={async () => {
-                        if (!window.confirm("이 대화의 AI 컨텍스트와 Turn 기록을 지울까요? 대화 이름은 유지됩니다.")) return;
+                        const approved = await confirmAsync("이 대화의 AI 컨텍스트와 Turn 기록을 지울까요? 대화 이름은 유지됩니다.", { title: "컨텍스트 초기화", okLabel: "지우기", cancelLabel: "취소" });
+                        if (!approved) return;
                         await window.ksnoteAI?.resetContext?.(session.sessionId);
                         setAiSessions((sessions) => sessions.filter(
                           (item) => (item.sessionId || item.id) !== session.sessionId,
@@ -4785,9 +4916,10 @@ export default function RichDocumentEditor({
                         setAiUsageBySession((current) => ({ ...current, [session.sessionId]: { total: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, modelContextWindow: 0 } }));
                         if (activeAiSessionId === session.sessionId) startNewAISession();
                       }}><Eraser /></button>
-                      <button className="ai-session-delete" title="대화 삭제" onClick={() => {
+                      <button className="ai-session-delete" title="대화 삭제" onClick={async () => {
                         const sessionId = session.sessionId || session.id;
-                        if (!window.confirm("대화와 저장된 모든 기록을 영구 삭제할까요?")) return;
+                        const approved = await confirmAsync("대화와 저장된 모든 기록을 영구 삭제할까요?", { title: "대화 삭제", okLabel: "삭제", cancelLabel: "취소" });
+                        if (!approved) return;
                         window.ksnoteAI?.deleteSession?.(sessionId);
                         setAiSessions((sessions) => sessions.filter(
                           (item) => (item.sessionId || item.id) !== sessionId,
@@ -4801,7 +4933,7 @@ export default function RichDocumentEditor({
               </section>
             )}
             {(aiResult || aiError || aiLoading) && (
-              <div className="ai-response">
+              <div className={aiExpanded ? "ai-response expanded" : "ai-response"}>
                 {aiLoading && (
                   <>
                     <div className="ai-thinking">
@@ -4846,6 +4978,7 @@ export default function RichDocumentEditor({
                           <button className="apply" onClick={() => applyAI("replace")}><Check /> 선택 영역 교체</button>
                         )}
                         <button onClick={() => applyAI("insert")}><FilePenLine /> 노트에 삽입</button>
+                        <button onClick={() => setAiExpanded((value) => !value)}>{aiExpanded ? "접기" : "펼치기"}</button>
                         <button onClick={() => setAiResult(null)}><X /> 취소</button>
                       </div>
                     )}
@@ -4881,14 +5014,59 @@ export default function RichDocumentEditor({
                     {aiResult.sources?.length > 0 && (
                       <div className="ai-source-list">
                         <b>조회 출처</b>
-                        {aiResult.sources.map((source) =>
-                          /^https?:/i.test(source) ? (
-                            <a key={source} href={source} target="_blank" rel="noreferrer">{source}</a>
-                          ) : (
-                            <span key={source}>{source}</span>
-                          ),
+                        {aiResult.cited?.length > 0
+                          ? aiResult.cited.map((entry) => (
+                            <a key={`${entry.n}-${entry.url}`} href={entry.url} target="_blank" rel="noreferrer">[{entry.n}] {entry.title || entry.url}</a>
+                          ))
+                          : aiResult.sources.map((source) =>
+                            /^https?:/i.test(source) ? (
+                              <a key={source} href={source} target="_blank" rel="noreferrer">{source}</a>
+                            ) : (
+                              <span key={source}>{source}</span>
+                            ),
+                          )}
+                        <small>{aiResult.rovo?.queriedAt || new Date().toLocaleString("ko-KR")} 조회</small>
+                      </div>
+                    )}
+                    {aiResult.rovo && (
+                      <div className="ai-rovo-card">
+                        {aiResult.rovo.kind === "status" && (
+                          <>
+                            <b>Rovo 연결 상태</b>
+                            <div>사용자: {[aiResult.rovo.user.displayName, aiResult.rovo.user.email].filter(Boolean).join(" · ") || "확인 불가"}</div>
+                            <div>접근 가능 사이트 ({aiResult.rovo.sites.length})</div>
+                            <ul>{aiResult.rovo.sites.map((site) => <li key={site.url || site.name}>{site.name || site.url}</li>)}</ul>
+                            <div>Jira 프로젝트 ({aiResult.rovo.jiraProjects.length}) · Confluence 공간 ({aiResult.rovo.confluenceSpaces.length})</div>
+                            <ul>
+                              {aiResult.rovo.jiraProjects.slice(0, 10).map((project) => <li key={project.key || project.name}>{project.key} {project.name}</li>)}
+                              {aiResult.rovo.confluenceSpaces.slice(0, 10).map((space) => <li key={space.key || space.name}>{space.key} {space.name}</li>)}
+                            </ul>
+                          </>
                         )}
-                        <small>{new Date().toLocaleString("ko-KR")} 조회</small>
+                        {aiResult.rovo.kind === "confluence-page" && (
+                          <>
+                            <b>{aiResult.rovo.title || "제목 없음"}</b>
+                            <div>스페이스: {aiResult.rovo.space} · 작성자: {aiResult.rovo.author} · 수정: {aiResult.rovo.updated}</div>
+                            <div>{aiResult.rovo.excerpt}</div>
+                          </>
+                        )}
+                        {aiResult.rovo.kind === "jira-issue" && (
+                          <>
+                            <b>[{aiResult.rovo.key}] {aiResult.rovo.summary}</b>
+                            <div>상태: {aiResult.rovo.status} · 담당자: {aiResult.rovo.assignee}</div>
+                            <div>{aiResult.rovo.description}</div>
+                            {aiResult.rovo.comments.length > 0 && (
+                              <ul>{aiResult.rovo.comments.map((comment, index) => <li key={index}>{comment}</li>)}</ul>
+                            )}
+                          </>
+                        )}
+                        {aiResult.rovo.kind === "search" && (
+                          <>
+                            <b>Rovo 통합 검색: {aiResult.rovo.query} ({aiResult.rovo.results.length}건)</b>
+                            <ul>{aiResult.rovo.results.map((item) => <li key={item.url || item.title}>[{item.type}] {item.title}</li>)}</ul>
+                          </>
+                        )}
+                        <small>{aiResult.rovo.queriedAt} 조회 · 읽기 전용</small>
                       </div>
                     )}
                     {aiResult.replay && (
@@ -4934,6 +5112,48 @@ export default function RichDocumentEditor({
                   Atlassian 링크 또는 이슈 키를 감지했습니다. Rovo 조사로 전환
                 </button>
               )}
+              {aiMode === "research" && (
+                <div className="ai-rovo-actions">
+                  <button
+                    type="button"
+                    onClick={() => setAiPrompt(buildRovoStatusInstruction())}
+                  >
+                    <Globe2 /> 연결 상태·사이트 조회
+                  </button>
+                  {parseAtlassianTargets(detectedPromptLinks)
+                    .filter((entry) => entry.type === "confluence" || entry.type === "jira")
+                    .slice(0, 3)
+                    .map((entry) => (
+                      <button
+                        type="button"
+                        key={entry.source}
+                        onClick={() => setAiPrompt(
+                          entry.type === "confluence"
+                            ? buildRovoPageInstruction(entry)
+                            : buildRovoIssueInstruction(entry),
+                        )}
+                      >
+                        <FilePenLine /> {entry.type === "confluence" ? "페이지" : "이슈"} 정보 조회
+                      </button>
+                    ))}
+                  <button
+                    type="button"
+                    onClick={() => setAiPrompt(buildRovoSearchInstruction(aiPrompt))}
+                  >
+                    <Search /> 관련 자료 검색
+                  </button>
+                  <button
+                    type="button"
+                    title="외부 쓰기는 별도 게시 다이얼로그에서 승인 후 실행됩니다"
+                    onClick={() => {
+                      writeAiAuditLog({ requestId: `action-${Date.now()}`, status: "action-mode", mode: "research", noteId, projectId });
+                      window.dispatchEvent(new CustomEvent("ksnote-open-publish"));
+                    }}
+                  >
+                    <Send /> 게시(쓰기 모드)
+                  </button>
+                </div>
+              )}
               <div>
                 <span className="ai-modes">
                   <button
@@ -4952,22 +5172,92 @@ export default function RichDocumentEditor({
                   </button>
                   <button type="button" className={aiMode === "research" ? "active research" : ""} onClick={() => { switchAiMode("research"); const codexModel = availableModels.find((model) => model.provider === "codex"); if (codexModel) setAiModel(codexModel.id); }}><Globe2 /> Rovo 조사</button>
                 </span>
-                <select
-                  value={aiModel}
-                  onChange={(e) => setAiModel(e.target.value)}
-                  aria-label="AI 모델 선택"
-                >
-                  <optgroup label="OpenAI">
-                    {availableModels.filter((model) => model.provider === "codex").map((model) => (
-                      <option key={model.id} value={model.id}>{model.label}</option>
-                    ))}
-                  </optgroup>
-                  <optgroup label="Anthropic">
-                    {availableModels.filter((model) => model.provider === "claude").map((model) => (
-                      <option key={model.id} value={model.id}>{model.label}</option>
-                    ))}
-                  </optgroup>
-                </select>
+                <div className="ai-model-picker">
+                  <button
+                    type="button"
+                    className="ai-model-current"
+                    onClick={() => setAiModelOpen((value) => !value)}
+                    aria-label="AI 모델 선택"
+                    title={(availableModels.find((model) => model.id === aiModel) || {}).label || aiModel}
+                  >
+                    <span>
+                      {(availableModels.find((model) => model.id === aiModel) || {}).label || aiModel}
+                    </span>
+                    <ChevronDown />
+                  </button>
+                  {(() => {
+                    const entry = availableModels.find((model) => model.id === aiModel);
+                    const efforts = entry?.supportedReasoningEfforts?.length
+                      ? entry.supportedReasoningEfforts
+                      : entry?.apiKind
+                        ? ["low", "medium", "high", "xhigh"]
+                        : [];
+                    if (!efforts.length) return null;
+                    return (
+                      <select
+                        value={aiEffort}
+                        onChange={(e) => setAiEffort(e.target.value)}
+                        aria-label="Reasoning effort 선택"
+                        title="Reasoning effort"
+                      >
+                        <option value="auto">Auto</option>
+                        {efforts.map((effort) => (
+                          <option key={effort} value={effort}>
+                            {effort === "xhigh" ? "Xhigh" : effort[0].toUpperCase() + effort.slice(1)}
+                          </option>
+                        ))}
+                      </select>
+                    );
+                  })()}
+                </div>
+                {aiModelOpen && (
+                  <div className="ai-model-list" role="listbox" aria-label="AI 모델 목록">
+                    <div className="ai-model-search">
+                      <Search />
+                      <input
+                        value={aiModelQuery}
+                        onChange={(e) => setAiModelQuery(e.target.value)}
+                        placeholder="모델 검색"
+                        aria-label="모델 검색"
+                      />
+                      {aiModelQuery && (
+                        <button type="button" onClick={() => setAiModelQuery("")} aria-label="검색 지우기">
+                          <X />
+                        </button>
+                      )}
+                    </div>
+                    {availableModels
+                      .filter(
+                        (model) =>
+                          !aiModelQuery.trim() ||
+                          (model.label || model.id)
+                            .toLowerCase()
+                            .includes(aiModelQuery.trim().toLowerCase()) ||
+                          model.id.toLowerCase().includes(aiModelQuery.trim().toLowerCase()),
+                      )
+                      .map((model) => (
+                        <button
+                          key={model.id}
+                          type="button"
+                          role="option"
+                          aria-selected={model.id === aiModel}
+                          className={model.id === aiModel ? "active" : ""}
+                          onClick={() => {
+                            setAiModel(model.id);
+                            setAiModelOpen(false);
+                          }}
+                          title={model.id}
+                        >
+                          <span>{model.label}</span>
+                          <small>
+                            {model.providerName || model.provider}
+                            {model.apiKind ? " · API" : " · 구독"}
+                          </small>
+                          {model.id === aiModel && <Check />}
+                        </button>
+                      ))}
+                  </div>
+                )}
                 {aiMode === "edit" && (
                   <select
                     value={aiDiagramFormat}
@@ -5000,6 +5290,32 @@ export default function RichDocumentEditor({
           <ChevronUp className={aiOpen ? "rotated" : ""} />
         </button>
       </div>
+      {confirmRequest && (
+        <div
+          className="modal-backdrop editor-confirm-backdrop"
+          onMouseDown={(e) => { if (e.target === e.currentTarget) resolveConfirm(false); }}
+        >
+          <section
+            className="editor-confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-label={confirmRequest.title}
+            onKeyDown={(e) => { if (e.key === "Escape") resolveConfirm(false); }}
+            tabIndex={-1}
+          >
+            <b>{confirmRequest.title}</b>
+            <p>{confirmRequest.message}</p>
+            <footer>
+              <button type="button" onClick={() => resolveConfirm(false)}>
+                {confirmRequest.cancelLabel}
+              </button>
+              <button type="button" className="primary" onClick={() => resolveConfirm(true)} autoFocus>
+                {confirmRequest.okLabel}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
     </section>
   );
 }

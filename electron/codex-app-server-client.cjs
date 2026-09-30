@@ -2,16 +2,28 @@ const { EventEmitter } = require("events");
 const { spawn } = require("child_process");
 const readline = require("readline");
 
+const REVIEW_DECISION_METHODS = new Set([
+  "execCommandApproval",
+  "applyPatchApproval",
+  "item/commandExecution/requestApproval",
+  "item/fileChange/requestApproval",
+]);
+
 class CodexAppServerClient extends EventEmitter {
-  constructor({ command = "codex", cwd } = {}) {
+  constructor({ command = "codex", cwd, serverArgs, approvalTimeoutMs } = {}) {
     super();
     this.command = command;
+    this.serverArgs = Array.isArray(serverArgs) && serverArgs.length ? serverArgs : ["app-server"];
+    this.approvalTimeoutMs =
+      Number.isFinite(approvalTimeoutMs) && approvalTimeoutMs > 0 ? approvalTimeoutMs : 120000;
     this.cwd = cwd;
     this.child = null;
     this.reader = null;
     this.startPromise = null;
     this.nextId = 1;
     this.pending = new Map();
+    this.pendingApprovals = new Map();
+    this.nextApproval = 1;
     this.activeTurns = new Map();
     this.compactionWaiters = new Map();
     this.contextThreads = new Map();
@@ -42,7 +54,7 @@ class CodexAppServerClient extends EventEmitter {
     this.status = "starting";
     this.lastError = "";
     this.emit("status", this.snapshot());
-    const child = spawn(this.command, ["app-server"], {
+    const child = spawn(this.command, this.serverArgs, {
       cwd: this.cwd,
       windowsHide: true,
       shell: process.platform === "win32",
@@ -120,16 +132,93 @@ class CodexAppServerClient extends EventEmitter {
       return;
     }
     if (message.method && Object.prototype.hasOwnProperty.call(message, "id")) {
+      this._handleServerRequest(message.method, message.id, message.params || {});
+      return;
+    }
+    this._handleNotification(message.method, message.params || {});
+  }
+
+  _handleServerRequest(method, id, params) {
+    if (method === "item/tool/call") {
       this._write({
-        id: message.id,
+        id,
         error: {
           code: -32601,
-          message: "KsNote에서 아직 지원하지 않는 승인 요청입니다.",
+          message: "KsNote에서 실행할 수 있는 로컬 동적 도구가 없습니다.",
         },
       });
       return;
     }
-    this._handleNotification(message.method, message.params || {});
+    if (
+      REVIEW_DECISION_METHODS.has(method) ||
+      method === "item/permissions/requestApproval" ||
+      method === "item/tool/requestUserInput" ||
+      method === "mcpServer/elicitation/request"
+    ) {
+      const approvalId = `approval-${this.nextApproval++}`;
+      const timer = setTimeout(() => {
+        this.pendingApprovals.delete(approvalId);
+        this._respondApprovalDeclined(method, id);
+        this.emit("approval-timeout", { approvalId, method });
+      }, this.approvalTimeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+      this.pendingApprovals.set(approvalId, { method, requestId: id, timer });
+      this.emit("approval", { approvalId, method, params });
+      return;
+    }
+    this._write({
+      id,
+      error: {
+        code: -32601,
+        message: "KsNote에서 아직 지원하지 않는 승인 요청입니다.",
+      },
+    });
+  }
+
+  _respondApprovalDeclined(method, id) {
+    if (REVIEW_DECISION_METHODS.has(method)) {
+      this._write({ id, result: { decision: "abort" } });
+    } else if (method === "mcpServer/elicitation/request") {
+      this._write({ id, result: { action: "decline" } });
+    } else {
+      this._write({
+        id,
+        error: { code: -32000, message: "사용자가 승인 요청을 거절했습니다." },
+      });
+    }
+  }
+
+  resolveApproval(approvalId, decision) {
+    const pending = this.pendingApprovals.get(approvalId);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    this.pendingApprovals.delete(approvalId);
+    const approved = decision?.decision === "approved";
+    if (!approved) {
+      this._respondApprovalDeclined(pending.method, pending.requestId);
+      return true;
+    }
+    if (REVIEW_DECISION_METHODS.has(pending.method)) {
+      this._write({ id: pending.requestId, result: { decision: "approved" } });
+    } else if (pending.method === "item/permissions/requestApproval") {
+      this._write({
+        id: pending.requestId,
+        result: { permissions: decision?.permissions || {}, scope: "turn" },
+      });
+    } else if (pending.method === "item/tool/requestUserInput") {
+      this._write({
+        id: pending.requestId,
+        result: { answers: decision?.answers || {} },
+      });
+    } else if (pending.method === "mcpServer/elicitation/request") {
+      this._write({
+        id: pending.requestId,
+        result: { action: "accept", content: decision?.content ?? null },
+      });
+    } else {
+      this._respondApprovalDeclined(pending.method, pending.requestId);
+    }
+    return true;
   }
 
   _handleNotification(method, params) {
@@ -188,6 +277,11 @@ class CodexAppServerClient extends EventEmitter {
       waiter.reject(new Error(this.lastError));
     }
     this.compactionWaiters.clear();
+    for (const [approvalId, pending] of this.pendingApprovals) {
+      clearTimeout(pending.timer);
+      this.emit("approval-timeout", { approvalId, method: pending.method });
+    }
+    this.pendingApprovals.clear();
     this.contextThreads.clear();
     this.emit("status", this.snapshot());
   }
@@ -204,8 +298,41 @@ class CodexAppServerClient extends EventEmitter {
     return this.request("model/list", { limit: 100, includeHidden: false });
   }
 
-  async mcpServerStatusList() {
-    return this.request("mcpServerStatus/list", {});
+  async mcpServerStatusList(detail) {
+    const params = detail ? { detail } : {};
+    return this.request("mcpServerStatus/list", params);
+  }
+
+  async openScratchThread() {
+    const started = await this.request("thread/start", {
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      ephemeral: true,
+    }, 90000);
+    const threadId = started?.thread?.id;
+    if (!threadId) throw new Error("게시용 스레드를 시작하지 못했습니다.");
+    return threadId;
+  }
+
+  async closeScratchThread(threadId) {
+    if (!threadId) return false;
+    try {
+      await this.request("thread/archive", { threadId });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async mcpServerToolCall({ server, threadId, tool, args, timeoutMs = 180000 }) {
+    if (!server || !threadId || !tool)
+      throw new Error("MCP 도구 호출에 server, threadId, tool이 필요합니다.");
+    return this.request("mcpServer/tool/call", {
+      server,
+      threadId,
+      tool,
+      arguments: args ?? {},
+    }, timeoutMs);
   }
 
   async runTurn({
@@ -215,6 +342,7 @@ class CodexAppServerClient extends EventEmitter {
     model,
     developerInstructions,
     requestId,
+    effort,
     onDelta,
     onUsage,
     onThread,
@@ -231,7 +359,9 @@ class CodexAppServerClient extends EventEmitter {
     const resolvedModel =
       resolvedModelInfo?.model || resolvedModelInfo?.id || null;
     const resolvedEffort =
-      resolvedModelInfo?.defaultReasoningEffort || "medium";
+      effort && effort !== "auto"
+        ? effort
+        : resolvedModelInfo?.defaultReasoningEffort || "medium";
     let threadId = this.contextThreads.get(contextKey);
     if (!threadId) {
       let started;

@@ -55,7 +55,24 @@ contextBridge.exposeInMainWorld('ksnoteMcp', {
   complete: (result) => ipcRenderer.invoke('mcp-operation-complete', result),
   operation: (id) => ipcRenderer.invoke('mcp-operation-get', id),
 });
+contextBridge.exposeInMainWorld('ksnotePublish', {
+  discover: (request) => ipcRenderer.invoke('atlassian-publish-discover', request),
+  spaces: (request) => ipcRenderer.invoke('atlassian-publish-spaces', request),
+  publish: (request) => ipcRenderer.invoke('atlassian-publish-page', request),
+  resolveApproval: (request) => ipcRenderer.invoke('atlassian-publish-approval-resolve', request),
+  cancel: (request) => ipcRenderer.invoke('atlassian-publish-cancel', request),
+  onApproval: (listener) => {
+    const handler = (_, payload) => listener(payload);
+    ipcRenderer.on('atlassian-publish-approval', handler);
+    return () => ipcRenderer.removeListener('atlassian-publish-approval', handler);
+  },
+});
 contextBridge.exposeInMainWorld('ksnoteImage', { generate: (request) => ipcRenderer.invoke('image-generate', request) });
+contextBridge.exposeInMainWorld('ksnoteModels', {
+  fetchRemote: (request) => ipcRenderer.invoke('model-provider-fetch', request),
+  testRemote: (request) => ipcRenderer.invoke('model-provider-test', request),
+  saveKey: (request) => ipcRenderer.invoke('model-provider-key-save', request),
+});
 contextBridge.exposeInMainWorld('ksnoteDiagnostics', { test: (request) => ipcRenderer.invoke('command-test', request) });
 contextBridge.exposeInMainWorld('ksnoteDiagram', {
   capabilities: (request) => ipcRenderer.invoke('plantuml-info', request),

@@ -62,6 +62,7 @@ flowchart TB
         Content["editor-content.mjs<br/>block·callout·diagram 구조"]
         Validation["diagram-validation.mjs<br/>Mermaid/PlantUML 입력 검증"]
         Target["target-ref.mjs<br/>page/block/offset/revision"]
+        TaskIndex["task-index.mjs<br/>build/query/isFresh"]
         McpServer["ksnote-server.mjs<br/>read/write tools·operation queue"]
     end
     subgraph STORAGE["Persistence Layer"]
@@ -82,6 +83,7 @@ flowchart TB
     Main --> History
     McpServer --> Target
     McpServer --> Validation
+    McpServer --> TaskIndex
     McpServer --> SQLite
     McpServer --> Atomic
     Editor --> Content
@@ -97,6 +99,7 @@ flowchart TB
 | `preload.cjs` | 렌더러와 메인 사이의 허용된 API만 노출 | `electron/preload.cjs` |
 | `main.cjs` | IPC, SQLite 초기화, asset/revision 저장, AI 프로세스 수명 관리 | `electron/main.cjs` |
 | `ksnote-server.mjs` | Codex용 읽기/쓰기 MCP tool, revision 충돌·작업 큐 | `mcp/ksnote-server.mjs` |
+| `task-index.mjs` | task 목록 materialized index 빌드·조회·freshness (`task-index.json`, Electron이 저장 시 갱신) | `mcp/task-index.mjs` |
 | `editor-content.mjs` / `diagram-validation.mjs` | 문서 블록 구조와 다이어그램 입력 검증 | `src/`, `mcp/` |
 
 ## 3. 일반 편집과 자동 저장 흐름

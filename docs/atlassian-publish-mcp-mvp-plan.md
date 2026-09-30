@@ -11,10 +11,12 @@ KsNote의 Atlassian 게시 기능은 **KsNote MCP Server만으로 구현되지 �
 2. `Codex App Server Client`: KsNote가 Codex에 연결하고, Codex 호스트에 설치된
    Atlassian Rovo MCP 도구를 조회·승인·호출한다.
 
-이번 게시 MVP의 핵심은 2번이다. 현재 KsNote는 `codex exec`를 요청마다 실행하는
-일회성 CLI 방식이므로, MCP 상태·OAuth·도구 스키마·승인 요청을 구조적으로 다룰 수
-없다. 이를 Electron 메인 프로세스가 소유하는 장기 실행 `codex app-server`
-JSON-RPC 세션으로 교체해야 한다.
+이번 게시 MVP의 핵심은 2번이다. 조사 당시(2026-07-29) KsNote는 `codex exec`를
+요청마다 실행하는 일회성 CLI 방식이었으므로, MCP 상태·OAuth·도구 스키마·승인
+요청을 구조적으로 다룰 수 없었다. 이후 Electron 메인 프로세스가 소유하는 장기
+실행 `codex app-server` JSON-RPC 세션으로 교체했고(2026-09-29 확인: Codex 경로는
+App Server만 사용, `codex exec` 호출 없음), Claude 경로는 자체 `--print` 모드를
+사용한다. 아래 2.2 다이어그램의 `codex exec` 표기는 구 방식의 기록으로 본다.
 
 ## 2. 조사 근거
 
@@ -366,14 +368,14 @@ CREATE TABLE external_publications (
 
 - [x] KsNote가 `codex app-server`와 초기화·종료를 안정적으로 수행한다.
 - [x] Codex 로그인과 Rovo OAuth 상태를 구조화된 값으로 표시한다.
-- [ ] 도구명을 하드코딩하지 않고 런타임 schema에서 Confluence 생성 도구를 찾는다.
-- [ ] 현재 노트를 유효한 ADF로 변환하고 schema 검증한다.
-- [ ] 표의 구조·병합·열 너비가 Confluence에서 허용 범위 내 유지된다.
-- [ ] 지원하지 않는 이미지가 게시 전에 명확히 표시된다.
-- [ ] 사용자가 대상·본문·경고를 확인한 뒤에만 쓰기 호출이 시작된다.
-- [ ] Codex/App MCP 승인 요청을 KsNote UI에서 승인 또는 거절할 수 있다.
-- [ ] 성공한 페이지의 ID, URL, source revision, hash가 SQLite에 저장된다.
-- [ ] 취소·거절·로그인 만료·권한 부족이 서로 다른 오류로 표시된다.
+- [x] 도구명을 하드코딩하지 않고 런타임 schema에서 Confluence 생성 도구를 찾는다.
+- [x] 현재 노트를 유효한 ADF로 변환하고 schema 검증한다.
+- [x] 표의 구조·병합·열 너비가 Confluence에서 허용 범위 내 유지된다.
+- [x] 지원하지 않는 이미지가 게시 전에 명확히 표시된다.
+- [x] 사용자가 대상·본문·경고를 확인한 뒤에만 쓰기 호출이 시작된다.
+- [x] Codex/App MCP 승인 요청을 KsNote UI에서 승인 또는 거절할 수 있다.
+- [x] 성공한 페이지의 ID, URL, source revision, hash가 SQLite에 저장된다.
+- [x] 취소·거절·로그인 만료·권한 부족이 서로 다른 오류로 표시된다.
 - [x] 일반 AI 질문과 Rovo 조사 모드는 계속 외부 쓰기가 불가능하다.
 
 ## 8. 후속 증분

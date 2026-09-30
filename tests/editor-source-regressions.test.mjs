@@ -144,8 +144,7 @@ test("click targets insert at the anchored block offset", () => {  assert.match(
   assert.match(editorSource, /from "\.\/block-anchor\.mjs"/);
 });
 
-test("history restores apply as full-content replacements", () => {
-  assert.match(
+test("history restores apply as full-content replacements", () => {  assert.match(
     editorSource,
     /claimed\.type === "history_restore"/,
   );
@@ -155,4 +154,177 @@ test("history restores apply as full-content replacements", () => {
   );
   assert.match(appSource, /claimed\.type === "history_restore"/);
   assert.match(appSource, /복원된 스냅샷/);
+});
+
+test("model management, search picker, and API routing are wired", () => {  assert.match(appSource, /setSettingsTab\("models"\)/);
+  assert.match(appSource, /공급자 연결/);
+  assert.match(appSource, /ksnoteModels\?\.fetchRemote/);
+  assert.match(appSource, /ksnoteModels\?\.saveKey/);
+  assert.match(editorSource, /ai-model-picker/);
+  assert.match(editorSource, /모델 검색/);
+  assert.match(editorSource, /Reasoning effort 선택/);
+  assert.match(editorSource, /reasoningEffort/);
+  assert.match(editorSource, /selectedModel\?\.rawId \|\| selectedModel\?\.id/);
+  assert.match(mainSource, /runApiCompletion/);
+  assert.match(mainSource, /\/chat\/completions/);
+  assert.match(mainSource, /effort: request\.reasoningEffort/);
+});
+
+test("note_patch replaces one block by stable id", () => {
+  assert.match(
+    editorSource,
+    /resolveBlockNode\(editor\.state\.doc, claimed\.blockId\)/,
+  );
+  assert.match(
+    editorSource,
+    /\.insertContentAt\(patchTarget\.pos, claimed\.html \|\| ""\)/,
+  );
+  assert.match(appSource, /claimed\.type === "note_patch"/);
+  assert.match(appSource, /findBlockById\(nextContent, claimed\.blockId\)/);
+  assert.match(appSource, /교체된 블록 소스/);
+});
+
+test("note_move applies data-level and guards the editor", () => {
+  assert.match(appSource, /item\.type === "note_move"/);
+  assert.match(appSource, /targetProjectId/);
+  assert.match(
+    editorSource,
+    /editorSupportedTypes = new Set\(\[/,
+  );
+});
+
+test("task tools query and update by task index", () => {
+  assert.match(appSource, /item\.type === "task_update"/);
+  assert.match(appSource, /li\[data-type="taskItem"\], li\[data-checked\]/);
+  assert.match(appSource, /data-checked", patch\.checked \? "true" : "false"/);
+});
+
+test("task_query prefers the materialized index with scan fallback", async () => {
+  const serverSource = await readFile(
+    new URL("../mcp/ksnote-server.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(serverSource, /readTaskIndex\(paths\)/);
+  assert.match(serverSource, /isIndexFresh\(index, updatedAt\)/);
+  assert.match(serverSource, /source: "index"/);
+  assert.match(serverSource, /source: "scan"/);
+  const mainSource = await readFile(
+    new URL("../electron/main.cjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(mainSource, /refreshTaskIndex\(data, now\)/);
+  assert.match(mainSource, /task-index\.json/);
+});
+
+test("AI edits re-resolve the target block by stable id", () => {
+  assert.match(
+    editorSource,
+    /aiTargetRef\.current = \{[\s\S]*?blockId: editContext\.blockId/,
+  );
+  assert.match(
+    editorSource,
+    /const resolved = resolveBlockNode\(editor\.state\.doc, target\.blockId\)/,
+  );
+  assert.match(
+    editorSource,
+    /resolveBlockOffset\(\s*editor\.state\.doc,\s*target\.toBlockId,\s*target\.toBlockOffset/,
+  );
+});
+
+test("research mode offers structured Rovo read queries", () => {
+  assert.match(editorSource, /from "\.\/atlassian\/rovo-read\.mjs"/);
+  assert.match(editorSource, /buildRovoStatusInstruction\(\)/);
+  assert.match(editorSource, /buildRovoPageInstruction\(entry\)/);
+  assert.match(editorSource, /buildRovoIssueInstruction\(entry\)/);
+  assert.match(editorSource, /buildRovoSearchInstruction\(aiPrompt\)/);
+  assert.match(editorSource, /parseRovoPayload\(rawOutput\)/);
+  assert.match(editorSource, /rovoToQuoteHtml\(rovo, queriedAt\)/);
+  assert.match(editorSource, /ai-rovo-card/);
+});
+
+test("publish dialog previews ADF and routes approvals", () => {
+  assert.match(appSource, /ksnotePublish\?\.discover/);
+  assert.match(appSource, /convertNoteToAdf\(note\.content/);
+  assert.match(appSource, /validateAdf\(conversion\.document\)/);
+  assert.match(appSource, /ksnotePublish\?\.publish\(/);
+  assert.match(appSource, /onApproval\?/);
+  assert.match(appSource, /publish-modal/);
+  assert.match(mainSource, /atlassian-publish-approval/);
+  assert.match(mainSource, /atlassian-publish-page/);
+  assert.match(mainSource, /external_publications/);
+  assert.match(mainSource, /mcpServerToolCall/);
+});
+
+test("research answers carry per-paragraph citations", () => {
+  assert.match(mainSource, /cite each paragraph with markers like \[1\], \[2\]/);
+  assert.match(editorSource, /extractCitedSources\(rawOutput\)/);
+  assert.match(editorSource, /linkCitationMarkers\(output, cited\)/);
+  assert.match(editorSource, /aiResult\.cited\?\.length/);
+});
+
+test("write actions route to the separated publish dialog", () => {
+  assert.match(editorSource, /ksnote-open-publish/);
+  assert.match(editorSource, /게시\(쓰기 모드\)/);
+  assert.match(appSource, /ksnote-open-publish/);
+  assert.match(appSource, /openPublishRef/);
+});
+
+test("approval dialog shows a before-after diff", () => {
+  assert.match(appSource, /from "\.\.\/mcp\/operation-diff\.mjs"/);
+  assert.match(appSource, /buildOperationDiff\(mcpApproval/);
+  assert.match(appSource, /mcp-review-diff/);
+  assert.match(appSource, /diff\.beforeLabel/);
+  assert.match(appSource, /diff\.afterHtml/);
+});
+
+test("asset reads prefer the repository index", async () => {
+  const serverSource = await readFile(
+    new URL("../mcp/ksnote-server.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(serverSource, /readAssetIndex\(paths\)/);
+  assert.match(serverSource, /index\.indexed \? index\.rows/);
+  assert.match(mainSource, /ensureAssetTable\(noteDb\)/);
+  assert.match(mainSource, /indexAssetDirectory\(\)/);
+  assert.match(mainSource, /indexSingleAsset\(assetPath, assetName\)/);
+});
+
+test("save status is visible with failure feedback", () => {
+  assert.match(appSource, /save-status/);
+  assert.match(appSource, /저장됨/);
+  assert.match(appSource, /저장 중…/);
+  assert.match(appSource, /저장 실패/);
+  assert.match(appSource, /setSaveError/);
+});
+
+test("confirmations stay inside the app", () => {
+  assert.doesNotMatch(editorSource, /window\.confirm\(/);
+  assert.match(editorSource, /confirmAsync\(/);
+  assert.match(editorSource, /editor-confirm/);
+  assert.match(editorSource, /resolveConfirm\(false\)/);
+  assert.match(editorSource, /confirmRequest/);
+});
+
+test("AI results expand for long answers", () => {
+  assert.match(editorSource, /ai-response expanded/);
+  assert.match(editorSource, /setAiExpanded/);
+  assert.match(editorSource, /펼치기/);
+});
+
+test("toasts stay readable", () => {
+  assert.match(appSource, /\? 8000 : 4500/);
+  assert.doesNotMatch(appSource, /\? 8000 : 2600/);
+});
+
+test("MCP server deploys over Streamable HTTP with auth", async () => {
+  const serverSource = await readFile(
+    new URL("../mcp/ksnote-server.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(serverSource, /KSNOTE_MCP_TRANSPORT/);
+  assert.match(serverSource, /StreamableHTTPServerTransport/);
+  assert.match(serverSource, /sessionIdGenerator: undefined/);
+  assert.match(serverSource, /KSNOTE_MCP_TOKEN/);
+  assert.match(serverSource, /\/health/);
+  assert.match(serverSource, /KSNOTE_MCP_ALLOWED_HOSTS/);
 });

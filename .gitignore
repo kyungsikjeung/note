@@ -3,5 +3,8 @@ dist/
 release/
 release*/
 build-resources/codex/
+electron/codex-app-server-schema/
 *.log
 .DS_Store
+
+packaged-mcp-test/

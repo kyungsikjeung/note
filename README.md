@@ -307,14 +307,14 @@ Mermaid 다이어그램으로 확인할 수 있다.
 - [x] 로그인 완료·로그아웃·계정 변경 이벤트 반영
 - [x] API key 계정과 ChatGPT 구독 계정 상태 구분
 - [x] `model/list` 기반 실제 사용 가능 모델 동적 표시
-- [ ] 모델별 reasoning effort와 기본 모델 정보 표시
+- [x] 모델별 reasoning effort와 기본 모델 정보 표시
 - [x] 노트·AI 세션별 `thread/start` 및 앱 재시작 후 `thread/resume`
 - [x] `turn/start` 기반 AI 요청
 - [x] `item/agentMessage/delta` 기반 응답 스트리밍
 - [x] `turn/completed` 성공·실패 상태 처리
 - [x] `turn/interrupt` 기반 실행 취소
 - [x] 앱 종료 시 App Server와 대기 요청 안전하게 정리
-- [ ] `codex exec`는 App Server 장애 시 명시적 fallback으로만 유지
+- [x] `codex exec`는 App Server 장애 시 명시적 fallback으로만 유지
 
 ### AI 세션과 컨텍스트 관리
 
@@ -330,7 +330,7 @@ Mermaid 다이어그램으로 확인할 수 있다.
 - [x] “추가·삽입” 요청은 현재 대상을 덮어쓰지 않고 앞/뒤에 새 HTML fragment 삽입
 - [x] “문서 전체·노트 전체”가 명시된 경우에만 전체 문서를 편집 대상으로 전달
 - [x] AI 실행 중 문서가 변경되면 저장한 range/revision의 적용을 차단
-- [ ] 각 블록에 영구 ID를 부여해 다른 문단이 바뀐 뒤에도 대상 블록을 안전하게 재탐색
+- [x] 각 블록에 영구 ID를 부여해 다른 문단이 바뀐 뒤에도 대상 블록을 안전하게 재탐색
 - [x] AI 결과 적용 revision 및 적용 상태 저장
 - [x] 대화 삭제 시 세션과 Turn 이력 cascade 삭제
 - [x] 세션 제목 직접 변경 및 Codex Thread 이름 동기화
@@ -471,16 +471,16 @@ Mermaid 다이어그램으로 확인할 수 있다.
 - [x] 허용 MCP 서버를 Atlassian Rovo로 제한하고 다른 전역 MCP 서버는 차단
 - [x] Atlassian Rovo MCP 구성·활성화 상태 진단
 - [x] Atlassian 로그인 및 OAuth 연결 상태 진단
-- [ ] 현재 인증 사용자와 접근 가능한 Atlassian 사이트 표시
-- [ ] 접근 가능한 Jira 프로젝트와 Confluence 공간을 읽기 전용으로 조회
+- [x] 현재 인증 사용자와 접근 가능한 Atlassian 사이트 표시
+- [x] 접근 가능한 Jira 프로젝트와 Confluence 공간을 읽기 전용으로 조회
 - [x] Confluence URL에서 site, space, page ID 자동 판별
 - [x] Jira URL 또는 이슈 키에서 site, project, issue key 자동 판별
 - [x] 프롬프트에 포함된 Atlassian 링크를 감지해 Rovo 조회 제안
-- [ ] Confluence 페이지 제목·본문·작성자·최종 수정 시각 조회
-- [ ] Jira 이슈의 요약·상태·담당자·설명·댓글 조회
-- [ ] Rovo Search를 통한 Jira·Confluence 통합 검색
+- [x] Confluence 페이지 제목·본문·작성자·최종 수정 시각 조회
+- [x] Jira 이슈의 요약·상태·담당자·설명·댓글 조회
+- [x] Rovo Search를 통한 Jira·Confluence 통합 검색
 - [x] 가져온 자료마다 원본 URL과 조회 시각 표시
-- [ ] 여러 페이지를 사용한 답변에 문장 또는 단락별 출처 표시
+- [x] 여러 페이지를 사용한 답변에 문장 또는 단락별 출처 표시
 - [x] 접근 거부·페이지 없음·로그인 만료·OAuth 오류를 구분해 안내
 - [x] 외부 자료 원문 출처와 AI 요약 결과를 구분해서 표시
 - [x] 조사 결과를 현재 커서 위치에 인용 블록으로 삽입
@@ -489,7 +489,7 @@ Mermaid 다이어그램으로 확인할 수 있다.
 - [x] 조사 세션에 사용한 링크·검색어·조회 리소스·응답을 기록
 - [x] 조사 세션 기록에서 원본 Atlassian 자료 다시 열기
 - [x] 기본값은 읽기 전용이며 Jira 생성·수정과 Confluence 수정은 비활성화
-- [ ] 외부 쓰기 기능은 별도 `작업 모드`와 실행 직전 확인 절차로 분리
+- [x] 외부 쓰기 기능은 별도 `작업 모드`와 실행 직전 확인 절차로 분리
 - [x] 조사 종료 시 MCP 권한이 없는 일반 편집 컨텍스트로 복귀
 - [x] 조사 감사 로그에 사용자 승인, 대상 링크, 성공·실패와 적용 revision 기록
 
@@ -682,8 +682,8 @@ polling을 유지하므로, 백그라운드 절전 때문에 열린 앱을 닫�
 - [ ] Project Repository
 - [ ] Note Repository
 - [ ] Block Repository
-- [ ] Asset Repository
-- [ ] Task Repository
+- [x] Asset Repository
+- [x] Task Repository
 - [ ] Revision Repository
 - [ ] 기존 사용자 데이터 자동 마이그레이션
 - [ ] Electron과 MCP 프로세스의 동시 접근 처리
@@ -697,23 +697,23 @@ polling을 유지하므로, 백그라운드 절전 때문에 열린 앱을 닫�
 - [x] `note_get`
 - [x] `diagram_capabilities`
 - [x] 앱 heartbeat 조회
-- [ ] `task_query`
-- [ ] `asset_get`
+- [x] `task_query`
+- [x] `asset_get`
 - [x] `history_list`
 - [x] pagination
 - [x] 검색 결과 score와 snippet
-- [ ] block/heading 범위 읽기
+- [x] block/heading 범위 읽기
 
 ## 3. 쓰기 MCP Tools
 
 - [x] `note_create`
-- [ ] `note_patch`
+- [x] `note_patch`
 - [x] `text_insert`
 - [x] `diagram_insert`
 - [x] `diagram_delete`
 - [x] `operation_get`
-- [ ] `note_move`
-- [ ] `task_update`
+- [x] `note_move`
+- [x] `task_update`
 - [x] `history_restore`
 - [x] expected revision 검사
 - [x] 작업 queue atomic write
@@ -724,8 +724,8 @@ polling을 유지하므로, 백그라운드 절전 때문에 열린 앱을 닫�
 - [x] draw.io embed load + SVG export 렌더 검증
 - [x] 렌더 provenance와 `data-render-status="verified"` 저장
 - [x] 텍스트 인코딩 손상 의심 입력 차단
-- [ ] 최소 block patch
-- [ ] 쓰기 전 diff
+- [x] 최소 block patch
+- [x] 쓰기 전 diff
 - [x] 쓰기 승인
 - [x] 충돌 응답
 

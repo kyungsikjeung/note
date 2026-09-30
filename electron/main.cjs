@@ -9,7 +9,32 @@ const { gfm } = require("turndown-plugin-gfm");
 const initSqlJs = require("sql.js");
 const { Document, Packer, Paragraph, HeadingLevel, Table: DocxTable, TableRow: DocxRow, TableCell: DocxCell } = require("docx");
 const { CodexAppServerClient } = require("./codex-app-server-client.cjs");
+const {
+  buildAssetRow,
+  needsReindex,
+  ensureAssetTable,
+  readAssetRows,
+  getAssetRow,
+  upsertAssetRow,
+} = require("./asset-repository.cjs");
 const { createSerializedFileWriter, writeFileAtomic } = require("./atomic-write.cjs");
+const {
+  findRovoServer,
+  rovoReadiness,
+  listServerTools,
+  findConfluenceCreateTool,
+  findSpaceListTool,
+  buildCreatePageArgs,
+  classifyPublishError,
+  checkAdfDocument,
+  publicationIdempotencyKey,
+} = require("./atlassian-rovo-service.cjs");
+const {
+  normalizeProvider,
+  saveApiKey,
+  readApiKey,
+  fetchProviderModels,
+} = require("./model-providers.cjs");
 
 const isDev = !app.isPackaged;
 const isMcpMode = process.argv.includes("--ksnote-mcp");
@@ -20,6 +45,7 @@ let mainWindow;
 const writeDatabaseSnapshot = createSerializedFileWriter();
 const aiProcesses = new Map();
 let codexAppServer;
+let activePublish = null;
 
 function writeRuntimeLog(event, details = {}) {
   try {
@@ -196,6 +222,19 @@ function getCodexAppServer(command = "codex") {
       if (method === "account/updated" || method === "account/login/completed")
         broadcast("codex-account-event", { method, ...params });
     });
+    codexAppServer.on("approval", ({ approvalId, method, params }) => {
+      if (activePublish && !activePublish.settled) {
+        activePublish.approvalId = approvalId;
+        broadcast("atlassian-publish-approval", {
+          requestId: activePublish.requestId,
+          approvalId,
+          method,
+          params,
+        });
+        return;
+      }
+      codexAppServer.resolveApproval(approvalId, { decision: "declined" });
+    });
   }
   return codexAppServer;
 }
@@ -237,6 +276,8 @@ async function initializeStorage() {
   noteDb.run("CREATE TABLE IF NOT EXISTS revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, note_id TEXT NOT NULL, title TEXT, content TEXT NOT NULL, created_at INTEGER NOT NULL)");
   noteDb.run("CREATE TABLE IF NOT EXISTS ai_sessions (id TEXT PRIMARY KEY, project_id TEXT, note_id TEXT NOT NULL, mode TEXT NOT NULL, provider TEXT NOT NULL, thread_id TEXT, title TEXT, model TEXT, last_revision TEXT, last_content TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)");
   noteDb.run("CREATE TABLE IF NOT EXISTS ai_turns (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, instruction TEXT NOT NULL, response TEXT, status TEXT NOT NULL, source_revision TEXT, applied_revision TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY(session_id) REFERENCES ai_sessions(id) ON DELETE CASCADE)");
+  noteDb.run("CREATE TABLE IF NOT EXISTS external_publications (id INTEGER PRIMARY KEY AUTOINCREMENT, note_id TEXT NOT NULL, provider TEXT NOT NULL, cloud_id TEXT NOT NULL, remote_type TEXT NOT NULL, remote_id TEXT NOT NULL, remote_url TEXT, source_revision TEXT NOT NULL, content_hash TEXT NOT NULL, status TEXT NOT NULL, request_id TEXT NOT NULL, created_at INTEGER NOT NULL)");
+  ensureAssetTable(noteDb);
   for (const migration of [
     "ALTER TABLE ai_sessions ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE ai_sessions ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
@@ -251,6 +292,7 @@ async function initializeStorage() {
   }
   await flushDatabase();
   await ensureMcpDirectories();
+  await indexAssetDirectory().catch(() => {});
 }
 
 async function flushDatabase() {
@@ -258,6 +300,65 @@ async function flushDatabase() {
   const snapshot = Buffer.from(noteDb.export());
   await writeDatabaseSnapshot(noteDbPath, snapshot);
 }
+
+async function indexAssetDirectory() {
+  if (!noteDb || !noteDbPath) return { indexed: 0, pruned: 0 };
+  const assetDir = path.join(app.getPath("userData"), "assets");
+  let files;
+  try {
+    files = await fs.readdir(assetDir);
+  } catch {
+    return { indexed: 0, pruned: 0 };
+  }
+  ensureAssetTable(noteDb);
+  const seen = new Set();
+  let indexed = 0;
+  for (const file of files) {
+    const assetPath = path.join(assetDir, file);
+    let stat;
+    try {
+      stat = await fs.stat(assetPath);
+      if (!stat.isFile()) continue;
+    } catch {
+      continue;
+    }
+    seen.add(file);
+    const existing = getAssetRow(noteDb, file);
+    const candidate = { name: file, size: stat.size, mtime: Math.floor(stat.mtimeMs) };
+    if (!needsReindex(existing, candidate)) continue;
+    let bytes;
+    try {
+      bytes = await fs.readFile(assetPath);
+    } catch {
+      continue;
+    }
+    upsertAssetRow(noteDb, buildAssetRow({ ...candidate, bytes }));
+    indexed += 1;
+  }
+  let pruned = 0;
+  for (const row of readAssetRows(noteDb).rows) {
+    if (!seen.has(row.name)) {
+      noteDb.run("DELETE FROM assets WHERE name=?", [row.name]);
+      pruned += 1;
+    }
+  }
+  if (indexed || pruned) await flushDatabase();
+  return { indexed, pruned };
+}
+
+const indexSingleAsset = async (assetPath, file) => {
+  if (!noteDb) return;
+  try {
+    const stat = await fs.stat(assetPath);
+    const bytes = await fs.readFile(assetPath);
+    ensureAssetTable(noteDb);
+    upsertAssetRow(
+      noteDb,
+      buildAssetRow({ name: file, size: stat.size, mtime: Math.floor(stat.mtimeMs), bytes }),
+    );
+    await flushDatabase();
+  } catch {}
+};
 
 ipcMain.handle("storage-load", async () => {
   const result = noteDb.exec("SELECT json FROM app_state WHERE id=1");
@@ -280,8 +381,24 @@ ipcMain.handle("storage-save", async (_, data) => {
   noteDb.run("INSERT INTO app_state(id,json,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json, updated_at=excluded.updated_at", [JSON.stringify(data), now]);
   noteDb.run("DELETE FROM revisions WHERE id IN (SELECT id FROM revisions r WHERE (SELECT COUNT(*) FROM revisions newer WHERE newer.note_id=r.note_id AND newer.id>=r.id)>50)");
   await flushDatabase();
+  await refreshTaskIndex(data, now).catch(() => {});
   return true;
 });
+
+let taskIndexModule = null;
+async function refreshTaskIndex(data, updatedAt) {
+  if (!taskIndexModule) {
+    const moduleUrl = pathToFileURL(
+      path.join(__dirname, "..", "mcp", "task-index.mjs"),
+    ).href;
+    taskIndexModule = await import(moduleUrl);
+  }
+  const index = taskIndexModule.buildTaskIndex(data?.notes, updatedAt);
+  await writeJsonAtomic(
+    path.join(path.dirname(noteDbPath), "task-index.json"),
+    index,
+  );
+}
 
 ipcMain.handle("mcp-info", async () => {
   await ensureMcpDirectories();
@@ -641,6 +758,7 @@ ipcMain.handle("asset-save", async (_, { name, dataUrl }) => {
   const assetName = `${Date.now()}-${Math.random().toString(16).slice(2)}.${extension}`;
   const assetDir = path.join(app.getPath("userData"), "assets"); await fs.mkdir(assetDir, { recursive: true });
   const assetPath = path.join(assetDir, assetName); await fs.writeFile(assetPath, Buffer.from(match[2], "base64"));
+  await indexSingleAsset(assetPath, assetName);
   return { path: assetPath, name: assetName };
 });
 
@@ -714,6 +832,7 @@ ipcMain.handle("image-generate", async (_, request = {}) => {
   const assetPath = path.join(assetDir, assetName);
   await fs.writeFile(assetPath, bytes);
   const mime = imageMimeFromPath(assetPath);
+  await indexSingleAsset(assetPath, assetName);
   return {
     src: `data:${mime};base64,${bytes.toString("base64")}`,
     path: assetPath,
@@ -857,6 +976,116 @@ ipcMain.handle("codex-model-list", async (_, request = {}) => {
   return server.modelList();
 });
 
+const apiControllers = new Map();
+
+const runApiCompletion = async ({
+  baseUrl,
+  apiKey,
+  model,
+  system,
+  prompt,
+  effort,
+  requestId,
+  onChunk,
+}) => {
+  const endpoint = `${String(baseUrl || "").replace(/\/+$/, "")}/chat/completions`;
+  const controller = new AbortController();
+  if (requestId) apiControllers.set(requestId, controller);
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://ksnote.local",
+        "X-Title": "KsNote",
+      },
+      body: JSON.stringify({
+        model,
+        stream: true,
+        messages: [
+          ...(system ? [{ role: "system", content: system }] : []),
+          { role: "user", content: prompt },
+        ],
+        ...(effort && effort !== "auto" ? { reasoning: { effort } } : {}),
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => "");
+      let message = `API 호출 실패 (HTTP ${response.status})`;
+      try {
+        const parsed = text ? JSON.parse(text) : null;
+        if (parsed?.error?.message) message = parsed.error.message;
+      } catch {}
+      throw new Error(message);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let output = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop();
+      for (const part of parts) {
+        const line = part
+          .split("\n")
+          .map((item) => item.trim())
+          .find((item) => item.startsWith("data:"));
+        if (!line) continue;
+        const payload = line.slice("data:".length).trim();
+        if (!payload || payload === "[DONE]") continue;
+        try {
+          const delta =
+            JSON.parse(payload)?.choices?.[0]?.delta?.content || "";
+          if (delta) {
+            output += delta;
+            onChunk?.(delta);
+          }
+        } catch {}
+      }
+    }
+    if (!output) throw new Error("API가 빈 응답을 반환했습니다.");
+    return output;
+  } finally {
+    if (requestId) apiControllers.delete(requestId);
+  }
+};
+
+ipcMain.handle("model-provider-fetch", async (_, request = {}) => {
+  const provider = normalizeProvider(request.provider);
+  if (!provider.id) throw new Error("공급자 ID가 필요합니다.");
+  if (request.apiKey !== undefined)
+    await saveApiKey(provider.id, String(request.apiKey || ""));
+  const models = await fetchProviderModels({ ...provider, baseUrl: request.baseUrl || provider.baseUrl });
+  return { ok: true, models, fetchedAt: Date.now() };
+});
+
+ipcMain.handle("model-provider-test", async (_, request = {}) => {
+  const provider = normalizeProvider(request.provider);
+  if (!provider.baseUrl) throw new Error("Base URL을 입력해 주세요.");
+  const apiKey = request.apiKey !== undefined
+    ? String(request.apiKey || "")
+    : await readApiKey(provider.id);
+  const { fetchJson } = require("./model-providers.cjs");
+  const result = await fetchJson(`${provider.baseUrl}/models`, apiKey);
+  if (!result.ok)
+    throw new Error(
+      result.json?.error?.message || `연결 실패 (HTTP ${result.status})`,
+    );
+  return { ok: true, modelCount: (result.json.data || []).length };
+});
+
+ipcMain.handle("model-provider-key-save", async (_, request = {}) => {
+  const id = String(request?.providerId || "");
+  if (!id) throw new Error("공급자 ID가 필요합니다.");
+  await saveApiKey(id, String(request.apiKey || ""));
+  return { ok: true, hasKey: Boolean(request.apiKey) };
+});
+
 ipcMain.handle("rovo-diagnose", async (_, request) => {
   const command = String(request?.command || "codex").trim();
   if (!command || /[;&|<>\r\n]/.test(command))
@@ -891,6 +1120,234 @@ ipcMain.handle("rovo-diagnose", async (_, request) => {
         : "Atlassian Rovo가 구성되었지만 OAuth 인증이 필요합니다.")
       : "Atlassian MCP가 아직 구성되지 않았습니다.",
   };
+});
+
+const summarizePublishTool = (entry) => {
+  if (!entry) return null;
+  const schema = entry.tool?.inputSchema;
+  const properties = schema && typeof schema === "object" && !Array.isArray(schema) ? schema.properties : null;
+  return {
+    name: entry.tool.name,
+    title: entry.tool.title || "",
+    description: String(entry.tool.description || "").slice(0, 500),
+    score: entry.score,
+    required: Array.isArray(schema?.required) ? schema.required : [],
+    properties: properties && typeof properties === "object" ? Object.keys(properties) : [],
+  };
+};
+
+const discoverRovoWriteTarget = async (command) => {
+  const server = getCodexAppServer(command);
+  await server.start();
+  const statusResult = await server.mcpServerStatusList("toolsAndAuthOnly");
+  const rovo = findRovoServer(statusResult);
+  const readiness = rovoReadiness(rovo);
+  if (!readiness.ok) return { ok: false, ...readiness, server: rovo?.name || "" };
+  const tools = listServerTools(rovo);
+  const create = findConfluenceCreateTool(tools);
+  const spaceList = findSpaceListTool(tools);
+  if (!create) {
+    return {
+      ok: false,
+      code: "publish_no_create_tool",
+      server: rovo.name,
+      toolCount: tools.length,
+      message: "Rovo 도구 목록에서 Confluence 생성 도구를 찾지 못했습니다.",
+    };
+  }
+  return {
+    ok: true,
+    server,
+    tools,
+    create,
+    spaceList,
+    serverName: rovo.name,
+    toolCount: tools.length,
+  };
+};
+
+const pickPublishField = (result, keys) => {
+  if (!result || typeof result !== "object") return "";
+  for (const key of keys) {
+    const value = result[key];
+    if (typeof value === "string" && value) return value;
+  }
+  const nested = result.result && typeof result.result === "object" ? result.result : null;
+  if (nested) {
+    for (const key of keys) {
+      if (typeof nested[key] === "string" && nested[key]) return nested[key];
+    }
+  }
+  return "";
+};
+
+ipcMain.handle("atlassian-publish-discover", async (_, request = {}) => {
+  const command = String(request.command || "codex").trim();
+  if (!command || /[;&|<>\r\n]/.test(command))
+    throw new Error("Codex 실행 명령을 확인해 주세요.");
+  try {
+    const discovered = await discoverRovoWriteTarget(command);
+    if (!discovered.ok) return discovered;
+    return {
+      ok: true,
+      server: discovered.serverName,
+      toolCount: discovered.toolCount,
+      createTool: summarizePublishTool(discovered.create),
+      spaceListTool: summarizePublishTool(discovered.spaceList),
+    };
+  } catch (error) {
+    return { ok: false, ...classifyPublishError(error), server: "" };
+  }
+});
+
+ipcMain.handle("atlassian-publish-spaces", async (_, request = {}) => {
+  const command = String(request.command || "codex").trim();
+  if (!command || /[;&|<>\r\n]/.test(command))
+    throw new Error("Codex 실행 명령을 확인해 주세요.");
+  const server = getCodexAppServer(command);
+  let threadId = "";
+  try {
+    const discovered = await discoverRovoWriteTarget(command);
+    if (!discovered.ok) return discovered;
+    if (!discovered.spaceList)
+      return { ok: false, code: "publish_no_space_tool", message: "공간 조회 도구가 없어 직접 입력해 주세요." };
+    threadId = await server.openScratchThread();
+    const result = await server.mcpServerToolCall({
+      server: discovered.serverName,
+      threadId,
+      tool: discovered.spaceList.tool.name,
+      args: {},
+      timeoutMs: 120000,
+    });
+    return { ok: true, result: JSON.parse(JSON.stringify(result || {}).slice(0, 20000)) };
+  } catch (error) {
+    return { ok: false, ...classifyPublishError(error) };
+  } finally {
+    await server.closeScratchThread(threadId).catch(() => {});
+  }
+});
+
+ipcMain.handle("atlassian-publish-page", async (_, request = {}) => {
+  const command = String(request.command || "codex").trim();
+  if (!command || /[;&|<>\r\n]/.test(command))
+    throw new Error("Codex 실행 명령을 확인해 주세요.");
+  const noteId = String(request.noteId || "");
+  const title = String(request.title || "").trim();
+  const cloudId = String(request.cloudId || "").trim();
+  const spaceId = String(request.spaceId || "").trim();
+  const parentId = String(request.parentId || "").trim();
+  const adf = request.adf;
+  const sourceRevision = String(request.sourceRevision || "");
+  const contentHash = String(request.contentHash || "");
+  const requestId = String(request.requestId || `publish-${Date.now()}`);
+  if (!noteId || !title || !cloudId || !spaceId)
+    return { ok: false, code: "publish_target_invalid", message: "노트, 제목, cloudId, spaceId를 모두 입력해 주세요." };
+  const adfCheck = checkAdfDocument(adf);
+  if (!adfCheck.ok)
+    return { ok: false, code: "adf_invalid", message: "ADF 문서 구조가 유효하지 않습니다.", issues: adfCheck.issues.slice(0, 10) };
+  const key = publicationIdempotencyKey({ noteId, sourceRevision, contentHash });
+  const duplicateStatement = noteDb.prepare(
+    "SELECT remote_id, remote_url FROM external_publications WHERE note_id=? AND source_revision=? AND content_hash=? AND status='succeeded' LIMIT 1",
+  );
+  duplicateStatement.bind([noteId, sourceRevision, contentHash]);
+  const duplicateRow = duplicateStatement.step() ? duplicateStatement.get() : null;
+  duplicateStatement.free();
+  if (duplicateRow)
+    return {
+      ok: false,
+      code: "publish_duplicate",
+      message: "같은 revision이 이미 게시되었습니다. 중복 생성을 막았습니다.",
+      remoteId: duplicateRow[0],
+      remoteUrl: duplicateRow[1],
+    };
+  if (activePublish && !activePublish.settled)
+    return { ok: false, code: "publish_busy", message: "다른 게시가 진행 중입니다." };
+  const server = getCodexAppServer(command);
+  const createdAt = Date.now();
+  noteDb.run(
+    "INSERT INTO external_publications(note_id,provider,cloud_id,remote_type,remote_id,remote_url,source_revision,content_hash,status,request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+    [noteId, "rovo-confluence", cloudId, "confluence-page", "", "", sourceRevision, contentHash, "pending", requestId, createdAt],
+  );
+  const rowId = noteDb.exec("SELECT last_insert_rowid()")[0].values[0][0];
+  await flushDatabase();
+  activePublish = { requestId, rowId, approvalId: null, settled: false, cancelRequested: false };
+  let threadId = "";
+  try {
+    const discovered = await discoverRovoWriteTarget(command);
+    if (!discovered.ok) {
+      const discoveryError = new Error(discovered.detail || discovered.message || discovered.code);
+      discoveryError.publishCode = discovered.code;
+      throw discoveryError;
+    }
+    const built = buildCreatePageArgs(discovered.create.tool, {
+      cloudId,
+      spaceId,
+      title,
+      body: adf,
+      bodyFormat: "adf",
+      parentId: parentId || undefined,
+    });
+    if (!built.ok) {
+      const error = new Error(`도구 인자 부족: ${built.missing.join(", ")}`);
+      error.publishMissing = built.missing;
+      throw error;
+    }
+    threadId = await server.openScratchThread();
+    const result = await server.mcpServerToolCall({
+      server: discovered.serverName,
+      threadId,
+      tool: discovered.create.tool.name,
+      args: built.args,
+    });
+    const pageId = pickPublishField(result, ["pageId", "id"]);
+    const url = pickPublishField(result, ["url", "link"]);
+    if (activePublish.cancelRequested) {
+      noteDb.run("UPDATE external_publications SET status='cancelled', remote_id=?, remote_url=? WHERE id=?", [pageId, url, rowId]);
+      await flushDatabase();
+      activePublish.settled = true;
+      return { ok: false, code: "publish_cancelled", message: "게시 도중 취소했습니다. 원격 생성 여부는 Confluence에서 확인해 주세요.", remoteId: pageId, remoteUrl: url };
+    }
+    noteDb.run("UPDATE external_publications SET status='succeeded', remote_id=?, remote_url=? WHERE id=?", [pageId, url, rowId]);
+    await flushDatabase();
+    activePublish.settled = true;
+    return { ok: true, pageId, url, sourceRevision, contentHash, idempotencyKey: key, warnings: built.warnings };
+  } catch (error) {
+    const classified = error.publishMissing
+      ? { code: "publish_args_incomplete", message: error.message }
+      : error.publishCode
+        ? { code: error.publishCode, message: error.message }
+        : classifyPublishError(error);
+    const cancelled = activePublish?.cancelRequested || classified.code === "publish_declined";
+    noteDb.run("UPDATE external_publications SET status=? WHERE id=?", [cancelled ? "cancelled" : "failed", rowId]);
+    await flushDatabase();
+    if (activePublish) activePublish.settled = true;
+    return { ok: false, ...classified };
+  } finally {
+    await server.closeScratchThread(threadId).catch(() => {});
+    if (activePublish?.settled) activePublish = null;
+  }
+});
+
+ipcMain.handle("atlassian-publish-approval-resolve", async (_, request = {}) => {
+  if (!activePublish || activePublish.settled || activePublish.approvalId !== request.approvalId)
+    return { ok: false, code: "publish_no_approval", message: "대기 중인 승인 요청이 없습니다." };
+  const server = getCodexAppServer(String(request.command || "codex").trim());
+  const approved = request.decision === "approved";
+  server.resolveApproval(request.approvalId, approved ? { decision: "approved" } : { decision: "declined" });
+  activePublish.approvalId = null;
+  return { ok: true, decision: approved ? "approved" : "declined" };
+});
+
+ipcMain.handle("atlassian-publish-cancel", async (_, request = {}) => {
+  if (!activePublish || activePublish.settled || activePublish.requestId !== request.requestId)
+    return { ok: false, code: "publish_no_active", message: "진행 중인 게시가 없습니다." };
+  const server = getCodexAppServer(String(request.command || "codex").trim());
+  if (activePublish.approvalId) {
+    server.resolveApproval(activePublish.approvalId, { decision: "declined" });
+    activePublish.approvalId = null;
+  }
+  activePublish.cancelRequested = true;
+  return { ok: true, code: "publish_cancel_requested", message: "취소를 요청했습니다." };
 });
 
 ipcMain.handle("plantuml-info", async (_, { jarPath } = {}) => {
@@ -1109,7 +1566,7 @@ ipcMain.handle("ai-run", async (_, request) => {
     throw new Error("외부 쓰기는 별도 작업 모드에서 명시적으로 승인해야 합니다.");
   const system =
     request.mode === "research"
-      ? "Use the configured Atlassian Rovo tools to inspect the Jira or Confluence resources explicitly requested by the user. Read only. Answer in Korean. Include source URLs and a Sources section. Never create, update, or delete external content or local files."
+      ? "Use the configured Atlassian Rovo tools to inspect the Jira or Confluence resources explicitly requested by the user. Read only. Answer in Korean. When you use multiple pages, cite each paragraph with markers like [1], [2] and list every marker under a Sources section as '1. title - url'. Never create, update, or delete external content or local files."
       : request.mode === "ask"
       ? "You answer questions about the supplied note. Answer in Korean, concisely. Do not use tools. Do not modify files."
       : "You are a document editor operating on one explicitly supplied editor target. Return ONLY one JSON object with this exact shape: {\"version\":1,\"operation\":\"replace|insert_before|insert_after\",\"target\":\"note|selection|block|table\",\"blockId\":\"target block id when target=block\",\"expectedRevision\":\"source revision\",\"html\":\"valid HTML fragment\",\"summary\":\"short Korean summary\"}. Obey REQUESTED OPERATION. For insert_before or insert_after, html contains only the new content and must not repeat the existing target. For replace, html contains only the replacement target. Never invent or rewrite content outside the supplied target. Preserve table structure and existing cell style attributes unless explicitly asked to change formatting. Do not use markdown fences, explanations, or tools.";
@@ -1139,6 +1596,69 @@ ipcMain.handle("ai-run", async (_, request) => {
   const command = String(request.command || request.provider || "").trim();
   if (!command || /[;&|<>\r\n]/.test(command))
     throw new Error("AI Agent 실행 명령을 확인해 주세요.");
+  if (request.api?.baseUrl && request.api?.providerId) {
+    if (request.mode === "research")
+      throw new Error("Rovo 조사는 Codex 구독 모델에서만 사용할 수 있습니다.");
+    const apiKey = await readApiKey(String(request.api.providerId));
+    if (!apiKey)
+      throw new Error("공급자 API 키를 설정에서 먼저 연결해 주세요.");
+    const apiProvider = String(request.provider || request.api.providerId);
+    upsertAiSession({
+      id: sessionId,
+      projectId: request.projectId,
+      noteId: request.noteId,
+      mode: request.mode || "edit",
+      provider: apiProvider,
+      threadId: null,
+      title: storedSession?.title || request.instruction.slice(0, 80),
+      model: request.model,
+      lastRevision: storedSession?.last_revision || "",
+      lastContent: storedSession?.last_content || "",
+      createdAt: storedSession?.created_at,
+    });
+    const now = Date.now();
+    try {
+      const output = await runApiCompletion({
+        baseUrl: request.api.baseUrl,
+        apiKey,
+        model: request.model,
+        system,
+        prompt,
+        effort: request.reasoningEffort,
+        requestId: request.requestId,
+        onChunk: (chunk) => _.sender.send("ai-chunk", {
+          requestId: request.requestId,
+          chunk,
+        }),
+      });
+      upsertAiSession({
+        id: sessionId,
+        projectId: request.projectId,
+        noteId: request.noteId,
+        mode: request.mode || "edit",
+        provider: apiProvider,
+        threadId: null,
+        title: storedSession?.title || request.instruction.slice(0, 80),
+        model: request.model,
+        lastRevision: request.sourceRevision,
+        lastContent: currentNoteContent,
+        createdAt: storedSession?.created_at,
+      });
+      noteDb.run(
+        "INSERT OR REPLACE INTO ai_turns(id,session_id,instruction,response,status,source_revision,applied_revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        [request.requestId, sessionId, request.instruction, output, "done", request.sourceRevision || "", "", now, Date.now()],
+      );
+      await flushDatabase();
+      return output;
+    } catch (error) {
+      noteDb.run(
+        "INSERT OR REPLACE INTO ai_turns(id,session_id,instruction,response,status,source_revision,applied_revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        [request.requestId, sessionId, request.instruction, error.message, "error", request.sourceRevision || "", "", now, Date.now()],
+      );
+      await flushDatabase();
+      throw error;
+    }
+  }
   if (request.provider === "claude")
     return runCli(
       command,
@@ -1175,6 +1695,7 @@ ipcMain.handle("ai-run", async (_, request) => {
       existingThreadId: threadId,
       prompt,
       model: request.model,
+      effort: request.reasoningEffort,
       developerInstructions: system,
       requestId: request.requestId,
       onThread: (resolvedThreadId) => {
@@ -1276,6 +1797,12 @@ ipcMain.handle("ai-run", async (_, request) => {
 });
 
 ipcMain.handle("ai-cancel", async (_, requestId) => {
+  const apiController = apiControllers.get(requestId);
+  if (apiController) {
+    apiController.abort();
+    apiControllers.delete(requestId);
+    return true;
+  }
   const child = aiProcesses.get(requestId);
   if (child) {
     child.kill();
@@ -1314,6 +1841,20 @@ if (!hasSingleInstanceLock) {
     createWindow();
     writeRuntimeLog("app-ready");
     getCodexAppServer().start().catch(() => {});
+    if (app.isPackaged) {
+      try {
+        const { autoUpdater } = require("electron-updater");
+        autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+          writeRuntimeLog("update-check-failed", {
+            message: error?.message || String(error),
+          });
+        });
+      } catch (error) {
+        writeRuntimeLog("updater-unavailable", {
+          message: error?.message || String(error),
+        });
+      }
+    }
   }).catch((error) => {
     writeRuntimeLog("startup-failed", {
       message: error?.message || String(error),

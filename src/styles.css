@@ -364,6 +364,13 @@ button {
   font-size: 11px;
   margin-top: 7px;
 }
+.save-status {
+  color: #147d72;
+}
+.save-status.error {
+  color: #aa4b37;
+  font-weight: 700;
+}
 .editor-shell {
   min-height: 0;
   flex: 1;
@@ -688,6 +695,36 @@ button {
   min-height: 220px;
   padding: 18px;
   background: #fbfdfc;
+}
+.mcp-review-diff {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #e5ebea;
+}
+.mcp-review-diff section b {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 10px;
+  color: #172426;
+}
+.mcp-review-diff-pane {
+  max-height: 240px;
+  overflow: auto;
+  padding: 9px 11px;
+  border: 1px solid #dfe7e6;
+  border-radius: 7px;
+  background: #fbfdfc;
+  font-size: 11px;
+}
+.mcp-review-diff section:first-child .mcp-review-diff-pane {
+  background: #fdf6f4;
+  border-color: #ecd9d3;
+}
+.mcp-review-diff section:last-child .mcp-review-diff-pane {
+  background: #f1f9f7;
+  border-color: #cde4df;
 }
 .mcp-review-dialog details {
   min-height: 0;
