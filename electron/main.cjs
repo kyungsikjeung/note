@@ -8,7 +8,7 @@ const TurndownService = require("turndown");
 const { gfm } = require("turndown-plugin-gfm");
 const initSqlJs = require("sql.js");
 const { Document, Packer, Paragraph, HeadingLevel, Table: DocxTable, TableRow: DocxRow, TableCell: DocxCell } = require("docx");
-const { CodexAppServerClient } = require("./codex-app-server-client.cjs");
+const { CodexAppServerClient, killProcessTree } = require("./codex-app-server-client.cjs");
 const {
   buildAssetRow,
   needsReindex,
@@ -17,7 +17,7 @@ const {
   getAssetRow,
   upsertAssetRow,
 } = require("./asset-repository.cjs");
-const { createSerializedFileWriter, writeFileAtomic } = require("./atomic-write.cjs");
+const { createSerializedFileWriter, sweepAtomicTempFiles, writeFileAtomic } = require("./atomic-write.cjs");
 const {
   findRovoServer,
   rovoReadiness,
@@ -241,7 +241,8 @@ function getCodexAppServer(command = "codex") {
   if (!safeCommand || /[;&|<>`"\r\n]/.test(safeCommand))
     throw new Error("AI Agent 실행 명령을 확인해 주세요.");
   if (codexAppServer && codexAppServer.command !== safeCommand) {
-    codexAppServer.stop();
+    const stopped = codexAppServer.stop();
+    stopped.catch(() => {});
     codexAppServer = null;
   }
   if (!codexAppServer) {
@@ -303,6 +304,7 @@ function htmlToDocxChildren(html, title) {
 async function initializeStorage() {
   const SQL = await initSqlJs({ locateFile: () => require.resolve("sql.js/dist/sql-wasm.wasm") });
   noteDbPath = path.join(app.getPath("userData"), "ksnote.db");
+  await sweepAtomicTempFiles(noteDbPath).catch(() => {});
   let bytes;
   try { bytes = await fs.readFile(noteDbPath); } catch {}
   noteDb = bytes ? new SQL.Database(bytes) : new SQL.Database();
@@ -326,13 +328,39 @@ async function initializeStorage() {
   }
   await flushDatabase();
   await ensureMcpDirectories();
+  // Crash residue: temp files from atomic writes (heartbeat/target/secrets and
+  // queued MCP operation payloads) must never accumulate or be re-read.
+  const mcpDir = getMcpDirectory();
+  for (const name of ["heartbeat.json", "current-target.json", "task-index.json"]) {
+    await sweepAtomicTempFiles(path.join(mcpDir, name)).catch(() => {});
+  }
+  await sweepAtomicTempFiles(
+    path.join(app.getPath("userData"), "ksnote-secrets.json"),
+  ).catch(() => {});
+  try {
+    const operationEntries = await fs.readdir(getMcpOperationDirectory());
+    for (const entry of operationEntries) {
+      if (!entry.endsWith(".tmp")) continue;
+      const tempPath = path.join(getMcpOperationDirectory(), entry);
+      const stat = await fs.stat(tempPath).catch(() => null);
+      if (stat && Date.now() - stat.mtimeMs >= 60 * 60 * 1000)
+        await fs.unlink(tempPath).catch(() => {});
+    }
+  } catch {}
   await indexAssetDirectory().catch(() => {});
 }
 
 async function flushDatabase() {
   if (!noteDb || !noteDbPath) return;
   const snapshot = Buffer.from(noteDb.export());
-  await writeDatabaseSnapshot(noteDbPath, snapshot);
+  try {
+    await writeDatabaseSnapshot(noteDbPath, snapshot);
+  } catch (error) {
+    writeRuntimeLog("database-flush-failed", {
+      message: error?.message || String(error),
+    });
+    throw error;
+  }
 }
 
 async function indexAssetDirectory() {
@@ -900,7 +928,10 @@ ipcMain.handle("image-generate", async (_, request = {}) => {
   const command = String(request.command || "codex").trim();
   if (!command || /[;&|<>\r\n]/.test(command))
     throw new Error("Codex 실행 명령을 확인해 주세요.");
-  const requestId = request.requestId || `imggen-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const requestId = request.requestId
+    || (typeof globalThis.crypto?.randomUUID === "function"
+      ? `imggen-${globalThis.crypto.randomUUID()}`
+      : `imggen-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const scratchDir = await ensureAiScratchDirectory();
   const system = [
     "You generate one raster image for a local note-taking app.",
@@ -983,7 +1014,7 @@ ipcMain.handle("command-test", async (_, { commandLine, mode = "cli" }) => {
   return new Promise((resolve) => {
     const child = spawn(parts[0], mode === "cli" ? [...parts.slice(1), "--version"] : parts.slice(1), { windowsHide: true, shell: process.platform === "win32" });
     let output = "";
-    const finish = (ok, message) => { try { child.kill(); } catch {} resolve({ ok, message: String(message || "").trim().slice(0, 300) }); };
+    const finish = (ok, message) => { killProcessTree(child); resolve({ ok, message: String(message || "").trim().slice(0, 300) }); };
     const timer = setTimeout(() => finish(mode === "mcp", mode === "mcp" ? "서버 프로세스가 정상적으로 시작되었습니다." : "응답 시간이 초과되었습니다."), 4000);
     child.stdout.on("data", (data) => { output += data; if (mode === "mcp") { clearTimeout(timer); finish(true, output || "서버가 응답했습니다."); } });
     child.stderr.on("data", (data) => { output += data; });
@@ -1004,7 +1035,7 @@ function captureCommand(command, args, timeout = 8000) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      try { child.kill(); } catch {}
+      killProcessTree(child);
       resolve({ ...result, output: output.trim().slice(0, 500) });
     };
     const timer = setTimeout(
@@ -1521,7 +1552,7 @@ ipcMain.handle("plantuml-render", async (_, { code, jarPath } = {}) => {
   return new Promise((resolve, reject) => {
     const child = spawn("java", ["-jar", resolvedJarPath, "-pipe", "-tsvg", "-failfast2"], { windowsHide: true });
     const chunks = []; let error = "";
-    const timer = setTimeout(() => { child.kill(); reject(new Error("PlantUML 렌더링 시간이 초과되었습니다.")); }, 20000);
+    const timer = setTimeout(() => { killProcessTree(child); reject(new Error("PlantUML 렌더링 시간이 초과되었습니다.")); }, 20000);
     child.stdout.on("data", (chunk) => chunks.push(chunk));
     child.stderr.on("data", (chunk) => { error += chunk.toString(); });
     child.on("error", (err) => { clearTimeout(timer); reject(err); });
@@ -1556,19 +1587,51 @@ function createWindow() {
     },
   });
   mainWindow = win;
+  const distDir = path.resolve(path.join(__dirname, "..", "dist"));
+  const isAllowedNavigation = (url) => {
+    if (typeof url !== "string" || !url) return false;
+    if (isDev) {
+      try { return new URL(url).origin === "http://127.0.0.1:5173"; }
+      catch { return false; }
+    }
+    if (!url.startsWith("file://")) return false;
+    try {
+      const decoded = decodeURIComponent(new URL(url).pathname).replace(
+        /^\/([A-Za-z]:)/,
+        "$1",
+      );
+      const relative = path.relative(distDir, path.resolve(decoded));
+      return (
+        relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative))
+      );
+    } catch {
+      return false;
+    }
+  };
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-attach-webview", (event) => {
+    event.preventDefault();
+    writeRuntimeLog("webview-blocked");
+  });
+  win.webContents.session.setPermissionRequestHandler(
+    (webContents, permission, callback) => {
+      try {
+        writeRuntimeLog("permission-denied", {
+          permission: String(permission),
+          url: String(webContents?.getURL?.() || "").slice(0, 200),
+        });
+      } catch {}
+      callback(false);
+    },
+  );
   win.webContents.on("will-navigate", (event, url) => {
-    const allowed =
-      url.startsWith("http://127.0.0.1:5173") || url.startsWith("file://");
-    if (!allowed) {
+    if (!isAllowedNavigation(url)) {
       event.preventDefault();
       writeRuntimeLog("navigation-blocked", { url: String(url).slice(0, 500) });
     }
   });
   win.webContents.on("will-redirect", (event, url) => {
-    const allowed =
-      url.startsWith("http://127.0.0.1:5173") || url.startsWith("file://");
-    if (!allowed) {
+    if (!isAllowedNavigation(url)) {
       event.preventDefault();
       writeRuntimeLog("navigation-blocked", { url: String(url).slice(0, 500) });
     }
@@ -1636,6 +1699,7 @@ ipcMain.handle(
         show: false,
         webPreferences: { sandbox: true },
       });
+      try {
       const documentHtml = `<!doctype html><html><head><meta charset="utf-8"><style>body{font:14px/1.7 Arial,sans-serif;max-width:820px;margin:40px auto;color:#263638}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ccd6d7;padding:8px}pre{background:#172426;color:#edf5f4;padding:16px;border-radius:8px;white-space:pre-wrap}img,svg{max-width:100%}</style></head><body><h1>${String(title || "").replace(/[<>]/g, "")}</h1>${content}</body></html>`;
       await printWindow.loadURL(
         `data:text/html;charset=utf-8,${encodeURIComponent(documentHtml)}`,
@@ -1645,7 +1709,11 @@ ipcMain.handle(
         pageSize: "A4",
       });
       await fs.writeFile(result.filePath, pdf);
-      printWindow.destroy();
+      } finally {
+        try {
+          if (!printWindow.isDestroyed()) printWindow.destroy();
+        } catch {}
+      }
     } else if (format === "html") {
       await fs.writeFile(
         result.filePath,
@@ -1684,7 +1752,7 @@ function runCli(command, args, input, { requestId, onChunk } = {}) {
     let stdout = "",
       stderr = "";
     const timer = setTimeout(() => {
-      child.kill();
+      killProcessTree(child);
       reject(new Error("AI 응답 시간이 초과되었습니다."));
     }, 180000);
     child.stdout.on("data", (d) => {
@@ -1974,7 +2042,7 @@ ipcMain.handle("ai-cancel", async (_, requestId) => {
   }
   const child = aiProcesses.get(requestId);
   if (child) {
-    child.kill();
+    killProcessTree(child);
     aiProcesses.delete(requestId);
     return true;
   }
@@ -2045,8 +2113,21 @@ app.on("child-process-gone", (_event, details) => {
     name: details.name || "",
   });
 });
+function stopAiProcesses() {
+  const pending = [];
+  for (const [requestId, child] of aiProcesses) {
+    try {
+      pending.push(killProcessTree(child));
+    } catch {}
+    aiProcesses.delete(requestId);
+  }
+  return Promise.all(pending);
+}
+
 app.on("before-quit", (event) => {
-  if (!codexAppServer || codexAppServer.status === "stopped") {
+  const codexRunning =
+    codexAppServer && codexAppServer.status !== "stopped";
+  if (!codexRunning && aiProcesses.size === 0) {
     writeRuntimeLog("before-quit");
     return;
   }
@@ -2054,14 +2135,24 @@ app.on("before-quit", (event) => {
     event.preventDefault();
     app.__ksnoteQuitting = true;
     writeRuntimeLog("before-quit");
-    Promise.resolve()
-      .then(() => codexAppServer.stop())
+    let stopTimer;
+    const deadline = new Promise((resolve) => { stopTimer = setTimeout(resolve, 8000); });
+    const bounded = Promise.race([
+      Promise.resolve().then(() => Promise.all([
+        stopAiProcesses(),
+        codexRunning ? codexAppServer.stop() : Promise.resolve(),
+      ])),
+      deadline,
+    ]);
+    Promise.resolve(bounded)
       .catch((error) => {
         writeRuntimeLog("before-quit-stop-failed", {
           message: error?.message || String(error),
         });
       })
       .finally(() => {
+        clearTimeout(stopTimer);
+        stopAiProcesses();
         app.quit();
       });
   }

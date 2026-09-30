@@ -2,35 +2,49 @@ const splitPipeRow = (value) => {
   const line = String(value || "").trim();
   if (!line.includes("|")) return null;
 
-  const cells = [];
-  let cell = "";
-  let delimiters = 0;
-  let codeTicks = 0;
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index];
-    if (character === "\\" && index + 1 < line.length) {
-      cell += character + line[index + 1];
-      index += 1;
-      continue;
-    }
-    if (character === "`") {
-      let run = 1;
-      while (line[index + run] === "`") run += 1;
-      cell += "`".repeat(run);
-      if (!codeTicks) codeTicks = run;
-      else if (codeTicks === run) codeTicks = 0;
-      index += run - 1;
-      continue;
-    }
-    if (character === "|" && !codeTicks) {
-      cells.push(cell.trim());
-      cell = "";
-      delimiters += 1;
-      continue;
-    }
-    cell += character;
+  // Match equal-length runs first, so a stray backtick does not invalidate
+  // earlier code spans (or hide the remaining column delimiters).
+  const runs = [...line.matchAll(/`+/g)];
+  const nextRun = new Map();
+  const closingRuns = new Map();
+  for (let index = runs.length - 1; index >= 0; index -= 1) {
+    const run = runs[index];
+    closingRuns.set(run.index, nextRun.get(run[0].length));
+    nextRun.set(run[0].length, run.index);
   }
-  cells.push(cell.trim());
+  const split = () => {
+    const cells = [];
+    let cell = "";
+    let delimiters = 0;
+    for (let index = 0; index < line.length; index += 1) {
+      const character = line[index];
+      if (character === "\\" && index + 1 < line.length) {
+        cell += character + line[index + 1];
+        index += 1;
+        continue;
+      }
+      if (character === "`") {
+        let run = 1;
+        while (line[index + run] === "`") run += 1;
+        const closing = closingRuns.get(index);
+        const end = closing === undefined ? index + run : closing + run;
+        cell += line.slice(index, end);
+        index = end - 1;
+        continue;
+      }
+      if (character === "|") {
+        cells.push(cell.trim());
+        cell = "";
+        delimiters += 1;
+        continue;
+      }
+      cell += character;
+    }
+    cells.push(cell.trim());
+    return { cells, delimiters };
+  };
+
+  const { cells, delimiters } = split();
 
   if (!delimiters) return null;
   if (!cells[0] && line.startsWith("|")) cells.shift();

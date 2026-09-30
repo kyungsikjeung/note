@@ -60,6 +60,23 @@ test("preserves escaped and inline-code pipes inside cells", () => {
   assert.match(html, /<code>A \| B<\/code>/);
 });
 
+test("keeps matched code pipes when another cell has an unmatched backtick", () => {
+  const result = normalizeMarkdownTablePaste(
+    "| A | B |\n| --- | --- |\n| `left | right` | stray ` text |",
+  );
+  assert.equal(result.dataRowCount, 1);
+  assert.match(marked.parse(result.markdown), /<code>left \| right<\/code>/);
+  assert.match(marked.parse(result.markdown), /<td>stray ` text<\/td>/);
+});
+
+test("treats an unmatched run as text before a different matched run", () => {
+  const result = normalizeMarkdownTablePaste(
+    "| A | B |\n| --- | --- |\n| stray ` text | ``left | right`` |",
+  );
+  assert.equal(result.dataRowCount, 1);
+  assert.match(marked.parse(result.markdown), /<code>left \| right<\/code>/);
+});
+
 test("preserves prose before and after a Markdown table", () => {
   const result = normalizeMarkdownTablePaste(
     [

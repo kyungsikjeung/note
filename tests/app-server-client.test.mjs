@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { EventEmitter } from "node:events";
+import vm from "node:vm";
 import { CodexAppServerClient } from "../electron/codex-app-server-client.cjs";
 
 const helper = path.join(
@@ -9,6 +13,85 @@ const helper = path.join(
   "helpers",
   "mock-app-server.cjs",
 );
+
+const loadWindowsClient = (spawn, timers = {}) => {
+  const require = createRequire(import.meta.url);
+  const module = { exports: {} };
+  vm.runInNewContext(
+    readFileSync(new URL("../electron/codex-app-server-client.cjs", import.meta.url), "utf8"),
+    {
+      module,
+      require: (name) => name === "child_process" ? { spawn } : require(name),
+      process: { platform: "win32" },
+      setTimeout,
+      clearTimeout,
+      ...timers,
+    },
+  );
+  return module.exports;
+};
+
+test("Windows tree termination stays asynchronous and shares concurrent requests", async () => {
+  let calls = 0;
+  let directKills = 0;
+  const killer = new EventEmitter();
+  const { killProcessTree } = loadWindowsClient(() => { calls += 1; return killer; });
+  const child = { pid: 123, kill() { directKills += 1; } };
+  let completed = false;
+  const stopping = killProcessTree(child);
+  stopping.then(() => { completed = true; });
+  assert.equal(killProcessTree(child), stopping);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(completed, false);
+  assert.equal(calls, 1);
+  assert.equal(directKills, 0);
+  killer.emit("close", 0);
+  await stopping;
+  assert.equal(completed, true);
+  assert.equal(directKills, 0);
+});
+
+test("Windows taskkill timeout falls back once without rejecting fire-and-forget callers", async () => {
+  let directKills = 0;
+  let killerKills = 0;
+  const killer = new EventEmitter();
+  killer.kill = () => { killerKills += 1; };
+  const { killProcessTree } = loadWindowsClient(() => killer, {
+    setTimeout: (callback, ms) => {
+      assert.equal(ms, 5000);
+      return setTimeout(callback, 10);
+    },
+  });
+  await killProcessTree({ pid: 123, kill() { directKills += 1; } });
+  killer.emit("error", new Error("late taskkill error"));
+  killer.emit("close", 1);
+  assert.equal(directKills, 1);
+  assert.equal(killerKills, 1);
+});
+
+test("stop waits for child exit even when a kill signal was already sent", async () => {
+  const killer = new EventEmitter();
+  const { CodexAppServerClient: WindowsClient } = loadWindowsClient(() => killer);
+  const client = new WindowsClient();
+  const child = new EventEmitter();
+  Object.assign(child, {
+    pid: 123, killed: false, exitCode: null, signalCode: null,
+    stdin: { end() {} },
+    kill() { this.killed = true; },
+  });
+  client.child = child;
+  client.status = "ready";
+  let completed = false;
+  const stopping = client.stop().then(() => { completed = true; });
+  killer.emit("error", new Error("taskkill unavailable"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(child.killed, true);
+  assert.equal(completed, false);
+  child.signalCode = "SIGTERM";
+  child.emit("close", null);
+  await stopping;
+  assert.equal(completed, true);
+});
 
 const startClient = async (args = []) => {
   const client = new CodexAppServerClient({

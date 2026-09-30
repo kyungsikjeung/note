@@ -1,22 +1,50 @@
 const { EventEmitter } = require("events");
-const { spawn, spawnSync } = require("child_process");
+const { spawn } = require("child_process");
 const readline = require("readline");
 
+const processTreeStops = new WeakMap();
+
 function killProcessTree(child) {
-  if (!child || child.killed) return;
+  if (!child) return Promise.resolve();
+  if (processTreeStops.has(child)) return processTreeStops.get(child);
+  if (child.killed) return Promise.resolve();
   const pid = child.pid;
-  if (process.platform === "win32" && Number.isFinite(pid)) {
+  // Never reject: timeout/error/cancel callers can safely fire and forget.
+  // taskkill must be asynchronous so the app's overall quit deadline can run.
+  const stopped = new Promise((resolve) => {
+    let killer;
+    let timer;
+    let settled = false;
+    const finish = (success) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!success) {
+        try { child.kill(); } catch {}
+      }
+      resolve();
+    };
+    if (process.platform !== "win32" || !Number.isFinite(pid)) {
+      finish(false);
+      return;
+    }
     try {
-      const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
         windowsHide: true,
-        timeout: 5000,
+        stdio: "ignore",
       });
-      if (!result.error && result.status === 0) return;
-    } catch {}
-  }
-  try {
-    child.kill();
-  } catch {}
+      killer.once("error", () => finish(false));
+      killer.once("close", (code) => finish(code === 0));
+      timer = setTimeout(() => {
+        try { killer.kill(); } catch {}
+        finish(false);
+      }, 5000);
+    } catch {
+      finish(false);
+    }
+  });
+  processTreeStops.set(child, stopped);
+  return stopped;
 }
 
 const REVIEW_DECISION_METHODS = new Set([
@@ -624,17 +652,18 @@ class CodexAppServerClient extends EventEmitter {
     this._clearPending(new Error("Codex App Server 연결을 중지했습니다."));
     if (child) {
       try { child.stdin.end(); } catch {}
-      killProcessTree(child);
+      await killProcessTree(child);
       await new Promise((resolve) => {
-        if (child.killed || child.exitCode !== null) return resolve();
-        const timer = setTimeout(resolve, 3000);
-        if (typeof timer.unref === "function") timer.unref();
-        child.once("close", () => {
+        if (child.exitCode !== null || child.signalCode !== null) return resolve();
+        const finish = () => {
           clearTimeout(timer);
+          child.removeListener("close", finish);
           resolve();
-        });
+        };
+        const timer = setTimeout(finish, 3000);
+        if (typeof timer.unref === "function") timer.unref();
+        child.once("close", finish);
       });
-      killProcessTree(child);
     }
     this.emit("status", this.snapshot());
   }

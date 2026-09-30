@@ -646,9 +646,11 @@ function ResizableImageView({ node, selected, updateAttributes }) {
     const up = () => {
       document.removeEventListener("pointermove", move);
       document.removeEventListener("pointerup", up);
+      document.removeEventListener("pointercancel", up);
     };
     document.addEventListener("pointermove", move);
     document.addEventListener("pointerup", up);
+    document.addEventListener("pointercancel", up);
   };
   return (
     <NodeViewWrapper
@@ -770,7 +772,9 @@ function ImageGenerationView({ node, selected, updateAttributes, deleteNode, edi
   const startGeneration = async (prompt = draft, { force = false } = {}) => {
     const cleanPrompt = String(prompt || "").trim();
     if (!cleanPrompt || (node.attrs.status === "running" && !force)) return;
-    const requestId = `imggen-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const requestId = typeof globalThis.crypto?.randomUUID === "function"
+      ? `imggen-${globalThis.crypto.randomUUID()}`
+      : `imggen-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     activeRequestRef.current = requestId;
     updateAttributes({
       prompt: cleanPrompt,
@@ -2289,8 +2293,14 @@ export default function RichDocumentEditor({
     });
   const aiTargetRef = useRef(null);
   const confirmResolveRef = useRef(null);
+  const confirmQueueRef = useRef([]);
   const confirmAsync = (message, { title = "확인", okLabel = "계속", cancelLabel = "취소" } = {}) =>
     new Promise((resolve) => {
+      const request = { title, message, okLabel, cancelLabel, resolve };
+      if (confirmResolveRef.current) {
+        confirmQueueRef.current.push(request);
+        return;
+      }
       confirmResolveRef.current = resolve;
       setConfirmRequest({ title, message, okLabel, cancelLabel });
     });
@@ -2298,6 +2308,16 @@ export default function RichDocumentEditor({
     setConfirmRequest(null);
     confirmResolveRef.current?.(value);
     confirmResolveRef.current = null;
+    const next = confirmQueueRef.current.shift();
+    if (next) {
+      confirmResolveRef.current = next.resolve;
+      setConfirmRequest({
+        title: next.title,
+        message: next.message,
+        okLabel: next.okLabel,
+        cancelLabel: next.cancelLabel,
+      });
+    }
   };
   const aiRequestRef = useRef(null);
   const writeAiDebugLog = (requestId, patch) => {
@@ -2429,6 +2449,11 @@ export default function RichDocumentEditor({
         modelContextWindow: 0,
       },
     }));
+  }), []);
+  useEffect(() => window.ksnoteAI?.onCompactionError?.(({ sessionId, message }) => {
+    setAiError(
+      message ? `컨텍스트 요약에 실패했습니다${sessionId ? ` (${sessionId})` : ""}: ${message}` : "컨텍스트 요약에 실패했습니다.",
+    );
   }), []);
   useEffect(() => {
     setActiveAiSessionId(
@@ -3021,7 +3046,9 @@ export default function RichDocumentEditor({
         event.preventDefault();
         const insertPos = view.state.selection.from;
         Promise.all(files.map(readFileBlock)).then((blocks) => {
-          editor?.commands.insertContentAt(insertPos, blocks);
+          if (view.isDestroyed || editor?.isDestroyed) return;
+          const safePos = Math.min(insertPos, view.state.doc.content.size);
+          editor?.commands.insertContentAt(safePos, blocks);
           editor?.commands.focus();
         });
         return true;
@@ -3033,9 +3060,13 @@ export default function RichDocumentEditor({
         const pos =
           view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ??
           view.state.selection.from;
-        Promise.all(files.map(readFileBlock)).then((blocks) =>
-          editor?.commands.insertContentAt(pos, blocks),
-        );
+        Promise.all(files.map(readFileBlock)).then((blocks) => {
+          if (view.isDestroyed || editor?.isDestroyed) return;
+          editor?.commands.insertContentAt(
+            Math.min(pos, view.state.doc.content.size),
+            blocks,
+          );
+        });
         return true;
       },
       handleKeyDown(view, event) {
@@ -3813,10 +3844,15 @@ export default function RichDocumentEditor({
   });
   const uploadImages = async (files) => {
     const images = await Promise.all(Array.from(files || []).map(readFileBlock));
+    if (!editor || editor.isDestroyed) return;
     if (images.length) {
-      if (pendingFilePos.current != null)
-        editor.commands.insertContentAt(pendingFilePos.current, images);
-      else editor.chain().focus().insertContent(images).run();
+      if (pendingFilePos.current != null) {
+        const safePos = Math.min(
+          pendingFilePos.current,
+          editor.state.doc.content.size,
+        );
+        editor.commands.insertContentAt(safePos, images);
+      } else editor.chain().focus().insertContent(images).run();
     }
     pendingFilePos.current = null;
     if (fileInput.current) fileInput.current.value = "";

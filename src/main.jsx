@@ -262,7 +262,7 @@ const backgroundDiagramBlockHtml = (operation) => {
     operation.operation === "replace-block" && operation.target?.blockId
       ? operation.target.blockId
       : createBackgroundBlockId();
-  return `<div data-type="${type}" data-code="${escapeAttribute(operation.code || "")}" data-block-id="${blockId}" data-mcp-operation-id="${operation.id}" data-render-status="verified"></div><p></p>`;
+  return `<div data-type="${type}" data-code="${escapeAttribute(operation.code || "")}" data-block-id="${escapeAttribute(blockId)}" data-mcp-operation-id="${escapeAttribute(operation.id)}" data-render-status="verified"></div><p></p>`;
 };
 const isBackgroundApplicableMcpOperation = (operation) => {
   const target = operation?.target || {};
@@ -1909,6 +1909,21 @@ function App() {
     setProjectId(targetProjectId);
     setNoteId(n.id);
   };
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.code === "KeyN"
+      ) {
+        event.preventDefault();
+        addNote();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [projectId]);
   const addProject = () =>
     setProjectDialog({ type: "create", name: "새 프로젝트" });
   const saveProject = () => {
@@ -3906,14 +3921,40 @@ function App() {
                     <div className="setting-row">
                       <span>
                         <b>PlantUML JAR</b>
-                        <small>로컬 Java 렌더링에 사용할 plantuml.jar 절대 경로</small>
+                        <small>로컬 Java 렌더링에 사용할 plantuml.jar (파일 선택으로만 지정)</small>
                       </span>
-                      <input
-                        className="path-input"
-                        value={prefs.plantumlJar || ""}
-                        placeholder="C:\\Tools\\plantuml.jar"
-                        onChange={(event) => setPrefs({ ...prefs, plantumlJar: event.target.value })}
-                      />
+                      <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <input
+                          className="path-input"
+                          value={prefs.plantumlJar || ""}
+                          placeholder="C:\Tools\plantuml.jar"
+                          readOnly
+                          title={prefs.plantumlJar || "파일 선택으로 지정하세요"}
+                        />
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              const picked = await window.ksnoteDiagram?.pickJar?.();
+                              if (picked?.jarPath)
+                                setPrefs({ ...prefs, plantumlJar: picked.jarPath });
+                            } catch (error) {
+                              window.alert(error?.message || "JAR 파일을 선택하지 못했습니다.");
+                            }
+                          }}
+                        >
+                          찾아보기
+                        </button>
+                        {prefs.plantumlJar ? (
+                          <button
+                            type="button"
+                            title="JAR 경로 지우기"
+                            onClick={() => setPrefs({ ...prefs, plantumlJar: "" })}
+                          >
+                            지우기
+                          </button>
+                        ) : null}
+                      </span>
                     </div>
                     <div className="setting-row">
                       <span>

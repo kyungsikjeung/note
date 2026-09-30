@@ -41,6 +41,11 @@ contextBridge.exposeInMainWorld('ksnoteAI', {
     ipcRenderer.on('ai-session-compacted', handler);
     return () => ipcRenderer.removeListener('ai-session-compacted', handler);
   },
+  onCompactionError: (listener) => {
+    const handler = (_, payload) => listener(payload);
+    ipcRenderer.on('ai-session-compaction-error', handler);
+    return () => ipcRenderer.removeListener('ai-session-compaction-error', handler);
+  },
 });
 contextBridge.exposeInMainWorld('ksnoteStorage', { load: () => ipcRenderer.invoke('storage-load'), save: (data) => ipcRenderer.invoke('storage-save', data), revisions: (noteId) => ipcRenderer.invoke('revision-list', noteId), revision: (id) => ipcRenderer.invoke('revision-get', id), saveAsset: (asset) => ipcRenderer.invoke('asset-save', asset) });
 contextBridge.exposeInMainWorld('ksnoteMcp', {

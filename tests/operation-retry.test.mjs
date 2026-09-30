@@ -11,11 +11,13 @@ test("retryable failures carry a Korean hint capped at 2 attempts", () => {
   ]) {
     const advice = operationRetryAdvice(code);
     assert.equal(advice.retryable, true);
+    assert.equal(advice.maxRetries, 2);
     assert.equal(advice.maxAttempts, 2);
     assert.match(advice.hint, /2회/);
   }
   const expired = operationRetryAdvice("operation_expired");
   assert.equal(expired.retryable, true);
+  assert.equal(expired.maxRetries, 2);
   assert.equal(expired.maxAttempts, 2);
   assert.match(expired.hint, /새 operation/);
 });
@@ -30,6 +32,7 @@ test("non-retryable failures tell Codex to stop looping", () => {
   ]) {
     const advice = operationRetryAdvice(code);
     assert.equal(advice.retryable, false);
+    assert.equal(advice.maxRetries, 2);
     assert.equal(advice.maxAttempts, 2);
     assert.equal(advice.hint, undefined);
   }

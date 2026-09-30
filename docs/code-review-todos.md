@@ -9,6 +9,11 @@
 
 체크박스를 완료 시 표시하고 커밋에 함께 반영한다.
 
+2026-09-30 합동 리뷰 보완: 비동기 프로세스 트리 종료로 전체 8초 예산 적용,
+진행 중 파일과 충돌하지 않도록 1시간 경과 임시파일만 정리,
+정상 코드 구간과 미닫힘 백틱이 섞인 표 행 보존, 이미지 업로드 후 destroyed 가드,
+draw.io iframe CSP 허용 및 개발 서버 내비게이션 origin 정확 비교.
+
 ## P0 — 데이터 손실 / 작동 불가
 
 - [x] **외부 콘텐츠 동기화** — `restoreRevision`, `importMarkdownFile` 후 에디터가 예전 내용 유지 →
@@ -27,20 +32,31 @@
 
 ## P1 — 보안 / 안정성
 
-- [ ] **codex 앱서버 좀비 프로세스** — 종료 시 cmd wrapper만 kill →
+- [x] **codex 앱서버 좀비 프로세스** — 종료 시 cmd wrapper만 kill →
       `taskkill /T /F` 트리킬 + `before-quit`에서 await 후 종료
       (`electron/main.cjs` + `electron/codex-app-server-client.cjs`)
-- [ ] **PlantUML jarPath + asset-save 확장자** — 악성 jar 저장 후 렌더 체인 차단:
+      → 전역 `child.kill()` 5곳을 `killProcessTree`로 교체, `before-quit`에서
+      `aiProcesses` 전량 트리킬 + `codexAppServer.stop()` 8초 bounded await
+- [x] **PlantUML jarPath + asset-save 확장자** — 악성 jar 저장 후 렌더 체인 차단:
       asset-save는 이미지 확장자 화이트리스트, jar 경로는 사용자 다이얼로그 선택만 허용
       (`electron/main.cjs` asset-save, resolvePlantUmlJarPath)
-- [ ] **CSP + 창 보호** — 빌드된 `index.html`에 CSP meta 추가,
+      → main 측 검증은 기존 충족 확인, 설정 UI 자유 텍스트 입력을
+      readOnly + 찾아보기(`plantuml-pick-jar`) 버튼으로 교체
+- [x] **CSP + 창 보호** — 빌드된 `index.html`에 CSP meta 추가,
       `setWindowOpenHandler` deny, `will-navigate` 차단 (`electron/main.cjs` createWindow)
-- [ ] **시크릿 파일 원자적 쓰기** — `writeFileAtomic` + 직렬화 라이터 미사용,
+      → CSP/deny/내비게이션 차단은 기존 충족 확인(dist 포함), 추가로
+      권한 요청 전면 거부 + `file://` 허용을 dist 경로로 축소 + webview 부착 거부
+- [x] **시크릿 파일 원자적 쓰기** — `writeFileAtomic` + 직렬화 라이터 미사용,
       크래시 시 저장된 공급자 API키 전체 유실 (`electron/model-providers.cjs` writeSecrets)
-- [ ] **적용 원본 HTML의 DB 저장** — 렌더 시점 차단은 완료됐지만 적용 시점에도 sanitize
+      → 직렬화+fsync 원자 쓰기는 기존 충족 확인, 시작 시 `.tmp` 스윕을
+      heartbeat/target/task-index/secrets/operations 디렉터리로 확대
+- [x] **적용 원본 HTML의 DB 저장** — 렌더 시점 차단은 완료됐지만 적용 시점에도 sanitize
       (`src/main.jsx` note_create 적용 경로)
-- [ ] **MCP 라우팅 effect 경쟁** — stale closure로 신규 편집 덮어쓰기, 매 렌더 1초 인터벌 재구독,
+      → `sanitizeAppliedHtml` 적용은 기존 충족 확인, 백그라운드 블록 HTML의
+      `blockId`/`mcpOperationId`에도 `escapeAttribute` 적용
+- [x] **MCP 라우팅 effect 경쟁** — stale closure로 신규 편집 덮어쓰기, 매 렌더 1초 인터벌 재구독,
       try/catch 없어 적용 중 `applying` 갇힘 (`src/main.jsx` routePendingOperation)
+      → 마운트 1회 + ref 스냅샷 + in-flight 가드 + catch→error-complete 기존 충족 확인
 
 ## P2 — 정확성 결함
 
@@ -70,16 +86,24 @@
 
 ## P3 — 소소한 결함
 
-- [ ] operation ID에 `crypto.randomUUID()` 사용 (동일 밀리초 충돌 방지)
-- [ ] `maxAttempts` → `maxRetries` 명명 정리 (문서 "2회 더" 의미와 정렬)
-- [ ] HTTP 인증 토큰 `crypto.timingSafeEqual` 상수시간 비교 + allowedHosts 미설정 경고
-      (`mcp/ksnote-server.mjs`)
-- [ ] atomic-write fsync 후 rename + 시작 시 `.tmp` 스윕 (`electron/atomic-write.cjs`)
-- [ ] PDF export `printWindow` try/finally (`electron/main.cjs`)
-- [ ] `ai-session-compaction-error` preload에 노출 (`electron/preload.cjs`)
-- [ ] Ctrl+N 구현 또는 힌트 제거 (`src/main.jsx`)
-- [ ] 파일 붙여넣기 stale position clamp (`RichDocumentEditor.jsx` readFileBlock)
-- [ ] `confirmAsync` 큐잉 — 두 번째 확인이 첫 대기자 버림 (`RichDocumentEditor.jsx`)
-- [ ] markdown-table-paste 파서의 짝 안 맞는 백틱 처리 (`src/markdown-table-paste.mjs`)
-- [ ] ResizableImageView `pointercancel` 정리 (`RichDocumentEditor.jsx`)
-- [ ] flushDatabase 실패 시 `writeRuntimeLog` 기록 (`electron/main.cjs`)
+- [x] operation ID에 `crypto.randomUUID()` 사용 (동일 밀리초 충돌 방지)
+      → `ksnote-server` 큐는 기존 적용 확인, 잔여 `imggen-` 2곳
+      (`electron/main.cjs`, `RichDocumentEditor.jsx`)을 randomUUID 우선으로 교체
+- [x] `maxAttempts` → `maxRetries` 명명 정리 (문서 "2회 더" 의미와 정렬)
+      → 정식 `maxRetries` + `maxAttempts` 별칭 유지 + AGENTS.md 문서화 + 테스트 기존 충족 확인
+- [x] HTTP 인증 토큰 `crypto.timingSafeEqual` 상수시간 비교 + allowedHosts 미설정 경고
+      (`mcp/ksnote-server.mjs`) → 기존 충족 확인
+- [x] atomic-write fsync 후 rename + 시작 시 `.tmp` 스윕 (`electron/atomic-write.cjs`)
+      → fsync/sweep 기존 충족 + P1에서 스윕 범위 확대 확인
+- [x] PDF export `printWindow` try/finally (`electron/main.cjs`) → 기존 충족 확인
+- [x] `ai-session-compaction-error` preload에 노출 (`electron/preload.cjs`)
+      → `onCompactionError` 기존 노출 확인
+- [x] Ctrl+N 구현 또는 힌트 제거 (`src/main.jsx`) → Ctrl/Command+N 새 노트 구현 확인
+- [x] 파일 붙여넣기 stale position clamp (`RichDocumentEditor.jsx` readFileBlock)
+      → `safePos` clamp + destroyed 가드 기존 충족 확인
+- [x] `confirmAsync` 큐잉 — 두 번째 확인이 첫 대기자 버림 (`RichDocumentEditor.jsx`)
+      → `confirmQueueRef` 대기열 기존 충족 확인
+- [x] markdown-table-paste 파서의 짝 안 맞는 백틱 처리 (`src/markdown-table-paste.mjs`)
+      → 미닫힘 백틱 시 일반 문자 폴백 기존 충족 확인
+- [x] ResizableImageView `pointercancel` 정리 (`RichDocumentEditor.jsx`) → 기존 충족 확인
+- [x] flushDatabase 실패 시 `writeRuntimeLog` 기록 (`electron/main.cjs`) → 기존 충족 확인

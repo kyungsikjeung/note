@@ -6,7 +6,20 @@ import test from "node:test";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { createSerializedFileWriter, renameWithRetry, writeFileAtomic } = require("../electron/atomic-write.cjs");
+const { createSerializedFileWriter, renameWithRetry, sweepAtomicTempFiles, writeFileAtomic } = require("../electron/atomic-write.cjs");
+
+test("startup sweep preserves fresh writes and only removes stale matching temps", async (context) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ksnote-sweep-"));
+  context.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, "ksnote.db");
+  const stale = `${filePath}.old.tmp`;
+  await Promise.all([stale, `${filePath}.active.tmp`, path.join(directory, "other.old.tmp")]
+    .map((name) => fs.writeFile(name, "snapshot")));
+  const oldTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  await fs.utimes(stale, oldTime, oldTime);
+  assert.equal(await sweepAtomicTempFiles(filePath), 1);
+  assert.deepEqual((await fs.readdir(directory)).sort(), ["ksnote.db.active.tmp", "other.old.tmp"]);
+});
 
 test("rename retries transient Windows file sharing errors", async () => {
   let calls = 0;

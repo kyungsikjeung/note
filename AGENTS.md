@@ -36,7 +36,7 @@ Health: `GET /health` (no auth).
    user approves in the KsNote app. Poll `operation_get` until
    `completed`, `error`, or `expired`.
 4. On `revision_conflict`: re-read with `note_get`, use the new revision, retry.
-5. Failed operations carry `retry{retryable,hint,maxAttempts}`. When retryable,
+5. Failed operations carry `retry{retryable,hint,maxRetries}` (`maxAttempts` alias kept). When retryable,
    fix the cause and retry at most 2 more times, then report the structured
    error instead of looping.
 

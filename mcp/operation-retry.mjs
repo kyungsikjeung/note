@@ -1,4 +1,5 @@
-export const OPERATION_MAX_ATTEMPTS = 2;
+export const OPERATION_MAX_RETRIES = 2;
+export const OPERATION_MAX_ATTEMPTS = OPERATION_MAX_RETRIES;
 
 const RETRY_HINTS = {
   revision_conflict:
@@ -16,6 +17,15 @@ const RETRY_HINTS = {
 export const operationRetryAdvice = (code) => {
   const hint = RETRY_HINTS[String(code || "")];
   if (!hint)
-    return { retryable: false, maxAttempts: OPERATION_MAX_ATTEMPTS };
-  return { retryable: true, hint, maxAttempts: OPERATION_MAX_ATTEMPTS };
+    return {
+      retryable: false,
+      maxRetries: OPERATION_MAX_RETRIES,
+      maxAttempts: OPERATION_MAX_RETRIES,
+    };
+  return {
+    retryable: true,
+    hint,
+    maxRetries: OPERATION_MAX_RETRIES,
+    maxAttempts: OPERATION_MAX_RETRIES,
+  };
 };

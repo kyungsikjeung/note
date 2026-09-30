@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -275,7 +276,9 @@ const notePayload = (data, note, target = {}, workspaceId) => {
 const queueOperation = async (operation) => {
   const paths = await resolvePaths();
   await fs.mkdir(paths.operationsDir, { recursive: true });
-  const id = `mcp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const id = typeof globalThis.crypto?.randomUUID === "function"
+    ? `mcp-${globalThis.crypto.randomUUID()}`
+    : `mcp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const filePath = path.join(paths.operationsDir, `${id}.json`);
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   const payload = {
@@ -1575,7 +1578,13 @@ const startHttpTransport = async () => {
   app.use("/mcp", (req, res, next) => {
     if (token) {
       const presented = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-      if (presented !== token) {
+      const expected = Buffer.from(token, "utf8");
+      const actual = Buffer.from(presented, "utf8");
+      const matches =
+        expected.length === actual.length &&
+        expected.length > 0 &&
+        crypto.timingSafeEqual(expected, actual);
+      if (!matches) {
         res.status(401).json({ error: "unauthorized" });
         return;
       }
@@ -1619,6 +1628,8 @@ const startHttpTransport = async () => {
   await new Promise((resolve) => app.listen(port, host, resolve));
   if (!token && host !== "127.0.0.1" && host !== "localhost")
     console.error("WARNING: KSNOTE_MCP_TOKEN is not set on a non-loopback listener.");
+  if (!allowedHosts.length && host !== "127.0.0.1" && host !== "localhost")
+    console.error("WARNING: KSNOTE_MCP_ALLOWED_HOSTS is not set on a non-loopback listener; Host/Origin checks are disabled.");
   console.error(`KsNote MCP server running on http://${host}:${port}/mcp`);
 };
 
