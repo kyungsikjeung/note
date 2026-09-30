@@ -1614,7 +1614,15 @@ function createWindow() {
     writeRuntimeLog("webview-blocked");
   });
   win.webContents.session.setPermissionRequestHandler(
-    (webContents, permission, callback) => {
+    (webContents, permission, callback, details) => {
+      if (
+        permission === "clipboard-sanitized-write" &&
+        webContents === win.webContents && details.isMainFrame &&
+        isAllowedNavigation(details.requestingUrl)
+      ) {
+        callback(true);
+        return;
+      }
       try {
         writeRuntimeLog("permission-denied", {
           permission: String(permission),
