@@ -1926,6 +1926,23 @@ function App() {
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [projectId]);
+  useEffect(() => {
+    // Ctrl+휠로 편집기 글자 크기 조절. Chromium 기본 줌과 충돌하지 않게
+    // preventDefault로 막고 prefs.fontSize(설정 UI와 같은 11~24px)에 반영한다.
+    const onWheel = (event) => {
+      if ((!event.ctrlKey && !event.metaKey) || !event.target?.closest?.(".mori-rich-content"))
+        return;
+      event.preventDefault();
+      const delta = event.deltaY > 0 ? -1 : 1;
+      setPrefs((prev) => {
+        const next = Math.min(24, Math.max(11, (Number(prev.fontSize) || 14) + delta));
+        if (next === (Number(prev.fontSize) || 14)) return prev;
+        return { ...prev, fontSize: next };
+      });
+    };
+    document.addEventListener("wheel", onWheel, { passive: false });
+    return () => document.removeEventListener("wheel", onWheel);
+  }, []);
   const addProject = () =>
     setProjectDialog({ type: "create", name: "새 프로젝트" });
   const saveProject = () => {
@@ -4000,7 +4017,10 @@ function App() {
                         onChange={(e) =>
                           setPrefs({
                             ...prefs,
-                            fontSize: Number(e.target.value),
+                            fontSize: Math.min(
+                              24,
+                              Math.max(11, Number(e.target.value) || 14),
+                            ),
                           })
                         }
                       />
@@ -5015,6 +5035,7 @@ function App() {
             <div>
               {[
                 ["새 페이지", "Ctrl + N"],
+                ["편집기 글자 크기", "Ctrl + 휠"],
                 ["실행 취소", "Ctrl + Z"],
                 ["다시 실행", "Ctrl + Y"],
                 ["오른쪽 표 열 추가", "Ctrl + Alt + →"],
