@@ -1,6 +1,6 @@
 {
   "name": "ksnote",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "A local-first smart workspace for notes, code, tables, images, and diagrams.",
   "main": "electron/main.cjs",
