@@ -1,12 +1,22 @@
 # KsNote × Codex MCP 연동 조사 및 100개 사용 시나리오
 
-작성일: 2026-07-15
+작성일: 2026-07-15 (2026-10-01 라벨·추적 보강)
+
+## 읽는 법
+
+- §7의 100개 시나리오는 그룹별 라벨을 갖는다: A `UC-SRCH-01`~15 (검색),
+  B `UC-READ-16`~30 (읽기), C `UC-CREATE-31`~45 (생성), D `UC-EDIT-46`~65 (편집),
+  E `UC-TASK-66`~75 (할 일), F `UC-BLOCK-76`~88 (블록·미디어),
+  G `UC-PROJ-89`~96 (이동·이력), H `UC-SAFE-97`~100 (안전·충돌).
+  번호는 표의 `#`와 일치한다 (A-1 = `UC-SRCH-01`).
+- 권장 흐름의 단계 추적은 아래 F-MCP-00 표를, 다이어그램 삽입 시나리오는
+  [F-MCP-01](../README.md) (`UC-MCP-01`)을 본다.
 
 ## 1. 결론
 
 KsNote는 **로컬 STDIO MCP 서버**를 제공하고 Codex가 그 서버를 실행하도록 구성하는 방식이 가장 적합하다. 다만 현재 노트 데이터가 Electron 렌더러의 `localStorage`에만 있으므로 MCP 프로세스가 직접 접근할 수 없다. 먼저 노트 저장소를 SQLite 또는 파일 기반 저장소로 옮기고, 에디터와 MCP 서버가 같은 Repository 계층을 사용해야 한다.
 
-권장 흐름은 다음과 같다.
+권장 흐름은 다음과 같다 (F-MCP-00).
 
 ```text
 사용자 → Codex → KsNote MCP Server(STDIO)
@@ -16,6 +26,13 @@ KsNote는 **로컬 STDIO MCP 서버**를 제공하고 Codex가 그 서버를 실
                          ↓
                 Electron 편집기 자동 갱신
 ```
+
+| 단계 | 흐름 | 코드 | 설명 |
+|---|---|---|---|
+| S1 | 사용자 → Codex 지시 | Codex 세션 (프롬프트) | `UC-SRCH`~`UC-SAFE` 100개 시나리오가 이 단계의 입력 예시다 |
+| S2 | Codex → MCP Server | `mcp/ksnote-server.mjs` (STDIO) | 초기 버전은 포트 없이 STDIO. 원격이 필요할 때만 Streamable HTTP (`docs/deploy.md` §3) |
+| S3 | Repository 접근 | SQLite + Assets + History | 에디터와 MCP가 같은 저장소를 본다. `localStorage`는 호환 백업일 뿐이다 |
+| S4 | 편집기 자동 갱신 | `src/main.jsx` (외부 변경 재동기화, `CR-P0-01`) | 다음 키입력이 복원본을 되돌리는 사고를 `contentSignature` 비교로 막는다 |
 
 초기 버전에서는 외부에 포트를 열지 않는 STDIO가 단순하고 안전하다. 이후 모바일이나 원격 접근이 필요할 때만 OAuth가 적용된 Streamable HTTP 서버를 추가한다.
 
@@ -183,7 +200,7 @@ Task List 블록의 할 일을 프로젝트, 완료 상태, 날짜, 담당자 �
 
 아래의 “선택 이유”는 Codex가 Tool Description을 읽고 어떤 도구를 고르는지를 나타낸다.
 
-### A. 작업 공간과 검색
+### A. 작업 공간과 검색 (`UC-SRCH-01`~15)
 
 | # | 사용자 요청 | 도구 흐름 | Description에 따른 선택 이유/결과 |
 |---:|---|---|---|
@@ -203,7 +220,7 @@ Task List 블록의 할 일을 프로젝트, 완료 상태, 날짜, 담당자 �
 | 14 | 삭제된 노트 말고 현재 노트만 검색해줘 | `note_search(includeTrash=false)` | 기본 활성 저장소 범위만 검색한다. |
 | 15 | 정확히 어떤 노트인지 모르겠는데 ESP32 회의 내용 | `note_search → 후보 제시` | 모호할 때 임의로 하나를 수정하지 않고 후보를 보여준다. |
 
-### B. 읽기와 질의응답
+### B. 읽기와 질의응답 (`UC-READ-16`~30)
 
 | # | 사용자 요청 | 도구 흐름 | Description에 따른 선택 이유/결과 |
 |---:|---|---|---|
@@ -223,7 +240,7 @@ Task List 블록의 할 일을 프로젝트, 완료 상태, 날짜, 담당자 �
 | 29 | 이 노트에 연결된 파일 목록 | `note_get(scope=assets)` | 노트의 asset 참조만 읽는다. |
 | 30 | 긴 문서 전체 말고 목차만 알려줘 | `note_get(scope=outline)` | heading outline만 반환해 토큰 사용을 줄인다. |
 
-### C. 노트와 프로젝트 생성
+### C. 노트와 프로젝트 생성 (`UC-CREATE-31`~45)
 
 | # | 사용자 요청 | 도구 흐름 | Description에 따른 선택 이유/결과 |
 |---:|---|---|---|
@@ -243,7 +260,7 @@ Task List 블록의 할 일을 프로젝트, 완료 상태, 날짜, 담당자 �
 | 44 | 코드 리뷰 결과를 별도 노트로 저장 | `note_create` | 채팅 답변이 아니라 사용자가 저장을 명시했으므로 생성한다. |
 | 45 | 같은 프로젝트에 영문 복사본 생성 | `note_get → note_create` | 원본 revision을 유지하며 번역본을 별도 생성한다. |
 
-### D. 최소 범위 편집과 변환
+### D. 최소 범위 편집과 변환 (`UC-EDIT-46`~65)
 
 | # | 사용자 요청 | 도구 흐름 | Description에 따른 선택 이유/결과 |
 |---:|---|---|---|
@@ -268,7 +285,7 @@ Task List 블록의 할 일을 프로젝트, 완료 상태, 날짜, 담당자 �
 | 64 | AI가 쓴 문단에 출처 표시 | `history_list → note_patch` | Codex 변경 block을 확인한 뒤 출처 metadata를 추가한다. |
 | 65 | 전체를 덮어쓰지 말고 변경점만 적용 | `note_get(revision) → note_patch(operations)` | Description의 최소 patch 원칙과 revision 검사를 따른다. |
 
-### E. 체크리스트와 업무
+### E. 체크리스트와 업무 (`UC-TASK-66`~75)
 
 | # | 사용자 요청 | 도구 흐름 | Description에 따른 선택 이유/결과 |
 |---:|---|---|---|
@@ -283,7 +300,7 @@ Task List 블록의 할 일을 프로젝트, 완료 상태, 날짜, 담당자 �
 | 74 | 완료 항목을 주간 보고서에 추가 | `task_query → note_search → note_patch` | 완료 task를 찾고 기존 보고서에 새 섹션으로 추가한다. |
 | 75 | 체크리스트를 일반 목록으로 바꿔줘 | `note_get(taskList) → note_patch` | checked 상태 손실을 경고하고 승인 후 변환한다. |
 
-### F. 표·코드·다이어그램·미디어
+### F. 표·코드·다이어그램·미디어 (`UC-BLOCK-76`~88)
 
 | # | 사용자 요청 | 도구 흐름 | Description에 따른 선택 이유/결과 |
 |---:|---|---|---|
@@ -301,7 +318,7 @@ Task List 블록의 할 일을 프로젝트, 완료 상태, 날짜, 담당자 �
 | 87 | 이미지 OCR 결과를 캡션으로 넣어줘 | `asset_get(ocr) → note_patch(image caption)` | OCR을 읽은 뒤 같은 이미지 블록에 캡션을 추가한다. |
 | 88 | 큰 GIF를 찾아 목록으로 알려줘 | `note_search(blockType=image) → asset_get(metadata)` | 파일을 수정하거나 압축하지 않고 크기만 보고한다. |
 
-### G. 프로젝트·이동·이력
+### G. 프로젝트·이동·이력 (`UC-PROJ-89`~96)
 
 | # | 사용자 요청 | 도구 흐름 | Description에 따른 선택 이유/결과 |
 |---:|---|---|---|
@@ -314,7 +331,7 @@ Task List 블록의 할 일을 프로젝트, 완료 상태, 날짜, 담당자 �
 | 95 | 변경 이력에서 요약 작업만 보여줘 | `history_list(instructionContains=요약)` | history metadata를 필터링한다. |
 | 96 | 이 노트를 언제 만들었지? | `note_get(metadata)` | 생성 시각만 읽고 history 전체를 불러오지 않는다. |
 
-### H. 안전·충돌·오류
+### H. 안전·충돌·오류 (`UC-SAFE-97`~100)
 
 | # | 사용자 요청 | 도구 흐름 | Description에 따른 선택 이유/결과 |
 |---:|---|---|---|

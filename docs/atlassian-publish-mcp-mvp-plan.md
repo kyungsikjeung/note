@@ -1,6 +1,15 @@
 # KsNote × Codex App Server × Atlassian Rovo 게시 MVP 조사 및 적용 계획
 
-작성일: 2026-07-29
+작성일: 2026-07-29 (2026-10-01 라벨·추적 보강)
+
+## 읽는 법
+
+- 사용자 시나리오는 `UC-PUB-01` (회의록 게시), 단계 추적은
+  [F-PUB-01](../README.md)을 본다. 이 문서의 Slice 4 시퀀스는 F-PUB-01의
+  S1~S6과 1:1로 대응한다 (UI = S1, Exporter = S2, Bridge→AppServer = S4,
+  Rovo→Atlassian = S5, DB = S6).
+- §7 완료 기준에는 `AC-PUB-01`… ID를 붙였다. 테스트·릴리스 검수에서 이 ID로
+  가부를 기록한다.
 
 ## 1. 조사 결론
 
@@ -364,19 +373,19 @@ CREATE TABLE external_publications (
 `status`는 `pending`, `succeeded`, `failed`, `cancelled`만 허용한다. 게시 실패도
 감사 목적으로 남기되 원격 ID가 없는 실패 행은 재시도와 연결한다.
 
-## 7. MVP 완료 기준
+## 7. MVP 완료 기준 (AC-PUB-01…)
 
-- [x] KsNote가 `codex app-server`와 초기화·종료를 안정적으로 수행한다.
-- [x] Codex 로그인과 Rovo OAuth 상태를 구조화된 값으로 표시한다.
-- [x] 도구명을 하드코딩하지 않고 런타임 schema에서 Confluence 생성 도구를 찾는다.
-- [x] 현재 노트를 유효한 ADF로 변환하고 schema 검증한다.
-- [x] 표의 구조·병합·열 너비가 Confluence에서 허용 범위 내 유지된다.
-- [x] 지원하지 않는 이미지가 게시 전에 명확히 표시된다.
-- [x] 사용자가 대상·본문·경고를 확인한 뒤에만 쓰기 호출이 시작된다.
-- [x] Codex/App MCP 승인 요청을 KsNote UI에서 승인 또는 거절할 수 있다.
-- [x] 성공한 페이지의 ID, URL, source revision, hash가 SQLite에 저장된다.
-- [x] 취소·거절·로그인 만료·권한 부족이 서로 다른 오류로 표시된다.
-- [x] 일반 AI 질문과 Rovo 조사 모드는 계속 외부 쓰기가 불가능하다.
+- [x] AC-PUB-01: KsNote가 `codex app-server`와 초기화·종료를 안정적으로 수행한다.
+- [x] AC-PUB-02: Codex 로그인과 Rovo OAuth 상태를 구조화된 값으로 표시한다.
+- [x] AC-PUB-03: 도구명을 하드코딩하지 않고 런타임 schema에서 Confluence 생성 도구를 찾는다.
+- [x] AC-PUB-04: 현재 노트를 유효한 ADF로 변환하고 schema 검증한다.
+- [x] AC-PUB-05: 표의 구조·병합·열 너비가 Confluence에서 허용 범위 내 유지된다.
+- [x] AC-PUB-06: 지원하지 않는 이미지가 게시 전에 명확히 표시된다.
+- [x] AC-PUB-07: 사용자가 대상·본문·경고를 확인한 뒤에만 쓰기 호출이 시작된다.
+- [x] AC-PUB-08: Codex/App MCP 승인 요청을 KsNote UI에서 승인 또는 거절할 수 있다.
+- [x] AC-PUB-09: 성공한 페이지의 ID, URL, source revision, hash가 SQLite에 저장된다.
+- [x] AC-PUB-10: 취소·거절·로그인 만료·권한 부족이 서로 다른 오류로 표시된다.
+- [x] AC-PUB-11: 일반 AI 질문과 Rovo 조사 모드는 계속 외부 쓰기가 불가능하다.
 
 ## 8. 후속 증분
 

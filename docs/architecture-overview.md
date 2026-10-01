@@ -1,11 +1,19 @@
 # KsNote 아키텍처 및 주요 동작 흐름
 
-작성일: 2026-09-28
+작성일: 2026-09-28 (2026-10-01 라벨·Flow 표 보강)
 
-이 문서는 현재 저장소의 실제 진입점과 모듈 경계를 기준으로, 글로만 설명하기
-어려운 구조와 실행 흐름을 Mermaid 다이어그램으로 정리한다. 다이어그램의 컴포넌트
-이름은 소스의 주요 파일·심볼 이름을 유지했으며, 직접 호출 또는 IPC 계약이 확인된
-관계만 실선으로 표현했다.
+## 읽는 법
+
+- 대상 독자: 이 저장소를 처음 만지는 개발자와 AI 에이전트. 사용자용 안내는
+  [README](../README.md) (시나리오 `UC-*`, Flow `F-*`)를 먼저 본다.
+- 라벨 체계 (전 문서 공통): `UC-영역-번호` 사용자 시나리오,
+  `F-영역-번호` Flow 다이어그램 ID, `S1…` 단계 번호,
+  `R1…` 관계 번호(§1), `CR-*` 코드 리뷰 항목.
+  Flow 표의 코드·테스트 컬럼으로 라벨→코드→테스트를 추적한다.
+- 이 문서는 저장소의 실제 진입점과 모듈 경계를 기준으로, 글로만 설명하기
+  어려운 구조와 실행 흐름을 Mermaid 다이어그램으로 정리한다. 다이어그램의 컴포넌트
+  이름은 소스의 주요 파일·심볼 이름을 유지했으며, 직접 호출 또는 IPC 계약이 확인된
+  관계만 실선으로 표현했다.
 
 ## 1. 시스템 컨텍스트
 
@@ -43,6 +51,18 @@ flowchart LR
   `contextBridge.exposeInMainWorld(...)`에 정의되어 있다.
 - 외부 Codex가 사용하는 로컬 서버는 `mcp/ksnote-server.mjs`의
   `StdioServerTransport`다.
+
+관계 Flow 표 (다이어그램 화살표와 `R1…` 순서가 일치한다):
+
+| 관계 | 흐름 | 코드 | 설명 |
+|---|---|---|---|
+| R1 | 편집·승인·내보내기 | `src/main.jsx`, `src/RichDocumentEditor.jsx` | 사용자가 직접 만지는 유일한 면이다. `UC-EDIT-01`, `UC-AI-01` 참고 ([README](../README.md)) |
+| R2 | contextBridge IPC | `electron/preload.cjs` (`exposeInMainWorld`) | 렌더러는 Node/Electron API를 직접 호출하지 않는다. IPC 채널 추가 시 preload·main·UI 세 곳을 함께 변경한다 |
+| R3 | storage-load/save | `electron/main.cjs` + `electron/atomic-write.cjs` | [F-EDIT-01](../README.md) S2~S4. 직렬화·원자 교체·revision 확정 |
+| R4 | STDIO tools/list·call | `mcp/ksnote-server.mjs` (`StdioServerTransport`) | Codex가 타는 진입점. [F-MCP-01](../README.md) S1~S3 |
+| R5 | 동일 DB 읽기·작업 큐 기록 | `mcp/ksnote-server.mjs` + SQLite snapshot | UI와 MCP가 같은 DB를 본다. 쓰기는 큐를 거쳐 앱 승인이 있어야 반영된다 |
+| R6 | JSON-RPC app-server | `electron/codex-app-server-client.cjs` | AI 실행·Rovo 조사의 통로. [F-AI-01](../README.md), [F-PUB-01](../README.md) |
+| R7 | 승인된 외부 도구 호출 | `electron/atlassian-rovo-service.cjs` | Codex 호스트의 Rovo 도구를 빌려 쓴다. KsNote가 직접 Atlassian API를 들고 있지 않다 |
 
 ## 2. 내부 컴포넌트와 의존 방향
 
@@ -127,7 +147,16 @@ sequenceDiagram
 `main.cjs`가 DB snapshot 및 revision 이력을 관리한다. 렌더러는 DB 파일을 직접 열지
 않고 preload IPC만 사용한다.
 
-## 4. Mermaid Smart Paste와 렌더링 흐름
+사용자 시나리오와 단계별 추적은 [F-EDIT-01](../README.md) (`UC-EDIT-01`)을 본다.
+위 시퀀스의 메시지는 F-EDIT-01의 S1~S5와 1:1로 대응한다
+(E→E transaction = S1, `ksnoteStorage.save` = S2, 직렬화·원자 교체 = S3,
+revision 확정 = S4, 저장 상태 갱신 = S5).
+
+## 4. Mermaid Smart Paste와 렌더링 흐름 (F-DIAG-01)
+
+시나리오 `UC-DIAG-01` (붙여넣기로 흐름도 넣기): 사용자가 Mermaid 코드펜스를
+복사해 본문에 붙여넣는다. 확인 UI에서 변환을 고르면 전용 블록이 생기고,
+소스를 고칠 때마다 미리보기가 따라온다.
 
 ```mermaid
 flowchart LR
@@ -148,7 +177,22 @@ flowchart LR
 같은 Mermaid source는 code key로 pending/cached 결과를 공유하며, 붙여넣은 블록에는
 커서가 이동할 수 있는 후행 문단을 함께 만든다.
 
+Flow 표 (다이어그램 노드 순서와 `S1…`가 일치한다):
+
+| 단계 | 흐름 | 코드 | 테스트 | 설명 |
+|---|---|---|---|---|
+| S1 | 클립보드 입력 감지 | `src/RichDocumentEditor.jsx` (paste handler, `confirmAsync` 확인 UI) | `editor-source-regressions` "Mermaid paste" | Mermaid fence·PlantUML·표·코드를 감지하고 적용 전 확인 UI를 띄운다 |
+| S2 | Mermaid fence 정규화 | `normalizeMermaidPaste` | `diagram-validation.test.mjs` | 코드펜스·언어 태그 변형을 표준 source로 정리한다 |
+| S3 | 선언 기본 검증 | `validateDiagramSource` (`mcp/diagram-validation.mjs`) | `diagram-validation.test.mjs` | 빈 다이어그램·펜스·미닫힘을 거부한다. 실패하면 일반 텍스트/오류 안내로 폴백 |
+| S4 | 전용 블록 + 후행 문단 | `editableDiagramWithTrailingParagraph("mermaidBlock")` | `editor-source-regressions` "trailing editable paragraph" | 블록 뒤에 커서가 갈 수 있는 편집 문단을 함께 만든다. PlantUML·draw.io도 같은 함수로 커서 점프를 막는다 |
+| S5 | 렌더 캐시 (200~300ms debounce) | `sharedMermaidRenders`, `src/mermaid-render-cache.mjs` | `mermaid-render-cache.test.mjs` | 동일 code는 pending/cached 결과를 공유해 중복 렌더를 없앤다 |
+| S6 | SVG → 블록 Preview + 분할 Preview | 블록 내부 Preview, 오른쪽 분할 Preview | E2E (`scripts/verify-diagram-e2e.mjs`) | 두 프리뷰가 같은 SVG를 소비한다. 렌더 실패는 블록에 오류로 표시된다 |
+
 ## 5. Codex MCP 다이어그램 삽입 흐름
+
+시나리오 `UC-MCP-01`의 내부 구현 관점이다. 사용자용 설명과 단계 추적은
+[F-MCP-01](../README.md)을 본다. 아래 시퀀스는 같은 흐름을 IPC·프로세스
+수준에서 펼친 것으로, S-번호는 F-MCP-01과 공유한다.
 
 ```mermaid
 sequenceDiagram
@@ -182,6 +226,14 @@ sequenceDiagram
 `expectedRevision`이 현재 revision과 다르면 자동 덮어쓰기를 차단한다. 쓰기 tool은
 `mcp/write-approval.mjs`의 승인 정책과 `mcp/ksnote-server.mjs`의 TTL 작업 큐를
 통과해야 한다.
+
+IPC 단계 대응 (F-MCP-01의 S-번호와 일치):
+
+| 단계 | 시퀀스 메시지 | IPC·코드 | 설명 |
+|---|---|---|---|
+| S4 | heartbeat / pending poll, 승인 대기 작업 | `mcp-operation-list`, heartbeat | 렌더러는 창이 가려져도 polling을 유지한다. `applying`은 만료 처리된다 |
+| S5 | `mcp-operation-approve` → `applying` 기록 | `electron/main.cjs` (`mcp-operation-approve`), `mcp/write-approval.mjs` | `pending → approved → applying` 전이는 메인 프로세스가 소유한다 |
+| S6 | block 삽입·렌더 검증 → `mcp-operation-complete` → SQLite 저장 | `src/main.jsx` + `src/RichDocumentEditor.jsx`, `data-render-status="verified"` | 완료는 SQLite 저장 확인 뒤에 반환된다. Codex는 `operation_get`으로 폴링한다 |
 
 ## 6. 관찰된 설계 특성
 

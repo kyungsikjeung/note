@@ -2,6 +2,38 @@
 
 두 산출물은 독립적으로 배포한다: **데스크톱 앱**(Electron)과 **MCP 서버**(Node).
 
+## 0. 릴리스 흐름 (F-REL-01)
+
+시나리오 `UC-REL-01` (정기 릴리스 내보내기): 담당자가 버전 범프 후 `v0.x.y`
+태그를 푸시하면, CI가 테스트→NSIS 빌드→Releases 업로드를 자동 수행한다.
+사용자는 다음 앱 시작 때 업데이트를 받는다. 수동 개입은 태그 푸시 한 번뿐이다.
+
+```mermaid
+sequenceDiagram
+    actor R as 릴리스 담당자
+    participant G as GitHub Actions
+    participant Rel as GitHub Releases
+    participant U as 사용자 앱
+    R->>G: v0.x.y 태그 푸시
+    G->>G: test 잡 (test:mvp)
+    G->>G: release 잡 (package:win-nsis)
+    G->>Rel: Setup exe + latest.yml 첨부
+    U->>Rel: 시작 시 latest.yml 확인
+    Rel-->>U: 신버전이면 다운로드·설치
+```
+
+| 단계 | 흐름 | 코드·설정 | 설명 |
+|---|---|---|---|
+| S1 | 버전 범프 + 태그 푸시 | `package.json` (`version`), `git tag v0.x.y` | `package-lock.json`도 함께 갱신된다 (`npm version patch`). 태그 형식은 `v*`로 고정 (워크플로 트리거) |
+| S2 | test 잡 | `.github/workflows/release.yml` (`test`), `npm run test:mvp` | 185개 회귀가 전부 통과해야 다음 잡으로 간다. 실패하면 릴리스 중단 |
+| S3 | release 잡 | `.github/workflows/release.yml` (`release`, `needs: test`), `GH_TOKEN = secrets.GITHUB_TOKEN` | 토큰은 GitHub가 자동 주입한다. 별도 발급 불필요. `windows-latest` runner에서 15~25분 소요 |
+| S4 | Releases 첨부 | `package.json` (`build.publish.provider=github`, `artifactName`) | Setup exe + `latest.yml` + blockmap이 해당 태그에 붙는다. 서명 인증서가 없어 SmartScreen 경고는 남는다 |
+| S5 | 시작 시 확인·설치 | `electron/main.cjs` (`app.isPackaged` 가드 안 `checkForUpdatesAndNotify`) | 바뀐 조각만 내려받아 덮어쓴다. 노트·설정(userData)은 건드리지 않는다 |
+
+읽을 때 포인트: S1(사람)→S2~S4(CI)→S5(앱 자동)의 분업이 핵심이다. 로컬에는
+`release/` 산출물이 남지 않아도 된다 (gitignore). 문제 생기면 Actions 로그가
+진실의 원천이다.
+
 ## 1. 데스크톱 앱 (Windows)
 
 | 산출물 | 용도 | 자동 업데이트 |

@@ -1,56 +1,242 @@
 # KsNote
 
-KsNote는 문서 작성, 표, 코드, 이미지, 다이어그램, 체크리스트와 AI 편집을 한 화면에서 다루는 로컬 우선 데스크톱 작업 공간입니다.
+로컬 우선 데스크톱 노트 작업 공간. 문서·표·코드·이미지·다이어그램·체크리스트를
+한 화면에서 직접 편집하고, AI와 코딩 에이전트가 안전하게 함께 쓰는 노트를 만든다.
 
-제품의 핵심 방향은 다음과 같습니다.
+## 이 앱은 무엇인가
 
-> 사용자는 형식과 문법을 외우지 않고 기록하며, 에디터와 AI가 내용을 이해하고 안전한 변경 단위로 편집한다.
+- **Windows 데스크톱 앱** (Electron + React/TipTap). 브라우저 탭이 아니라 프로그램으로 실행된다.
+- **로컬 우선**: 모든 노트는 PC 안의 SQLite에 저장된다. 클라우드 동기화가 없어도 동작하고, 인터넷이 끊겨도 편집·검색·AI 초안(로컬 CLI 기준)이 된다.
+- **직접 편집**: Markdown 문법을 외우지 않아도 된다. 문서는 최종 모양 그대로 보이고, 그 자리에서 고친다.
+- **AI와 함께 쓰기**: 구독형 Codex/Claude CLI를 연결해 노트를 질문·요약·편집한다. AI 결과는 항상 미리보기 후 승인해야 반영된다.
+- **에이전트 연동**: Codex 같은 코딩 에이전트가 MCP 서버를 통해 노트를 읽고 다이어그램을 삽입할 수 있다. 쓰기는 전부 사용자 승인을 거친다.
 
-이 문서는 프로그램 소개이면서, 다음 개발 세션에서 AI에게 그대로 전달할 수 있는 기능 요구사항과 MVP 체크리스트입니다.
+## 배경과 목표
 
-## 상태 표시 규칙
+기록은 흩어지기 쉽다. 회의록은 Confluence에, 할 일은 메신저에, 구조도는
+그림판에. AI에게 정리를 맡기면 편하지만, 문서 전체를 덮어쓰거나 출처 없는
+요약을 남기는 사고가 난다.
 
-- `[x]` 현재 소스에 구현되어 빌드 가능한 기능
-- `[ ]` 아직 구현되지 않았거나 UI만 있고 실제 동작 연결이 필요한 기능
-- 기능이 일부만 구현된 경우 구현된 부분과 남은 부분을 별도 항목으로 분리
+KsNote의 방향은 다음과 같다.
 
-## 실행 방법
+> 사용자는 형식과 문법을 외우지 않고 기록하며, 에디터와 AI가 내용을 이해하고
+> 안전한 변경 단위로 편집한다.
 
-요구 환경:
+그래서 이 앱은 세 가지를 약속한다. 로컬에 저장하고(클라우드 없이 동작),
+눈에 보이는 대로 고치며(문법 암기 없음), AI와 에이전트의 변경은
+검증·미리보기·승인을 거쳐 안전한 단위로만 반영한다.
 
-- Node.js
-- npm
-- Windows 우선 지원
-- AI 기능 사용 시 로그인된 Codex CLI 또는 Claude Code CLI
+## 주요 기능
+
+| 영역 | 내용 |
+|---|---|
+| 스마트 에디터 | WYSIWYG 문서, 표(병합·정렬·서식), 코드 블록(구문 강조·접기), 이미지(OCR·압축·캡션), 체크리스트(마감일·담당자·우선순위) |
+| Slash 명령 | 빈 문단에서 `/`를 눌러 표·코드·이미지·다이어그램·할 일을 커서 위치에 삽입 |
+| Smart Paste | 코드·JSON·표·Markdown·Mermaid를 붙여넣으면 전용 블록으로 자동 변환 (적용 전 확인 UI) |
+| 다이어그램 3종 | Mermaid(내장), PlantUML(번들 JAR + 로컬 Java), draw.io(diagrams.net embed). 실제 렌더 검증 후 저장 |
+| AI 편집·질문 | 선택 영역만 전달하는 최소 범위 편집, diff 미리보기, 실행 취소, 세션·Turn 이력 |
+| Rovo 조사 | Atlassian Rovo MCP로 Confluence·Jira를 읽기 전용으로 조회하고 출처付き 인용 블록으로 보관 |
+| Confluence 게시 | 현재 노트를 ADF로 변환해 새 Confluence 페이지로 게시 (이미지 업로드·기존 페이지 수정 제외) |
+| Codex MCP 연동 | `note_get`/`diagram_insert`/`text_insert` 등 Tool 제공. revision 충돌 검사 + 승인 큐 |
+| 저장·기록 | 자동 저장, revision history와 복원, Markdown/HTML/PDF/DOCX 내보내기 |
+
+## 사용 방법
+
+### 설치와 실행
+
+요구 환경: Node.js, npm, Windows 우선 지원. AI 기능은 로그인된 Codex CLI 또는
+Claude Code CLI가 필요하다.
 
 ```powershell
 npm install
-npm run dev
+npm run dev        # 개발 모드 (Vite + Electron 자동 재시작)
 ```
-
-개발 모드에서는 Vite가 렌더러를 갱신하고, `electron/main.cjs` 또는
-`electron/preload.cjs`가 변경되면 Electron 프로세스도 자동으로 재시작됩니다.
-따라서 IPC 채널을 추가하거나 변경해도 오래된 메인 프로세스가 남지 않습니다.
-
-프로덕션 빌드:
 
 ```powershell
 npm run build
-npm run desktop
+npm run desktop    # 프로덕션 빌드 실행
 ```
+
+릴리스 설치 파일은 태그 푸시(`v0.x.y`) 시 CI가 자동으로 만들며
+(`.github/workflows/release.yml`), 앱 시작 시 업데이트를 스스로 확인한다.
+
+### 기본 사용
+
+1. 왼쪽에서 프로젝트를 만들고 노트를 추가한다. 하위 페이지 트리도 지원한다.
+2. 본문에서 바로 타이핑한다. 제목·목록·표·코드는 `/` 명령이나 툴바로 넣는다.
+3. 표는 셀을 직접 고치고, `Ctrl+Alt+→/↓`로 행·열을 추가한다.
+4. 이미지는 붙여넣기·드래그로 넣고 핸들로 크기를 조절한다.
+5. 편집기 글자 크기는 `설정 → 편집기` 또는 본문에서 `Ctrl + 휠`로 바꾼다 (11~24px).
+6. 단축키 전체 목록은 앱 안 `… → 키보드 단축키`에서 본다.
+
+### AI와 함께 쓰기
+
+1. 노트를 열고 아래 `AI에게 요청`을 누른다.
+2. `노트 편집`: 일부만 고치려면 먼저 선택하고, `이 문단을 세 줄로 줄여줘`처럼 지시한다.
+   응답의 변경 전/후를 보고 `변경 적용`을 누른다.
+3. `질문`: `이 문서의 결정 사항은 뭐야?`처럼 묻고 답만 확인하거나 인용 블록으로 보관한다.
+4. `Rovo 조사`: Confluence·Jira 링크를 넣고 읽기 전용으로 조회한다. 쓰기 작업은 실행하지 않는다.
+5. 실행 중이면 `중지`로 취소할 수 있고, 취소된 요청은 자동 적용되지 않는다.
+
+### Codex에서 노트에 쓰기
+
+1. KsNote에서 `설정 → MCP 연결`에서 Codex 설정을 복사·등록한다.
+2. 페이지나 커서 위치의 타깃(`ksnote://page/...`)을 복사해 Codex에 전달한다.
+3. Codex가 `note_get`으로 revision을 확인하고 `diagram_insert` 등을 호출한다.
+4. KsNote에 미리보기와 함께 승인 요청이 뜬다. 승인해야만 반영된다.
+
+### Confluence에 게시하기
+
+1. 노트를 열고 게시(쓰기 모드)를 연다.
+2. 사이트·공간·상위 페이지와 ADF 미리보기·변환 경고를 확인한다.
+3. 최종 승인하면 Rovo가 새 페이지를 만들고 pageId·URL·revision이 저장된다.
+
+## 작동 방식
+
+라벨 읽는 법: `UC-영역-번호`는 사용자 시나리오, `F-영역-번호`는 Flow 다이어그램 ID,
+`S1…`은 단계 번호다. Flow 표의 코드·테스트 컬럼으로 라벨→코드→테스트를 추적한다.
+상세 구조는 [아키텍처](docs/architecture-overview.md), MCP 시나리오는
+[Codex 연동 조사](docs/codex-mcp-integration-research.md), 게시 계획은
+[Atlassian 게시 MVP](docs/atlassian-publish-mcp-mvp-plan.md)를 본다.
+
+### F-EDIT-01 — 편집 → 자동 저장
+
+시나리오 `UC-EDIT-01` (회의 중 실시간 기록): 사용자가 타이핑하는 동안 상단에
+`저장됨`이 뜨고, 앱을 껐다 켜도 내용이 그대로다. 저장 실패면 `저장 실패`와
+원인이 표시된다.
+
+```mermaid
+sequenceDiagram
+    actor U as 사용자
+    participant E as 에디터 (TipTap)
+    participant M as Electron 메인
+    participant DB as SQLite
+    U->>E: 타이핑·표·블록 편집
+    E->>M: 저장 요청 (IPC)
+    M->>DB: 스냅샷 원자 저장
+    DB-->>M: revision 확정
+    M-->>E: "저장됨" 표시
+```
+
+| 단계 | 흐름 | 코드 | 테스트 | 설명 |
+|---|---|---|---|---|
+| S1 | 타이핑·표·블록 편집 | `src/RichDocumentEditor.jsx` (TipTap transaction) | `editor-content.test.mjs` | 문서는 소스가 아니라 최종 모양으로 보이고 그 자리에서 수정된다 |
+| S2 | 저장 요청 (IPC) | `electron/preload.cjs` (`ksnoteStorage.save`) → `electron/main.cjs` (`storage-save`) | `editor-source-regressions` "save status" | 렌더러는 DB 파일을 직접 열지 않고 preload IPC로만 저장한다 (프로세스 경계 보안) |
+| S3 | 스냅샷 원자 저장 | `electron/atomic-write.cjs` (`createSerializedFileWriter`) | `atomic-write.test.mjs` | 동시 저장은 직렬화되고, 임시 파일에 완전히 쓴 뒤 원자 교체한다. Windows 공유 충돌은 제한 재시도 |
+| S4 | revision 확정 | `electron/main.cjs` (revision 이력) | `revision.test.mjs` | 매 저장이 새 revision을 만든다. 이후 모든 AI·MCP 쓰기의 충돌 기준이 된다 |
+| S5 | "저장됨" 표시 | `src/main.jsx` (`save-status`) | `editor-source-regressions` "save status" | 실패하면 `저장 실패`와 함께 `writeRuntimeLog`에 기록된다 |
+
+읽을 때 포인트: S3의 원자 저장이 전체 앱의 데이터 안전 바닥이다. MCP·AI 흐름의
+`revision_conflict`, history 복원도 전부 S4의 revision을 기준으로 동작한다.
+
+### F-AI-01 — AI 편집 → 승인 → 적용
+
+시나리오 `UC-AI-01` (선택 문단 세 줄 요약): 사용자가 긴 문단을 드래그하고
+`세 줄로 줄여줘`를 요청한다. 변경 전/후 diff를 보고 승인해야만 해당 문단이
+바뀐다. 승인 전에는 원문이 그대로다.
+
+```mermaid
+sequenceDiagram
+    actor U as 사용자
+    participant P as AI 패널
+    participant C as Codex App Server
+    participant E as 에디터
+    U->>P: 선택 영역 + "세 줄로 줄여줘"
+    P->>C: 최소 범위만 전달 (block ID + revision)
+    C-->>P: 변경 후보
+    P-->>U: 변경 전/후 미리보기
+    U->>P: 승인
+    P->>E: 해당 블록만 교체
+    E-->>U: Undo 가능 토스트
+```
+
+| 단계 | 흐름 | 코드 | 테스트 | 설명 |
+|---|---|---|---|---|
+| S1 | 선택 영역 + 지시 입력 | `src/RichDocumentEditor.jsx` (AI 패널, `aiTargetRef`) | `editor-source-regressions` "AI edits re-resolve" | 선택이 없으면 커서 주변 semantic block을 자동 캡처한다 |
+| S2 | 최소 범위만 전달 | `electron/codex-app-server-client.cjs` (`runTurn`, `getOrCreateThread`) | `app-server-client.test.mjs` | 전체 문서가 아니라 block ID + revision만 전달한다. 질문 모드는 `question`이라 교체가 일어나지 않는다 |
+| S3 | 변경 후보 생성 | Codex App Server (`thread/start`, `turn/start`) | `app-server-client.test.mjs` | 일반 편집은 `--ignore-user-config` 격리 + read-only sandbox로 실행된다 |
+| S4 | 변경 전/후 미리보기 | `mcp/operation-diff.mjs` (`buildOperationDiff`), `src/main.jsx` (`mcp-review-diff`) | `operation-diff.test.mjs` | diff 없이 적용되는 경로는 없다 |
+| S5 | 승인 → 해당 블록만 교체 | `src/RichDocumentEditor.jsx` (`resolveBlockNode`, `insertContentAt`) | `patch-schema.test.mjs` | 안정 block ID로 대상을 재탐색하므로, 그동안 다른 문단이 바뀌어도 엉뚱한 곳에 쓰지 않는다 |
+| S6 | Undo 가능 토스트 | `src/main.jsx` (완료 토스트, TipTap history Undo) | `write-approval.test.mjs` | 적용은 revision과 함께 저장돼 history에서 복구된다 |
+
+읽을 때 포인트: S2(최소 전달)→S4(미리보기)→S5(block ID 재탐색)가 "AI는 이해하고,
+편집은 안전한 단위로"라는 제품 원칙의 구현체다. S5에서 revision이 달라지면
+적용이 차단되고 재실행을 안내한다.
+
+### F-MCP-01 — Codex MCP 삽입 → 승인
+
+시나리오 `UC-MCP-01` (Codex에 구조도 맡기기): 사용자가 코드 변경점을 Codex에
+보여주고, 복사한 타깃(`ksnote://page/...`)에 "Mermaid 구조도를 넣어줘"라고 한다.
+KsNote에 실제 렌더 미리보기가 뜨고, 승인해야 삽입된다.
+
+```mermaid
+sequenceDiagram
+    actor U as 사용자
+    participant X as Codex
+    participant S as MCP 서버
+    participant K as KsNote 앱
+    U->>X: targetRef와 함께 "구조도 그려줘"
+    X->>S: note_get (revision 확인)
+    X->>S: diagram_insert (실제 렌더 검증)
+    S-->>X: awaiting_approval
+    K-->>U: 미리보기 + 승인 요청
+    U->>K: 승인
+    K->>K: 블록 삽입·SQLite 저장
+```
+
+| 단계 | 흐름 | 코드 | 테스트 | 설명 |
+|---|---|---|---|---|
+| S1 | targetRef 전달 | `mcp/target-ref.mjs` (`block`/`offset` 앵커, `revision`, `operation`) | `target-ref.test.mjs` | 명시적 `targetRef`가 현재 커서보다 항상 우선한다. 페이지만 지정하면 끝에 `append`된다 |
+| S2 | revision 확인 | `mcp/ksnote-server.mjs` (`note_get`) + `mcp/revision.mjs` | `revision.test.mjs` | 쓰기 도구는 `expectedRevision` 필수. 다르면 자동 덮어쓰지 않고 `revision_conflict` |
+| S3 | 렌더 검증 후 큐잉 | `mcp/diagram-validation.mjs`, `src/mermaid-render-cache.mjs`, `mcp/write-approval.mjs` | `diagram-validation`, `mermaid-render-cache`, `write-approval` 테스트 | Mermaid·PlantUML은 실제 SVG 렌더, draw.io는 SVG export 검증에 성공해야 큐에 들어간다 |
+| S4 | 승인 대기 | operation queue (`pending → approved → applying`) | `write-approval.test.mjs`, `operation-retry.test.mjs` | `awaiting_approval` + `operationId` 반환. 사용자 승인 없이 DB에 반영되지 않는다 |
+| S5 | 미리보기 + 승인 | `src/main.jsx` (승인 모달, `mcp-review-diff`) | `editor-source-regressions` "approval dialog" | AI 변경 전/후 실제 다이어그램 렌더와 원본 소스를 함께 보여준다 |
+| S6 | 블록 삽입·저장 | `src/main.jsx` (`findBlockById`, `data-render-status="verified"`) | `drawio-preview.test.mjs`, `note-html.test.mjs` | 완료는 SQLite 저장 확인 뒤에 반환된다. 토스트에서 즉시 Undo·대상 이동·소스 보기가 된다 |
+
+읽을 때 포인트: S3(검증)→S4(승인)→S6(저장 확인 후 완료)의 세 관문이 "Codex는
+제안하고, 앱이 검증하고, 사용자가 승인한다"는 신뢰 구조다. 100개 사용 시나리오는
+[Codex 연동 조사 §7](docs/codex-mcp-integration-research.md)을 본다.
+
+### F-PUB-01 — Confluence 게시
+
+시나리오 `UC-PUB-01` (회의록 게시): 사용자가 회의 노트를 다듬고 게시를 연다.
+사이트·공간·ADF 미리보기·이미지 제외 경고를 확인하고 승인하면 새 Confluence
+페이지가 생기고, 노트에 pageId·URL이 기록된다.
+
+```mermaid
+sequenceDiagram
+    actor U as 사용자
+    participant K as KsNote
+    participant R as Rovo MCP
+    participant C as Confluence
+    U->>K: 대상·ADF 미리보기·경고 확인
+    U->>K: 최종 승인
+    K->>R: 페이지 생성 호출
+    R->>C: 새 페이지 생성
+    C-->>R: pageId·URL
+    R-->>K: 결과 + 게시 이력 저장 (revision·hash)
+```
+
+| 단계 | 흐름 | 코드 | 테스트 | 설명 |
+|---|---|---|---|---|
+| S1 | 대상·본문·경고 확인 | `src/main.jsx` (`publish-modal`, `ksnote-open-publish`) | `editor-source-regressions` "publish dialog" | 사이트·공간·상위 페이지, 전송 범위와 revision, 제외 이미지를 먼저 보여준다 |
+| S2 | ADF 변환 + 검증 | `src/atlassian/export-adf.mjs` (`convertNoteToAdf`, `validateAdf`) | `export-adf.test.mjs` | AI 프롬프트 변환이 아니라 TipTap 구조를 순회하는 순수 함수다. 표 병합·열 너비 규칙 포함 |
+| S3 | 최종 승인 | `electron/main.cjs` (`atlassian-publish-approval`) | `atlassian-publish.test.mjs` | 사용자가 확인하기 전에는 쓰기 호출이 시작되지 않는다 |
+| S4 | Rovo 도구 호출 | `electron/codex-app-server-client.cjs` (`mcpServerToolCall`), `electron/atlassian-rovo-service.cjs` (`discoverRovoTools`) | `atlassian-rovo-service.test.mjs`, `app-server-client.test.mjs` | 도구명을 하드코딩하지 않고 런타임 schema에서 찾는다 |
+| S5 | 페이지 생성 | Atlassian Rovo MCP → Confluence | E2E (테스트 사이트) | MVP는 생성만 허용한다. 덮어쓰기·Jira·이미지 업로드는 제외 |
+| S6 | 이력 저장 | `electron/main.cjs` (`external_publications`: `pending`/`succeeded`/`failed`/`cancelled`) | `atlassian-publish.test.mjs` | 같은 revision·hash의 재요청은 idempotency 확인으로 중복 생성을 경고한다 |
+
+읽을 때 포인트: S2(결정적 변환)→S3(사용자 승인)→S4(Codex 앱 도구 승인)의 이중
+승인이 핵심이다. 취소·거절·로그인 만료·권한 부족은 서로 다른 오류로 표시된다.
+전체 계획은 [Atlassian 게시 MVP](docs/atlassian-publish-mcp-mvp-plan.md)를 본다.
 
 ## 현재 기술 구성
 
-- Electron
-- React
-- Vite
-- TipTap/ProseMirror
-- Mermaid
-- Highlight.js
-- 로컬 CLI 기반 Codex/Claude 실행
-- 현재 데이터 저장소: SQLite + 로컬 assets (`localStorage`는 호환 백업)
+- Electron, React, Vite, TipTap/ProseMirror, Mermaid, Highlight.js
+- 로컬 CLI 기반 Codex/Claude 실행 (`codex app-server` 장기 세션)
+- 데이터 저장소: SQLite + 로컬 assets (`localStorage`는 호환 백업)
 
-구조와 주요 실행 흐름은 [아키텍처 및 주요 동작 흐름](docs/architecture-overview.md)에서
+구조와 모듈 경계는 [아키텍처 및 주요 동작 흐름](docs/architecture-overview.md)에서
 Mermaid 다이어그램으로 확인할 수 있다.
 
 ---

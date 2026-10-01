@@ -1,6 +1,13 @@
 # MVP 3.1 — Codex 타깃 다이어그램 삽입 추적
 
-업데이트: 2026-08-02
+업데이트: 2026-08-02 (2026-10-01 라벨·추적 보강)
+
+## 읽는 법
+
+- 사용자 시나리오는 `UC-MCP-01` (Codex에 구조도 맡기기), 단계 추적은
+  [F-MCP-01](../README.md)을 본다. 아래 "예상 도구 흐름"의 6줄은 F-MCP-01의
+  S1~S6과 1:1로 대응한다.
+- P0~P3 체크 항목은 구현 추적용, 말미 완료 기준에는 `AC-MCP-01`… ID를 붙였다.
 
 ## 목표
 
@@ -20,15 +27,15 @@ KsNote target: ksnote://page/n1?block=<blockId>&offset=7&revision=<revision>&ope
 적합한 형식은 자동 선택하고 대상 노트에 삽입해줘.
 ```
 
-예상 도구 흐름:
+예상 도구 흐름 ([F-MCP-01](../README.md) 단계와 대응):
 
 ```text
-코드 변경점 조사
-→ note_get(targetRef)
-→ diagram_capabilities
+코드 변경점 조사                                        (S1: 타깃과 함께 요청)
+→ note_get(targetRef)                                 (S2: revision 확인)
+→ diagram_capabilities                                (S2: 포맷 선택 근거)
 → 다이어그램 소스 생성
-→ diagram_insert(expectedRevision)
-→ operation_get
+→ diagram_insert(expectedRevision)                    (S3: 렌더 검증 후 큐잉)
+→ operation_get                                       (S4~S6: 승인 대기→삽입·저장 폴링)
 → completed 또는 구조화된 오류 보고
 ```
 
@@ -127,16 +134,16 @@ ksnote://page/<pageId>?block=<blockId>&offset=<offset>&toBlock=<blockId>&toOffse
 - [x] 완료 토스트의 편집기 history 기반 즉시 되돌리기 액션
 - [x] 완료 토스트의 대상 이동·소스 보기 액션
 
-## 테스트 및 완료 기준
+## 테스트 및 완료 기준 (AC-MCP-01…)
 
-- [x] target reference round-trip 단위 테스트
-- [x] MCP 도구 목록에 `diagram_capabilities`가 노출된다.
-- [x] 페이지 ID만 전달하면 대상 페이지 끝에 삽입된다.
-- [x] 클릭 타깃을 전달하면 해당 block/offset에 삽입된다.
-- [x] 편집 후 revision이 달라지면 `revision_conflict`가 반환된다.
-- [x] 다른 페이지 타깃이면 해당 페이지로 이동해 삽입된다.
-- [x] 세 포맷 모두 operation이 `completed`와 `renderVerified=true`로 종료된다.
-- [x] 패키지 `KsNote.exe`의 외부 MCP STDIO transport E2E를 통과한다.
+- [x] AC-MCP-01: target reference round-trip 단위 테스트 (`target-ref.test.mjs`)
+- [x] AC-MCP-02: MCP 도구 목록에 `diagram_capabilities`가 노출된다.
+- [x] AC-MCP-03: 페이지 ID만 전달하면 대상 페이지 끝에 삽입된다.
+- [x] AC-MCP-04: 클릭 타깃을 전달하면 해당 block/offset에 삽입된다.
+- [x] AC-MCP-05: 편집 후 revision이 달라지면 `revision_conflict`가 반환된다.
+- [x] AC-MCP-06: 다른 페이지 타깃이면 해당 페이지로 이동해 삽입된다.
+- [x] AC-MCP-07: 세 포맷 모두 operation이 `completed`와 `renderVerified=true`로 종료된다.
+- [x] AC-MCP-08: 패키지 `KsNote.exe`의 외부 MCP STDIO transport E2E를 통과한다.
 
 ### 2026-08-02 draw.io 전체화면 확대 회귀
 
