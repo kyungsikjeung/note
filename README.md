@@ -40,6 +40,67 @@ KsNote의 방향은 다음과 같다.
 | Codex MCP 연동 | `note_get`/`diagram_insert`/`text_insert` 등 Tool 제공. revision 충돌 검사 + 승인 큐 |
 | 저장·기록 | 자동 저장, revision history와 복원, Markdown/HTML/PDF/DOCX 내보내기 |
 
+## 시스템 컨텍스트
+
+KsNote는 로컬 우선이지만, AI·게시·렌더링을 위해 외부 시스템과 연동한다.
+모든 외부 연동은 **읽기 우선·승인 후 쓰기**가 원칙이다.
+
+```mermaid
+flowchart LR
+    subgraph Local["KsNote (PC)"]
+        App["Electron 앱\n(에디터·SQLite)"]
+        MCP["KsNote MCP 서버\n(STDIO / HTTP)"]
+    end
+    Codex["Codex CLI/\nApp Server"]
+    Claude["Claude Code CLI /\nOpenRouter·OpenAI 호환 API"]
+    Rovo["Atlassian Rovo MCP\n(Confluence·Jira)"]
+    DrawIo["diagrams.net\nembed"]
+    Fonts["Google Fonts /\nTesseract 언어 데이터"]
+    Agent["외부 AI 에이전트\n(Codex 등)"]
+
+    App <-->|자식 프로세스·HTTPS| Codex
+    App <-->|자식 프로세스·HTTPS| Claude
+    Codex <-->|MCP tool/call| Rovo
+    App <-->|iframe·SVG export| DrawIo
+    App -->|폰트·OCR 데이터| Fonts
+    Agent <-->|MCP Tool| MCP
+    MCP <-->|DB 공유| App
+```
+
+### 인바운드 (외부가 KsNote를 부를 때)
+
+| 호출자 | 경로 | 용도 |
+|---|---|---|
+| 외부 AI 에이전트 | `node mcp/ksnote-server.mjs` (STDIO) | `note_get`·`note_search` 읽기, `diagram_insert`·`text_insert` 등 쓰기 요청 |
+| 외부 AI 에이전트 | `http://127.0.0.1:3000/mcp` (Streamable HTTP, Bearer 토큰) | 위와 동일. 토큰·허용 호스트 검사, loopback 외 리스너는 경고 |
+| Electron 렌더러 | preload IPC 브리지 | 에디터↔메인 프로세스 (저장·MCP 큐·AI·게시·이미지 생성) |
+
+쓰기 요청은 전부 `pending → 승인 → applying → completed/error` 큐를 거치며,
+`expectedRevision` 충돌 검사 + 사용자 승인이 없으면 절대 반영되지 않는다.
+
+### 아웃바운드 (KsNote가 외부를 부를 때)
+
+| 대상 | 방식 | 용도 | 네트워크 |
+|---|---|---|---|
+| Codex CLI / App Server | 로컬 자식 프로세스(stdio JSON-RPC) | AI 편집·질문·요약, 이미지 생성, Rovo 경유 게시 | 불필요 (로그인 제외) |
+| Claude Code CLI | 로컬 자식 프로세스 | AI 편집·질문의 대체 경로 | 불필요 (로그인 제외) |
+| OpenRouter·OpenAI 호환 API | HTTPS | 모델 목록·API 직접 호출 | 필요 |
+| Atlassian Rovo MCP | Codex `mcpServer/tool/call` 경유 | Jira·Confluence 읽기 전용 조회, Confluence 새 페이지 게시 | 필요 |
+| diagrams.net embed | HTTPS iframe + SVG export | draw.io 편집·미리보기·검증 | 필요 |
+| 로컬 Java + plantuml.jar | 자식 프로세스 (`java -jar`) | PlantUML SVG 렌더 (JAR는 파일 선택 다이얼로그로만 지정) | 불필요 |
+| Google Fonts / Tesseract | HTTPS | UI 폰트, 이미지 OCR 한영 데이터 | 필요 (최초 1회) |
+| GitHub Releases | electron-updater | 앱 업데이트 확인 | 필요 |
+
+### 아웃풋 (밖으로 나가는 결과물)
+
+| 출력 | 형식 | 비고 |
+|---|---|---|
+| 파일 내보내기 | Markdown·HTML·PDF·DOCX | 저장 다이얼로그로 저장 |
+| 다이어그램 저장 | SVG·PNG 파일, PNG 클립보드 복사 | Mermaid·PlantUML·draw.io |
+| Confluence 게시 | ADF 새 페이지 (pageId·URL·revision 기록) | 이미지 업로드·기존 페이지 수정 제외 |
+| MCP 작업 결과 | `completed/error` + `appliedRevision` | `operation_get` 폴링으로 확인 |
+| AI 기록 | 세션·Turn·감사 로그 (SQLite), 런타임 로그 (`logs/runtime.jsonl`) | 로컬 보관 |
+
 ## 사용 방법
 
 ### 설치와 실행
