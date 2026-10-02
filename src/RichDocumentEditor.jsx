@@ -32,6 +32,10 @@ import {
   validateDiagramSource,
 } from "../mcp/diagram-validation.mjs";
 import { normalizeMarkdownTablePaste } from "./markdown-table-paste.mjs";
+import {
+  protectDiagramCodes,
+  restoreDiagramCodes,
+} from "./diagram-sanitize.mjs";
 import { blockAnchorAt, getActiveBlockContext, resolveAIEditRange, resolveBlockNode, resolveBlockOffset } from "./block-anchor.mjs";
 import {
   calloutBlock,
@@ -366,30 +370,14 @@ const normalizeRichHtml = (
     ? stripped
     : marked.parse(stripped);
   const protectedDocument = new DOMParser().parseFromString(source, "text/html");
-  const protectedDiagramCodes = new Map();
-  protectedDocument
-    .querySelectorAll(
-      'div[data-type="mermaid"][data-code],div[data-type="plantuml"][data-code],div[data-type="drawio"][data-code]',
-    )
-    .forEach((element, index) => {
-      const token = `__KSNOTE_DIAGRAM_CODE_${index}__`;
-      protectedDiagramCodes.set(token, element.getAttribute("data-code") || "");
-      element.setAttribute("data-code", token);
-    });
+  const protectedDiagramCodes = protectDiagramCodes(protectedDocument, "DIAGRAM_CODE");
   const sanitized = DOMPurify.sanitize(protectedDocument.body.innerHTML, {
     USE_PROFILES: { html: true },
     FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form"],
     FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover"],
   });
   const documentNode = new DOMParser().parseFromString(sanitized, "text/html");
-  documentNode
-    .querySelectorAll(
-      'div[data-type="mermaid"][data-code],div[data-type="plantuml"][data-code],div[data-type="drawio"][data-code]',
-    )
-    .forEach((element) => {
-      const code = protectedDiagramCodes.get(element.getAttribute("data-code"));
-      if (code !== undefined) element.setAttribute("data-code", code);
-    });
+  restoreDiagramCodes(documentNode, protectedDiagramCodes);
   if (!allowImages)
     documentNode.querySelectorAll("img").forEach((image) => image.remove());
   documentNode.querySelectorAll("li").forEach((item) => {
@@ -929,6 +917,7 @@ function PlantUmlView({ node, selected, updateAttributes, deleteNode, editor, ge
   const [mode, setMode] = useState("preview");
   const [svg, setSvg] = useState("");
   const [error, setError] = useState("");
+  const [viewerOpen, setViewerOpen] = useState(false);
   const sourceEmpty = !String(node.attrs.code || "").trim();
   useEffect(() => {
     if (!String(node.attrs.code || "").trim()) {
@@ -953,6 +942,15 @@ function PlantUmlView({ node, selected, updateAttributes, deleteNode, editor, ge
         <nav>{["source", "split", "preview"].map((item) => <button key={item} className={mode === item ? "active" : ""} onClick={() => setMode(item)}>{item[0].toUpperCase() + item.slice(1)}</button>)}</nav>
         <button title="소스 복사" onClick={() => navigator.clipboard.writeText(node.attrs.code)}><Copy /></button>
         <DiagramImageCopyButton svg={svg} />
+        <button
+          type="button"
+          title="전체화면으로 보기"
+          aria-label="전체화면으로 보기"
+          disabled={!svg}
+          onClick={() => setViewerOpen(true)}
+        >
+          <Maximize2 />
+        </button>
         <button title="SVG 저장" onClick={() => downloadSvg(svg, "plantuml-diagram")}><Download /></button>
         <button title="PNG 저장" onClick={() => downloadSvg(svg, "plantuml-diagram", "png")}>PNG</button>
         <button title="Mermaid 블록으로 변환" onClick={() => replaceDiagramNode(editor, getPos, "mermaidBlock", plantUmlToMermaid(node.attrs.code))}>→ Mermaid</button>
@@ -962,6 +960,13 @@ function PlantUmlView({ node, selected, updateAttributes, deleteNode, editor, ge
         {mode !== "preview" && <textarea value={node.attrs.code} onChange={(event) => updateAttributes({ code: event.target.value })} spellCheck="false" />}
         {mode !== "source" && <div className="mermaid-preview">{sourceEmpty ? <p>PlantUML 소스를 입력하세요.</p> : error ? <p>{error}</p> : <div dangerouslySetInnerHTML={{ __html: svg }} />}</div>}
       </div>
+      {viewerOpen && svg && (
+        <DiagramSvgFullscreenViewer
+          svg={svg}
+          title="PlantUML Preview"
+          onClose={() => setViewerOpen(false)}
+        />
+      )}
     </NodeViewWrapper>
   );
 }
@@ -1056,7 +1061,8 @@ const verifyDiagramBeforeInsert = async (format, code, _operationId, preferences
 function MermaidView({ node, selected, updateAttributes, deleteNode, editor, getPos }) {
   const [mode, setMode] = useState("preview"),
     [error, setError] = useState(""),
-    [svgOutput, setSvgOutput] = useState("");
+    [svgOutput, setSvgOutput] = useState(""),
+    [viewerOpen, setViewerOpen] = useState(false);
   const renderSeq = useRef(0);
   const id = useId().replace(/:/g, "");
   const sourceEmpty = !String(node.attrs.code || "").trim();
@@ -1135,6 +1141,15 @@ function MermaidView({ node, selected, updateAttributes, deleteNode, editor, get
           <Copy />
         </button>
         <DiagramImageCopyButton svg={svgOutput} />
+        <button
+          type="button"
+          title="전체화면으로 보기"
+          aria-label="전체화면으로 보기"
+          disabled={!svgOutput}
+          onClick={() => setViewerOpen(true)}
+        >
+          <Maximize2 />
+        </button>
         <button title="SVG 저장" onClick={() => downloadSvg(svgOutput, "mermaid-diagram")}><Download /></button>
         <button title="PNG 저장" onClick={() => downloadSvg(svgOutput, "mermaid-diagram", "png")}>PNG</button>
         <button title="PlantUML 블록으로 변환" onClick={() => replaceDiagramNode(editor, getPos, "plantUmlBlock", mermaidToPlantUml(node.attrs.code))}>→ PlantUML</button>
@@ -1156,6 +1171,13 @@ function MermaidView({ node, selected, updateAttributes, deleteNode, editor, get
           </div>
         )}
       </div>
+      {viewerOpen && svgOutput && (
+        <DiagramSvgFullscreenViewer
+          svg={svgOutput}
+          title="Mermaid Preview"
+          onClose={() => setViewerOpen(false)}
+        />
+      )}
     </NodeViewWrapper>
   );
 }
@@ -1436,6 +1458,231 @@ function DrawIoFullscreenViewer({ src, onClose }) {
                 height: event.currentTarget.naturalHeight || 1,
               })
             }
+            style={{
+              transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${effectiveScale})`,
+            }}
+          />
+        </div>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
+const parseSvgNaturalSize = (svg) => {
+  const source = String(svg || "");
+  const viewBox =
+    /viewBox\s*=\s*["']\s*[\d.]+\s+[\d.]+\s+([\d.]+)\s+([\d.]+)\s*["']/i.exec(source);
+  if (viewBox) {
+    const width = Number(viewBox[1]);
+    const height = Number(viewBox[2]);
+    if (width > 0 && height > 0) return { width, height };
+  }
+  const widthAttr = /<svg\b[^<>]*\bwidth\s*=\s*["']([\d.]+)/i.exec(source);
+  const heightAttr = /<svg\b[^<>]*\bheight\s*=\s*["']([\d.]+)/i.exec(source);
+  const width = Number(widthAttr?.[1]);
+  const height = Number(heightAttr?.[1]);
+  if (width > 0 && height > 0) return { width, height };
+  return { width: 1200, height: 800 };
+};
+
+function DiagramSvgFullscreenViewer({ svg, title, onClose }) {
+  const titleId = useId();
+  const helpId = useId();
+  const dialogRef = useRef(null);
+  const viewportRef = useRef(null);
+  const closeRef = useRef(onClose);
+  const dragRef = useRef(null);
+  const [zoomMode, setZoomMode] = useState("fit");
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
+  closeRef.current = onClose;
+
+  const naturalSize = parseSvgNaturalSize(svg);
+  const availableWidth = Math.max(1, viewportSize.width - 48);
+  const availableHeight = Math.max(1, viewportSize.height - 48);
+  // Vector SVG scales losslessly, so fit may upscale (capped at max zoom).
+  const fitScale = naturalSize.width && naturalSize.height
+    ? clampDrawioZoom(
+        Math.min(
+          availableWidth / naturalSize.width,
+          availableHeight / naturalSize.height,
+        ),
+      )
+    : 1;
+  const effectiveScale = zoomMode === "fit" ? fitScale : zoom;
+  const canPan = zoomMode === "manual" && effectiveScale > fitScale + 0.001;
+
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.setTimeout(() => dialogRef.current?.focus(), 0);
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeRef.current?.();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = [...dialogRef.current.querySelectorAll("button:not(:disabled)")];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return undefined;
+    const measure = () =>
+      setViewportSize({ width: viewport.clientWidth, height: viewport.clientHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+
+  const applyManualZoom = (value, anchor = null) => {
+    const nextZoom = clampDrawioZoom(value);
+    setPan((current) => {
+      if (nextZoom <= fitScale + 0.001) return { x: 0, y: 0 };
+      if (!anchor || !viewportRef.current || effectiveScale <= 0) return current;
+      const bounds = viewportRef.current.getBoundingClientRect();
+      const relativeX = anchor.x - (bounds.left + bounds.width / 2) - current.x;
+      const relativeY = anchor.y - (bounds.top + bounds.height / 2) - current.y;
+      const ratio = nextZoom / effectiveScale;
+      return {
+        x: current.x + relativeX * (1 - ratio),
+        y: current.y + relativeY * (1 - ratio),
+      };
+    });
+    setZoomMode("manual");
+    setZoom(nextZoom);
+  };
+
+  const fitToScreen = () => {
+    setZoomMode("fit");
+    setPan({ x: 0, y: 0 });
+  };
+
+  const handleWheel = (event) => {
+    event.preventDefault();
+    const direction = event.deltaY > 0 ? -1 : 1;
+    applyManualZoom(stepDrawioZoom(effectiveScale, direction, 0.15), {
+      x: event.clientX,
+      y: event.clientY,
+    });
+  };
+
+  const startPan = (event) => {
+    if (!canPan || event.button !== 0) return;
+    event.preventDefault();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic accessibility and regression events may not own pointer capture.
+    }
+    dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+    setDragging(true);
+  };
+  const movePan = (event) => {
+    if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - dragRef.current.x;
+    const deltaY = event.clientY - dragRef.current.y;
+    dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+    setPan((current) => ({ x: current.x + deltaX, y: current.y + deltaY }));
+  };
+  const stopPan = (event) => {
+    if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    setDragging(false);
+    try {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    } catch {
+      // The pointer can already be released when the viewer loses focus.
+    }
+  };
+
+  return createPortal(
+    <div
+      className="drawio-viewer-backdrop"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) closeRef.current?.();
+      }}
+    >
+      <section
+        ref={dialogRef}
+        className="drawio-viewer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={helpId}
+        tabIndex={-1}
+      >
+        <header>
+          <div>
+            <strong id={titleId}>{title}</strong>
+            <small id={helpId}>휠로 확대·축소하고, 확대된 화면을 드래그해 이동할 수 있습니다.</small>
+          </div>
+          <nav aria-label="다이어그램 확대 도구">
+            <button
+              type="button"
+              title="축소"
+              aria-label="축소"
+              onClick={() => applyManualZoom(stepDrawioZoom(effectiveScale, -1))}
+            >
+              <Minus />
+            </button>
+            <output aria-live="polite">{Math.round(effectiveScale * 100)}%</output>
+            <button
+              type="button"
+              title="확대"
+              aria-label="확대"
+              onClick={() => applyManualZoom(stepDrawioZoom(effectiveScale, 1))}
+            >
+              <Plus />
+            </button>
+            <button type="button" onClick={() => applyManualZoom(1)}>100%</button>
+            <button
+              type="button"
+              className={zoomMode === "fit" ? "active" : ""}
+              onClick={fitToScreen}
+            >
+              화면 맞춤
+            </button>
+            <button type="button" title="닫기 (Esc)" aria-label="닫기" onClick={onClose}>
+              <X />
+            </button>
+          </nav>
+        </header>
+        <div
+          ref={viewportRef}
+          className={`drawio-viewer-viewport ${canPan ? "can-pan" : ""} ${dragging ? "is-dragging" : ""}`}
+          onWheel={handleWheel}
+          onPointerDown={startPan}
+          onPointerMove={movePan}
+          onPointerUp={stopPan}
+          onPointerCancel={stopPan}
+        >
+          <div
+            className="svg-viewer-canvas"
+            dangerouslySetInnerHTML={{ __html: svg }}
             style={{
               transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${effectiveScale})`,
             }}
@@ -1968,11 +2215,14 @@ export function RichPreview({ html, className = "" }) {
     const host = root.current;
     if (!host) return;
     let live = true;
-    host.innerHTML = DOMPurify.sanitize(html || "", {
+    const rawDocument = new DOMParser().parseFromString(html || "", "text/html");
+    const previewDiagramCodes = protectDiagramCodes(rawDocument, "PREVIEW_CODE");
+    host.innerHTML = DOMPurify.sanitize(rawDocument.body.innerHTML, {
       USE_PROFILES: { html: true },
       FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form"],
       FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover"],
     });
+    restoreDiagramCodes(host, previewDiagramCodes);
     const diagrams = Array.from(host.querySelectorAll('[data-type="mermaid"]'));
     const queuedMermaid = [];
     diagrams.forEach((element, index) => {

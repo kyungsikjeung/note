@@ -6,6 +6,10 @@ import mermaid from "mermaid";
 import hljs from "highlight.js";
 import { buildKsNoteTargetRef } from "../mcp/target-ref.mjs";
 import { plainTextToParagraphHtml } from "./editor-content.mjs";
+import {
+  protectDiagramCodes,
+  restoreDiagramCodes,
+} from "./diagram-sanitize.mjs";
 import { findBlockById, findDiagramBlock } from "../mcp/note-html.mjs";
 import { buildOperationDiff } from "../mcp/operation-diff.mjs";
 import { contentRevision, isRevisionConflict, noteRevision } from "../mcp/revision.mjs";
@@ -233,11 +237,22 @@ const escapeAttribute = (value) => String(value || "").replace(/&/g, "&amp;").re
 // <script>/<iframe>/이벤트 핸들러 등이 저장 경로로 우회하지 못하게 한다.
 const sanitizeAppliedHtml = (html) => {
   try {
-    return DOMPurify.sanitize(String(html || ""), {
+    // data-code에 "-->"가 들어간 다이어그램(mermaid 화살표 등)은 sanitize가
+    // 속성을 통째로 날리므로 토큰으로 보호했다가 복원한다.
+    const rawDocument = new DOMParser().parseFromString(
+      String(html || ""),
+      "text/html",
+    );
+    const protectedCodes = protectDiagramCodes(rawDocument, "APPLIED_CODE");
+    const sanitized = DOMPurify.sanitize(rawDocument.body.innerHTML, {
       USE_PROFILES: { html: true },
       FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form"],
       FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover"],
     });
+    if (!protectedCodes.size) return sanitized;
+    const documentNode = new DOMParser().parseFromString(sanitized, "text/html");
+    restoreDiagramCodes(documentNode, protectedCodes);
+    return documentNode.body.innerHTML;
   } catch {
     return String(html || "").replace(/<script[\s\S]*?<\/script\s*>/gi, "");
   }

@@ -14,7 +14,7 @@
     "mcp:ksnote": "node mcp/ksnote-server.mjs",
     "test:mvp-target": "node --test tests/target-ref.test.mjs",
     "test:mvp-diagrams": "node --test tests/diagram-validation.test.mjs",
-    "test:mvp": "node --test tests/target-ref.test.mjs tests/diagram-validation.test.mjs tests/markdown-table-paste.test.mjs tests/editor-content.test.mjs tests/editor-source-regressions.test.mjs tests/mermaid-render-cache.test.mjs tests/last-location.test.mjs tests/font-size-selection.test.mjs tests/patch-schema.test.mjs tests/operation-retry.test.mjs tests/block-anchor.test.mjs tests/note-search.test.mjs tests/history.test.mjs tests/export-adf.test.mjs tests/task-index.test.mjs tests/drawio-preview.test.mjs tests/write-approval.test.mjs tests/note-html.test.mjs tests/package-config.test.mjs tests/atomic-write.test.mjs tests/rovo-read.test.mjs tests/atlassian-publish.test.mjs tests/app-server-client.test.mjs tests/atlassian-rovo-service.test.mjs tests/operation-diff.test.mjs tests/asset-repository.test.mjs tests/revision.test.mjs",
+    "test:mvp": "node --test tests/target-ref.test.mjs tests/diagram-validation.test.mjs tests/markdown-table-paste.test.mjs tests/editor-content.test.mjs tests/editor-source-regressions.test.mjs tests/diagram-sanitize.test.mjs tests/mermaid-render-cache.test.mjs tests/last-location.test.mjs tests/font-size-selection.test.mjs tests/patch-schema.test.mjs tests/operation-retry.test.mjs tests/block-anchor.test.mjs tests/note-search.test.mjs tests/history.test.mjs tests/export-adf.test.mjs tests/task-index.test.mjs tests/drawio-preview.test.mjs tests/write-approval.test.mjs tests/note-html.test.mjs tests/package-config.test.mjs tests/atomic-write.test.mjs tests/rovo-read.test.mjs tests/atlassian-publish.test.mjs tests/app-server-client.test.mjs tests/atlassian-rovo-service.test.mjs tests/operation-diff.test.mjs tests/asset-repository.test.mjs tests/revision.test.mjs",
     "verify:mcp-diagrams": "node scripts/verify-diagram-e2e.mjs",
     "package:win": "npm run build && electron-builder --win --dir",
     "package:win-nsis": "npm run build && electron-builder --win nsis",
@@ -102,5 +102,21 @@
     "electron-builder": "^26.15.3",
     "nodemon": "^3.1.14",
     "wait-on": "latest"
-  }
+  },
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kyungsikjeung/note.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/kyungsikjeung/note/issues"
+  },
+  "homepage": "https://github.com/kyungsikjeung/note#readme"
 }

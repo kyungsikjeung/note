@@ -91,6 +91,15 @@ test("diagram blocks default to preview and copy rendered PNG images", () => {
   assert.match(editorSource, /"이미지 복사"/);
 });
 
+test("Mermaid and PlantUML diagrams open in a fullscreen zoom viewer", () => {
+  assert.match(editorSource, /function DiagramSvgFullscreenViewer\(\{ svg, title, onClose \}\)/);
+  assert.match(editorSource, /<DiagramSvgFullscreenViewer/);
+  assert.match(editorSource, /title="Mermaid Preview"/);
+  assert.match(editorSource, /title="PlantUML Preview"/);
+  assert.match(editorSource, /aria-label="전체화면으로 보기"/);
+  assert.match(editorSource, /parseSvgNaturalSize\(svg\)/);
+});
+
 test("AI panel offers an automatic diagram format choice in edit mode", () => {
   assert.match(
     editorSource,
@@ -314,6 +323,17 @@ test("AI results expand for long answers", () => {
 test("toasts stay readable", () => {
   assert.match(appSource, /\? 8000 : 4500/);
   assert.doesNotMatch(appSource, /\? 8000 : 2600/);
+});
+
+test("diagram codes survive sanitize via token protection", () => {
+  assert.match(editorSource, /from "\.\/diagram-sanitize\.mjs"/);
+  assert.match(editorSource, /protectDiagramCodes\(protectedDocument/);
+  assert.match(editorSource, /restoreDiagramCodes\(documentNode/);
+  assert.match(editorSource, /protectDiagramCodes\(rawDocument/);
+  assert.match(editorSource, /restoreDiagramCodes\(host/);
+  assert.match(appSource, /from "\.\/diagram-sanitize\.mjs"/);
+  assert.match(appSource, /protectDiagramCodes\(rawDocument/);
+  assert.match(appSource, /restoreDiagramCodes\(documentNode/);
 });
 
 test("MCP server deploys over Streamable HTTP with auth", async () => {
